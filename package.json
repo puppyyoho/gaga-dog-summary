@@ -1,10 +1,10 @@
 {
   "name": "gaga-dog-summary",
-  "version": "0.1.16",
+  "version": "0.1.17",
   "private": true,
   "type": "module",
   "scripts": {
-    "check": "node --check index.js && node --check generation-client.js && node --check chat-state.js && node --check memory-core.js && node --check prompts.js",
+    "check": "node --check index.js && node --check generation-client.js && node --check chat-state.js && node --check memory-core.js && node --check context-budget.js && node --check prompts.js",
     "test": "node --test tests/*.test.mjs"
   }
 }

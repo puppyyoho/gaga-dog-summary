@@ -27,6 +27,12 @@ import {
     renderFactsForProse,
 } from './prompts.js';
 import { generateWithFallback, readableGenerationError } from './generation-client.js';
+import {
+    chooseSummaryBatchPlan,
+    FALLBACK_BATCH_TOKENS,
+    resolveContextWindowTokens,
+    resolveOutputReserveTokens,
+} from './context-budget.js';
 
 const EXTENSION_NAME = 'gaga-dog-summary';
 const DISPLAY_NAME = '嘎嘎小狗总结';
@@ -34,13 +40,13 @@ const SETTINGS_KEY = 'gagaDogSummary';
 const INJECTION_ID = `${EXTENSION_NAME}:memory`;
 const PANEL_LOGO_URL = new URL('./assets/gaga-dog-logo.png', import.meta.url).href;
 const FLOATING_LOGO_URL = new URL('./assets/gaga-dog-floating.png', import.meta.url).href;
-const VERSION = '0.1.16';
-const SETTINGS_VERSION = 3;
-const INTERNAL_BATCH_TOKENS = 60000;
+const VERSION = '0.1.17';
+const SETTINGS_VERSION = 4;
 
 const DEFAULT_SETTINGS = {
     showFloatingButton: true,
     floatingPosition: null,
+    panelPosition: null,
     autoSummarize: true,
     autoHide: true,
     collapseHidden: true,
@@ -117,6 +123,12 @@ function getSettings(ctx = getContext()) {
         && Number.isFinite(Number(floatingPosition.x))
         && Number.isFinite(Number(floatingPosition.y))
         ? { x: Math.round(Number(floatingPosition.x)), y: Math.round(Number(floatingPosition.y)) }
+        : null;
+    const panelPosition = result.panelPosition;
+    result.panelPosition = panelPosition
+        && Number.isFinite(Number(panelPosition.x))
+        && Number.isFinite(Number(panelPosition.y))
+        ? { x: Math.round(Number(panelPosition.x)), y: Math.round(Number(panelPosition.y)) }
         : null;
     ctx.extensionSettings[SETTINGS_KEY] = result;
     if (migratedDefault) {
@@ -655,16 +667,54 @@ function planEligibleRange(ctx) {
     });
 }
 
-function planBatchRanges(ctx, goalEnd = Number.POSITIVE_INFINITY) {
+function planBatchRanges(ctx, goalEnd = Number.POSITIVE_INFINITY, batchTokens = FALLBACK_BATCH_TOKENS) {
     const settings = getSettings(ctx);
     const chatState = getChatState(ctx);
     const messages = getMessages(ctx);
     return rangesForSummaryBacklog(messages, chatState, {
         keepMessages: settings.keepMessages,
-        targetTokens: INTERNAL_BATCH_TOKENS,
+        targetTokens: Math.max(0, Number(batchTokens || 0)),
     }).filter(range => range.start <= goalEnd).map(range => (
         range.end > goalEnd ? makeSourceRange(messages, range.start, goalEnd) : range
     ));
+}
+
+async function countTokensForPlan(ctx, text) {
+    try {
+        if (typeof ctx?.getTokenCountAsync === 'function') {
+            const count = Number(await ctx.getTokenCountAsync(String(text || '')));
+            if (Number.isFinite(count) && count > 0) return Math.round(count);
+        }
+    } catch (error) {
+        console.warn(`[${DISPLAY_NAME}] 酒馆 tokenizer 计数失败，使用本地估算`, error);
+    }
+    return tokenEstimate(text);
+}
+
+async function buildWorkflowBatchPlan(ctx, goalRange, reason) {
+    const settings = getSettings(ctx);
+    const chatState = getChatState(ctx);
+    const sourceText = formatMessages(getMessages(ctx), goalRange.start, goalRange.end);
+    const factRequest = buildFactPrompt({
+        messages: sourceText,
+        currentState: formatState(chatState),
+        openThreads: formatThreads(chatState),
+        customPrompts: settings.prompts,
+    });
+    const fullFactPrompt = [factRequest.systemPrompt, factRequest.prompt].filter(Boolean).join('\n\n');
+    const [sourceTokens, promptTokens] = await Promise.all([
+        countTokensForPlan(ctx, sourceText),
+        countTokensForPlan(ctx, fullFactPrompt),
+    ]);
+    return chooseSummaryBatchPlan({
+        reason,
+        contextTokens: resolveContextWindowTokens(ctx),
+        outputTokens: resolveOutputReserveTokens(ctx),
+        sourceTokens,
+        promptTokens,
+        autoTriggerTokens: settings.triggerTokens,
+        fallbackTokens: FALLBACK_BATCH_TOKENS,
+    });
 }
 
 function shouldAutoSummarize(ctx) {
@@ -732,8 +782,20 @@ async function runSummaryWorkflow(ctx, options = {}) {
 
     const reason = String(resumeTask?.reason || options.reason || 'manual');
     const workflowId = String(savedWorkflow.id || `workflow_${Date.now()}_${simpleHash(`${goalStart}:${goalEnd}`)}`);
+    const hasSavedPlan = Number.isFinite(Number(savedWorkflow.batchTokens)) && Boolean(savedWorkflow.strategy);
+    const batchPlan = hasSavedPlan
+        ? {
+            strategy: savedWorkflow.strategy,
+            batchTokens: Math.max(0, Number(savedWorkflow.batchTokens || 0)),
+            contextTokens: Math.max(0, Number(savedWorkflow.contextTokens || 0)),
+            sourceTokens: Math.max(1, Number(savedWorkflow.sourceTokens || 1)),
+            promptTokens: Math.max(1, Number(savedWorkflow.promptTokens || 1)),
+            usablePromptTokens: Math.max(0, Number(savedWorkflow.usablePromptTokens || 0)),
+        }
+        : await buildWorkflowBatchPlan(ctx, { start: goalStart, end: goalEnd }, reason);
+    const batchTokens = batchPlan.batchTokens;
     let batchIndex = Math.max(0, Number(savedWorkflow.batchIndex || 0));
-    const initialRanges = planBatchRanges(ctx, goalEnd);
+    const initialRanges = planBatchRanges(ctx, goalEnd, batchTokens);
     let totalBatches = Math.max(batchIndex + 1, Number(savedWorkflow.totalBatches || 0), batchIndex + initialRanges.length);
     let pending = resumeTask;
     let lastEnd = Number(getChatState(ctx).lastProcessedIndex ?? goalStart - 1);
@@ -741,7 +803,7 @@ async function runSummaryWorkflow(ctx, options = {}) {
     runtime.workflowActive = true;
     try {
         while (true) {
-            const planned = planBatchRanges(ctx, goalEnd);
+            const planned = planBatchRanges(ctx, goalEnd, batchTokens);
             let range = pending?.range || planned[0] || null;
             if (!range || range.start > goalEnd) break;
             if (range.end > goalEnd) range = makeSourceRange(getMessages(ctx), range.start, goalEnd);
@@ -752,9 +814,11 @@ async function runSummaryWorkflow(ctx, options = {}) {
                 goalEnd,
                 batchIndex,
                 totalBatches,
+                ...batchPlan,
             };
             runtime.workflow = workflowInfo;
-            setStatus(`正在自动处理第 ${batchIndex + 1}/${totalBatches} 批 · 消息 ${range.start}–${range.end} · 总目标 ${goalStart}–${goalEnd}`);
+            const mode = batchPlan.strategy === 'single' ? '上下文充足，整段处理' : batchPlan.strategy === 'adaptive-split' ? '超出上下文，自适应分批' : batchPlan.strategy === 'auto-threshold' ? '自动阈值分批' : '安全回退分批';
+            setStatus(`${mode} · 第 ${batchIndex + 1}/${totalBatches} 批 · 消息 ${range.start}–${range.end} · 总目标 ${goalStart}–${goalEnd}`);
             refreshUi();
             const result = await summarizeRange(ctx, range, settings, reason, pending, workflowInfo);
             if (!result) return null;
@@ -770,8 +834,9 @@ async function runSummaryWorkflow(ctx, options = {}) {
             return null;
         }
         runtime.lastError = '';
-        runtime.lastSuccess = `${reason === 'manual' ? '手动全量总结' : '自动总结'}完成 · 消息 ${goalStart}–${goalEnd} · 自动处理 ${batchIndex} 批`;
-        notify('success', `${reason === 'manual' ? '手动总结' : '自动总结'}已一次完成消息 ${goalStart}–${goalEnd}，插件在后台自动衔接了 ${batchIndex} 批${settings.autoHide ? '，旧正文已退出上下文' : ''}。`);
+        const planText = batchPlan.strategy === 'single' ? '整段完成' : `自适应完成 ${batchIndex} 批`;
+        runtime.lastSuccess = `${reason === 'manual' ? '手动全量总结' : '自动总结'}完成 · 消息 ${goalStart}–${goalEnd} · ${planText}`;
+        notify('success', `${reason === 'manual' ? '手动总结' : '自动总结'}已一次完成消息 ${goalStart}–${goalEnd}，${planText}${settings.autoHide ? '，旧正文已退出上下文' : ''}。`);
         return getChatState(ctx);
     } finally {
         runtime.workflowActive = false;
@@ -1080,6 +1145,95 @@ function bindFloatingDrag(node) {
     });
 }
 
+function isMobilePanelLayout() {
+    return Boolean(globalThis.matchMedia?.('(max-width: 900px)')?.matches || Number(globalThis.innerWidth || 0) <= 900);
+}
+
+function clampPanelPosition(node, x, y) {
+    const viewportWidth = Math.max(1, Number(globalThis.innerWidth || document.documentElement?.clientWidth || 1));
+    const viewportHeight = Math.max(1, Number(globalThis.innerHeight || document.documentElement?.clientHeight || 1));
+    const width = Math.max(1, Number(node?.offsetWidth || node?.getBoundingClientRect?.().width || 920));
+    const height = Math.max(1, Number(node?.offsetHeight || node?.getBoundingClientRect?.().height || 700));
+    const baseLeft = (viewportWidth - width) / 2;
+    const baseTop = (viewportHeight - height) / 2;
+    const margin = 8;
+    const minX = margin - baseLeft;
+    const maxX = viewportWidth - width - margin - baseLeft;
+    const minY = margin - baseTop;
+    const maxY = viewportHeight - height - margin - baseTop;
+    return {
+        x: Math.round(Math.min(Math.max(Number(x) || 0, Math.min(minX, maxX)), Math.max(minX, maxX))),
+        y: Math.round(Math.min(Math.max(Number(y) || 0, Math.min(minY, maxY)), Math.max(minY, maxY))),
+    };
+}
+
+function placePanel(node, position) {
+    if (!node) return null;
+    if (isMobilePanelLayout()) {
+        node.style.setProperty('--gds-window-x', '0px');
+        node.style.setProperty('--gds-window-y', '0px');
+        return { x: 0, y: 0 };
+    }
+    const next = clampPanelPosition(node, position?.x, position?.y);
+    node.style.setProperty('--gds-window-x', `${next.x}px`);
+    node.style.setProperty('--gds-window-y', `${next.y}px`);
+    return next;
+}
+
+function applyPanelPosition() {
+    const node = runtime.overlay?.querySelector('.gds-window');
+    if (!node || node.classList.contains('gds-window-dragging')) return;
+    placePanel(node, getSettings().panelPosition || { x: 0, y: 0 });
+}
+
+function persistPanelPosition(position) {
+    const ctx = getContext();
+    const settings = getSettings(ctx);
+    settings.panelPosition = position ? { x: position.x, y: position.y } : null;
+    ctx.extensionSettings[SETTINGS_KEY] = settings;
+    saveSettings(ctx);
+}
+
+function bindPanelDrag(node, handle) {
+    let drag = null;
+    handle.addEventListener('pointerdown', event => {
+        if (isMobilePanelLayout() || (event.button !== undefined && event.button !== 0)) return;
+        if (event.target.closest('button,input,select,textarea,a')) return;
+        const current = placePanel(node, getSettings().panelPosition || { x: 0, y: 0 }) || { x: 0, y: 0 };
+        drag = {
+            pointerId: event.pointerId,
+            startX: event.clientX,
+            startY: event.clientY,
+            originX: current.x,
+            originY: current.y,
+            position: current,
+        };
+        node.classList.add('gds-window-dragging');
+        try { handle.setPointerCapture?.(event.pointerId); } catch { /* Older WebViews may not support capture. */ }
+        event.preventDefault();
+    });
+    handle.addEventListener('pointermove', event => {
+        if (!drag || event.pointerId !== drag.pointerId) return;
+        drag.position = placePanel(node, {
+            x: drag.originX + event.clientX - drag.startX,
+            y: drag.originY + event.clientY - drag.startY,
+        }) || drag.position;
+        event.preventDefault();
+    });
+    const finish = (event, cancelled = false) => {
+        if (!drag || event.pointerId !== drag.pointerId) return;
+        const completed = drag;
+        drag = null;
+        node.classList.remove('gds-window-dragging');
+        try { handle.releasePointerCapture?.(event.pointerId); } catch { /* Capture may already be released. */ }
+        if (cancelled) applyPanelPosition();
+        else persistPanelPosition(completed.position);
+        event.preventDefault();
+    };
+    handle.addEventListener('pointerup', event => finish(event, false));
+    handle.addEventListener('pointercancel', event => finish(event, true));
+}
+
 function createUi() {
     if (runtime.overlay) return;
     const overlay = document.createElement('section');
@@ -1087,7 +1241,7 @@ function createUi() {
     overlay.hidden = true;
     overlay.innerHTML = `
         <div class="gds-window">
-            <header class="gds-header">
+            <header class="gds-header" title="桌面端可按住标题栏拖动">
                 <div><img class="gds-puppy" src="${escapeHtml(PANEL_LOGO_URL)}" alt="" aria-hidden="true"><div><h2>嘎嘎小狗总结</h2><small>剧情记忆 · 文风继承 · 自动隐藏</small></div></div>
                 <button class="gds-icon-button" data-gds-close title="关闭">×</button>
             </header>
@@ -1117,13 +1271,16 @@ function createUi() {
                     <label>前情目标字数 <input type="number" min="80" step="20" data-gds-words></label>
                     <label>注入模式 <select data-gds-mode><option value="safe">安全：只发事实</option><option value="balanced">平衡：事实与前情</option></select></label>
                 </div>
-                <p class="gds-help">Token 数值只控制自动总结何时启动。手动点击“立即总结”会一次处理除“保留近期消息”外的全部旧正文；内容再长也会在后台自动分批衔接，无需手动点击继续。只有主动中断或生成失败时才会出现“继续”。自动隐藏使用 /hide，恢复隐藏使用 /unhide。</p>
+                <p class="gds-help">Token 数值只控制自动总结何时启动。手动点击“立即总结”会读取酒馆当前上下文容量：完整旧正文装得下就整段处理，只有装不下时才自适应拆批并在后台连续完成。只有主动中断或生成失败时才会出现“继续”。自动隐藏使用 /hide，恢复隐藏使用 /unhide。</p>
             </details>
             <details class="gds-details"><summary>检查点</summary><div data-gds-checkpoints></div></details>
             <footer class="gds-footer"><span>v${VERSION} · 提示词 ${PROMPT_VERSION}</span><span>原消息可恢复，不会自动删除</span></footer>
         </div>`;
     document.body.appendChild(overlay);
     runtime.overlay = overlay;
+    const windowNode = overlay.querySelector('.gds-window');
+    const headerNode = overlay.querySelector('.gds-header');
+    if (windowNode && headerNode) bindPanelDrag(windowNode, headerNode);
 
     const floating = document.createElement('button');
     floating.className = 'gds-floating';
@@ -1208,8 +1365,12 @@ function togglePanel(open) {
         syncMobileViewport();
         const windowNode = runtime.overlay.querySelector('.gds-window');
         if (windowNode) {
+            applyPanelPosition();
             windowNode.scrollTop = 0;
-            requestAnimationFrame(() => { windowNode.scrollTop = 0; });
+            requestAnimationFrame(() => {
+                applyPanelPosition();
+                windowNode.scrollTop = 0;
+            });
         }
         refreshUi();
     }
@@ -1223,6 +1384,7 @@ function syncMobileViewport() {
 function handleViewportChange() {
     syncMobileViewport();
     applyFloatingPosition();
+    if (runtime.open) applyPanelPosition();
 }
 
 function bindContextEvents() {

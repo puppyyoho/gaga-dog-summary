@@ -62,22 +62,25 @@ test('uses the supplied dog image instead of emoji branding', () => {
     assert.match(js, /class="gds-floating-image" src="\$\{escapeHtml\(FLOATING_LOGO_URL\)\}"/);
     assert.match(js, /class="gds-entry-puppy" src="\$\{escapeHtml\(PANEL_LOGO_URL\)\}"/);
     assert.doesNotMatch(js, /textContent\s*=\s*['"]🐶['"]/);
-    assert.match(css, /\.gds-puppy\s*\{[\s\S]*?object-fit:\s*cover/);
+    assert.match(css, /\.gds-puppy\s*\{[\s\S]*?object-fit:\s*contain/);
+    assert.match(css, /\.gds-puppy\s*\{[\s\S]*?border-radius:\s*0/);
     assert.match(css, /\.gds-floating\s*\{[\s\S]*?background:\s*transparent\s*!important/);
     assert.match(css, /\.gds-floating-image\s*\{[^}]*object-fit:\s*contain/);
     assert.match(css, /\.gds-floating-image\s*\{[^}]*border-radius:\s*0/);
 });
 
-test('uses 60000 Token only as the automatic trigger and chains manual batches', () => {
+test('uses 60000 Token only as the automatic trigger and adapts manual batches', () => {
     assert.match(js, /triggerTokens:\s*60000/);
-    assert.match(js, /INTERNAL_BATCH_TOKENS = 60000/);
+    assert.match(js, /FALLBACK_BATCH_TOKENS/);
     assert.match(js, /自动总结触发约 Token/);
     assert.match(js, /function planEligibleRange\(ctx\)[\s\S]*?targetTokens:\s*0/);
-    assert.match(js, /function planBatchRanges\(ctx,[\s\S]*?targetTokens:\s*INTERNAL_BATCH_TOKENS/);
+    assert.match(js, /async function buildWorkflowBatchPlan\(ctx,[\s\S]*?chooseSummaryBatchPlan/);
+    assert.match(js, /resolveContextWindowTokens\(ctx\)/);
+    assert.match(js, /getTokenCountAsync/);
     assert.match(js, /async function runSummaryWorkflow\(ctx,[\s\S]*?while \(true\)[\s\S]*?await summarizeRange\(/);
     assert.match(js, /pending\.workflow = clone\(workflowInfo\)/);
     assert.doesNotMatch(js, /manualKeepMessages/);
-    assert.match(js, /内容再长也会在后台自动分批衔接，无需手动点击继续/);
+    assert.match(js, /完整旧正文装得下就整段处理，只有装不下时才自适应拆批/);
 });
 
 test('floating dog can be dragged without accidentally opening the panel', () => {
@@ -89,6 +92,16 @@ test('floating dog can be dragged without accidentally opening the panel', () =>
     assert.match(js, /if \(suppressClick\)/);
     assert.match(css, /\.gds-floating\s*\{[\s\S]*?touch-action:\s*none/);
     assert.match(css, /\.gds-floating\.gds-dragging/);
+});
+
+test('desktop summary window is draggable by its header', () => {
+    assert.match(js, /panelPosition:\s*null/);
+    assert.match(js, /function bindPanelDrag\(node, handle\)/);
+    assert.match(js, /persistPanelPosition\(completed\.position\)/);
+    assert.match(js, /bindPanelDrag\(windowNode, headerNode\)/);
+    assert.match(css, /\.gds-window\s*\{[\s\S]*?transform:\s*translate3d\(/);
+    assert.match(css, /\.gds-window\.gds-window-dragging \.gds-header/);
+    assert.match(css, /@media \(max-width: 900px\)[\s\S]*?\.gds-window\s*\{[\s\S]*?transform:\s*none\s*!important/);
 });
 
 test('uses SillyTavern hide and unhide paths for committed ranges', () => {

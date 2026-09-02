@@ -112,7 +112,9 @@ export function fill(template, variables = {}) {
 
 export function buildFactPrompt({ messages, currentState, openThreads, customPrompts = DEFAULT_PROMPTS }) {
     const body = fill(customPrompts.factUser, {
-        messages: String(messages || '').slice(0, 300000),
+        // The caller plans this range against the active model context. Do not
+        // silently cut an adaptive single-batch request at a fixed character count.
+        messages: String(messages || ''),
         currentState: String(currentState || '无').slice(0, 12000),
         openThreads: String(openThreads || '无').slice(0, 8000),
     });
