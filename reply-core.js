@@ -78,10 +78,79 @@ function jsonCandidates(raw) {
     return [...new Set(candidates.filter(Boolean))];
 }
 
+function repairLooseJson(value) {
+    const source = String(value || '');
+    let output = '';
+    let inString = false;
+    let escaped = false;
+    for (let index = 0; index < source.length; index += 1) {
+        const char = source[index];
+        if (!inString) {
+            output += char;
+            if (char === '"') inString = true;
+            continue;
+        }
+        if (escaped) {
+            // Preserve valid JSON escapes. If a model emitted a stray slash,
+            // quote it so one malformed character cannot invalidate all replies.
+            if (!'"\\/bfnrtu'.includes(char)) output += '\\\\';
+            output += char;
+            escaped = false;
+            continue;
+        }
+        if (char === '\\') {
+            output += char;
+            escaped = true;
+            continue;
+        }
+        if (char === '\r') {
+            if (source[index + 1] === '\n') index += 1;
+            output += '\\n';
+            continue;
+        }
+        if (char === '\n') {
+            output += '\\n';
+            continue;
+        }
+        if (char === '"') {
+            let rest = source.slice(index + 1);
+            // A model may encode line breaks as literal `\\n` text. Skip those
+            // escape sequences while deciding whether this quote closes the
+            // JSON value; a dialogue quote before more prose is still content.
+            while (true) {
+                const whitespace = rest.match(/^\s+/)?.[0] || '';
+                if (whitespace) rest = rest.slice(whitespace.length);
+                if (/^\\[nrt]/.test(rest)) {
+                    rest = rest.slice(2);
+                    continue;
+                }
+                break;
+            }
+            const next = /^[,}:\]]/.test(rest) ? rest[0] : '';
+            if (next || !source.slice(index + 1).trim()) {
+                output += char;
+                inString = false;
+            } else {
+                // Chinese dialogue frequently contains unescaped quotation
+                // marks inside a generated text value. Treat those as content.
+                output += '\\"';
+            }
+            continue;
+        }
+        if (char.charCodeAt(0) < 0x20) {
+            output += `\\u${char.charCodeAt(0).toString(16).padStart(4, '0')}`;
+            continue;
+        }
+        output += char;
+    }
+    return output;
+}
+
 export function parseReplyCandidates(raw, count = 5) {
     for (const candidate of jsonCandidates(raw)) {
-        try {
-            const parsed = JSON.parse(candidate);
+        for (const source of [candidate, repairLooseJson(candidate)]) {
+            try {
+                const parsed = JSON.parse(source);
             const rows = Array.isArray(parsed) ? parsed : parsed?.candidates;
             if (!Array.isArray(rows) || !rows.length) continue;
             const output = rows.slice(0, Math.max(1, Math.min(5, Number(count) || 5))).map((item, index) => ({
@@ -92,7 +161,8 @@ export function parseReplyCandidates(raw, count = 5) {
                 possibleEffect: compactText(item?.possibleEffect || item?.effect || '', 500),
             })).filter(item => item.text);
             if (output.length) return output;
-        } catch { /* Try the next bounded JSON candidate. */ }
+            } catch { /* Try the strict and repaired bounded JSON candidates. */ }
+        }
     }
     throw new Error('代写模型没有返回合法候选回复。');
 }
