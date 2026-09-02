@@ -23,10 +23,12 @@ test('mobile header remains reachable and fields cannot overflow horizontally', 
 
 test('settings use theme-resistant pink toggle switches', () => {
     assert.match(css, /\.gds-settings-grid input\[type="checkbox"\]\s*\{[\s\S]*?appearance:\s*none\s*!important/);
-    assert.match(css, /width:\s*42px\s*!important/);
-    assert.match(css, /background-image:\s*radial-gradient\(circle at 11px 50%/);
+    assert.match(css, /width:\s*36px\s*!important/);
+    assert.match(css, /background-image:\s*radial-gradient\(circle at 9px 50%/);
     assert.match(css, /\.gds-settings-grid input\[type="checkbox"\]:checked\s*\{[\s\S]*?background-color:\s*var\(--gds-pink-deep\)\s*!important/);
-    assert.match(css, /background-image:\s*radial-gradient\(circle at 31px 50%/);
+    assert.match(css, /background-image:\s*radial-gradient\(circle at 27px 50%/);
+    assert.match(css, /\.gds-settings-grid \.gds-toggle-row\s*\{[^}]*justify-content:\s*flex-start/);
+    assert.match(css, /column-gap:\s*clamp\(34px, 5vw, 72px\)/);
     assert.match(js, /class="gds-toggle-row"><span>自动总结<\/span><input type="checkbox" data-gds-auto>/);
 });
 

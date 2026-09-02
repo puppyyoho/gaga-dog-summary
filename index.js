@@ -33,7 +33,7 @@ const SETTINGS_KEY = 'gagaDogSummary';
 const INJECTION_ID = `${EXTENSION_NAME}:memory`;
 const PANEL_LOGO_URL = new URL('./assets/gaga-dog-logo.png', import.meta.url).href;
 const FLOATING_LOGO_URL = new URL('./assets/gaga-dog-floating.png', import.meta.url).href;
-const VERSION = '0.1.14';
+const VERSION = '0.1.15';
 const SETTINGS_VERSION = 2;
 
 const DEFAULT_SETTINGS = {
