@@ -10,6 +10,43 @@ test('reads common Tavern and OpenAI-compatible generation results', () => {
     assert.equal(extractGeneratedText('直接文本'), '直接文本');
     assert.equal(extractGeneratedText({ text: 'Tavern 文本' }), 'Tavern 文本');
     assert.equal(extractGeneratedText({ choices: [{ message: { content: '兼容端文本' } }] }), '兼容端文本');
+    assert.equal(extractGeneratedText({ choices: [{ delta: { content: '流式增量' } }] }), '流式增量');
+});
+
+test('streams an independent OpenAI-compatible profile and can be aborted', async () => {
+    const originalFetch = globalThis.fetch;
+    const updates = [];
+    globalThis.fetch = async (_url, options) => {
+        assert.equal(options.method, 'POST');
+        assert.match(options.body, /独立模型/);
+        const encoder = new TextEncoder();
+        const chunks = [
+            'data: {"choices":[{"delta":{"content":"第一"}}]}\n\n',
+            'data: {"choices":[{"delta":{"content":"段"}}]}\n\n',
+            'data: [DONE]\n\n',
+        ];
+        const body = new ReadableStream({
+            start(controller) {
+                for (const chunk of chunks) controller.enqueue(encoder.encode(chunk));
+                controller.close();
+            },
+        });
+        return new Response(body, { status: 200, headers: { 'content-type': 'text/event-stream' } });
+    };
+    try {
+        const result = await generateWithFallback({}, {
+            systemPrompt: '系统',
+            prompt: '独立模型',
+            providerProfile: { kind: 'openai-compatible', name: '测试', baseUrl: 'https://example.test/v1', model: 'demo', apiKey: 'key' },
+            preferStream: true,
+            onText: text => updates.push(text),
+        });
+        assert.equal(result.text, '第一段');
+        assert.equal(result.streamed, true);
+        assert.deepEqual(updates, ['第一', '第一段']);
+    } finally {
+        globalThis.fetch = originalFetch;
+    }
 });
 
 test('merges cumulative and delta stream chunks without duplication', () => {

@@ -1,3 +1,5 @@
+import { PROVIDER_CURRENT } from './provider-profiles.js';
+
 function cloneSettings(settings) {
     if (!settings || typeof settings !== 'object') return {};
     try {
@@ -35,13 +37,14 @@ function currentStreamingApi(ctx) {
     return null;
 }
 
-function selectedConnectionProfile(ctx) {
+function selectedConnectionProfile(ctx, requestedId = '') {
     const manager = ctx?.extensionSettings?.connectionManager;
     const disabled = Array.isArray(ctx?.extensionSettings?.disabledExtensions)
         && ctx.extensionSettings.disabledExtensions.includes('connection-manager');
-    if (disabled || !manager?.selectedProfile || typeof ctx?.ConnectionManagerRequestService?.sendRequest !== 'function') return null;
+    const profileId = String(requestedId || manager?.selectedProfile || '').trim();
+    if (disabled || !profileId || typeof ctx?.ConnectionManagerRequestService?.sendRequest !== 'function') return null;
     const profiles = Array.isArray(manager.profiles) ? manager.profiles : [];
-    const profile = profiles.find(item => item?.id === manager.selectedProfile);
+    const profile = profiles.find(item => item?.id === profileId);
     if (!profile) return null;
     try {
         if (typeof ctx.ConnectionManagerRequestService.isProfileSupported === 'function'
@@ -51,7 +54,7 @@ function selectedConnectionProfile(ctx) {
     }
     return {
         service: ctx.ConnectionManagerRequestService,
-        profileId: manager.selectedProfile,
+        profileId,
         label: profile.name || profile.model || '连接管理器',
     };
 }
@@ -85,7 +88,8 @@ function activeTextPreset(ctx, settings) {
     }
 }
 
-function configuredOutputLimit() {
+function configuredOutputLimit(providerProfile = null) {
+    if (Number(providerProfile?.outputTokens) >= 128) return Math.round(Number(providerProfile.outputTokens));
     const doc = globalThis.document;
     const candidates = [
         doc?.querySelector?.('#openai_max_tokens')?.value,
@@ -97,6 +101,103 @@ function configuredOutputLimit() {
         if (Number.isFinite(number) && number >= 128) return Math.round(number);
     }
     return 4096;
+}
+
+function directCompletionUrl(baseUrl) {
+    const value = String(baseUrl || '').replace(/\/+$/, '');
+    return /\/chat\/completions$/i.test(value) ? value : `${value}/chat/completions`;
+}
+
+function directModelsUrl(baseUrl) {
+    const value = String(baseUrl || '').replace(/\/+$/, '');
+    if (/\/chat\/completions$/i.test(value)) return value.replace(/\/chat\/completions$/i, '/models');
+    return /\/models$/i.test(value) ? value : `${value}/models`;
+}
+
+function directHeaders(profile) {
+    const headers = { 'Content-Type': 'application/json' };
+    if (profile?.apiKey) headers.Authorization = `Bearer ${profile.apiKey}`;
+    return headers;
+}
+
+function directRequestBody(profile, messages, stream) {
+    const body = {
+        model: profile.model,
+        messages,
+        stream,
+        max_tokens: Math.max(128, Number(profile.outputTokens || 4096) || 4096),
+    };
+    if (Number.isFinite(Number(profile.temperature))) body.temperature = Number(profile.temperature);
+    return body;
+}
+
+async function directCompletion(profile, messages, signal, stream, onText, onStatus) {
+    if (typeof fetch !== 'function') throw new Error('当前浏览器没有可用的 fetch 接口');
+    const source = profile.name || profile.model || '独立 OpenAI 兼容连接';
+    onStatus?.({ phase: 'connecting', source, chunks: 0, updates: 0, length: 0 });
+    const response = await fetch(directCompletionUrl(profile.baseUrl), {
+        method: 'POST',
+        headers: directHeaders(profile),
+        body: JSON.stringify(directRequestBody(profile, messages, stream)),
+        signal,
+    });
+    if (!response.ok) {
+        const detail = await response.text().catch(() => '');
+        throw new Error(`${source} · HTTP ${response.status}${detail ? ` · ${detail.slice(0, 600)}` : ''}`);
+    }
+    if (!stream || !response.body?.getReader) {
+        const data = await response.json();
+        const text = extractGeneratedText(data);
+        if (!text.trim()) throw new Error(`${source} 返回了空内容`);
+        onText?.(text, { phase: 'received', source, chunks: 1, updates: 1, length: text.length });
+        return { supported: true, text, source, chunks: 1, updates: 1, streamed: false, buffered: true };
+    }
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let text = '';
+    let chunks = 0;
+    let updates = 0;
+    const emitLine = line => {
+        const trimmed = line.trim();
+        if (!trimmed || !trimmed.startsWith('data:')) return false;
+        const dataText = trimmed.slice(5).trim();
+        if (!dataText || dataText === '[DONE]') return dataText === '[DONE]';
+        try {
+            const data = JSON.parse(dataText);
+            const next = extractGeneratedText(data);
+            const merged = mergeStreamText(text, next);
+            chunks += 1;
+            if (merged !== text) {
+                text = merged;
+                updates += 1;
+                onText?.(text, { phase: 'receiving', source, chunks, updates, length: text.length });
+            }
+        } catch { /* Ignore keep-alive and incomplete SSE lines. */ }
+        return false;
+    };
+    while (true) {
+        if (signal?.aborted) throw signal.reason || new DOMException('已中断生成', 'AbortError');
+        const { value, done } = await reader.read();
+        buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
+        const lines = buffer.split(/\r?\n/);
+        buffer = lines.pop() || '';
+        let finished = false;
+        for (const line of lines) if (emitLine(line)) finished = true;
+        if (finished || done) break;
+    }
+    if (buffer) emitLine(buffer);
+    if (!text.trim()) throw new Error(`${source} 返回了空内容`);
+    onStatus?.({ phase: 'received', source, chunks, updates, length: text.length });
+    return { supported: true, text, source, chunks, updates, streamed: updates > 1, buffered: updates <= 1 };
+}
+
+export async function listDirectModels(profile, signal) {
+    if (!profile?.baseUrl || typeof fetch !== 'function') throw new Error('独立连接缺少 URL 或浏览器 fetch 不可用');
+    const response = await fetch(directModelsUrl(profile.baseUrl), { headers: directHeaders(profile), signal });
+    if (!response.ok) throw new Error(`获取模型列表失败：HTTP ${response.status}`);
+    const data = await response.json();
+    return (Array.isArray(data) ? data : data?.data || []).map(item => String(item?.id || item?.name || '')).filter(Boolean);
 }
 
 export function mergeStreamText(previous, next) {
@@ -114,6 +215,7 @@ export function extractGeneratedText(result, ctx = null) {
         ?? result?.content
         ?? result?.message?.content
         ?? result?.choices?.[0]?.message?.content
+        ?? result?.choices?.[0]?.delta?.content
         ?? result?.choices?.[0]?.text;
     if (Array.isArray(direct)) {
         return direct.map(item => typeof item === 'string' ? item : item?.text || item?.content || '').join('');
@@ -147,9 +249,18 @@ export function readableGenerationError(error) {
     return [...new Set(details)].join(' · ') || String(error || '未知生成错误');
 }
 
-export async function generateStreaming(ctx, { systemPrompt, prompt, signal, onText, onStatus }) {
-    const api = currentStreamingApi(ctx);
-    const connection = api ? null : selectedConnectionProfile(ctx);
+export async function generateStreaming(ctx, { systemPrompt, prompt, signal, onText, onStatus, providerProfile = null }) {
+    if (providerProfile?.kind === 'openai-compatible') {
+        const messages = [
+            ...(systemPrompt ? [{ role: 'system', content: systemPrompt }] : []),
+            { role: 'user', content: prompt },
+        ];
+        return directCompletion(providerProfile, messages, signal, true, onText, onStatus);
+    }
+    const api = providerProfile?.kind === 'connection' ? null : currentStreamingApi(ctx);
+    const connection = providerProfile?.kind === 'connection'
+        ? selectedConnectionProfile(ctx, providerProfile.profileId)
+        : api ? null : selectedConnectionProfile(ctx);
     if (!api && !connection) return { supported: false, text: '', streamed: false };
     const source = api?.label || connection?.label || '当前连接';
     const messages = [
@@ -164,7 +275,7 @@ export async function generateStreaming(ctx, { systemPrompt, prompt, signal, onT
             response = await connection.service.sendRequest(
                 connection.profileId,
                 messages,
-                configuredOutputLimit(),
+                configuredOutputLimit(providerProfile),
                 { stream: true, signal, extractData: true, includePreset: true, includeInstruct: true },
             );
         } else if (api.kind === 'chat') {
@@ -221,6 +332,35 @@ export async function generateStreaming(ctx, { systemPrompt, prompt, signal, onT
 }
 
 async function generateBuffered(ctx, options) {
+    if (options.providerProfile?.kind === 'openai-compatible') {
+        const messages = [
+            ...(options.systemPrompt ? [{ role: 'system', content: options.systemPrompt }] : []),
+            { role: 'user', content: options.prompt },
+        ];
+        return directCompletion(options.providerProfile, messages, options.signal, false, options.onText, options.onStatus);
+    }
+    if (options.providerProfile?.kind === 'connection') {
+        const connection = selectedConnectionProfile(ctx, options.providerProfile.profileId);
+        if (!connection) throw new Error('指定的酒馆 Connection Manager 连接不可用或已被禁用');
+        const messages = [
+            ...(options.systemPrompt ? [{ role: 'system', content: options.systemPrompt }] : []),
+            { role: 'user', content: options.prompt },
+        ];
+        try {
+            const response = await connection.service.sendRequest(
+                connection.profileId,
+                messages,
+                configuredOutputLimit(options.providerProfile),
+                { stream: false, signal: options.signal, extractData: true, includePreset: true, includeInstruct: true },
+            );
+            const text = extractGeneratedText(response, ctx);
+            if (!text.trim()) throw new Error(`${connection.label} 返回了空内容`);
+            options.onText?.(text, { phase: 'received', source: connection.label, chunks: 1, updates: 1, length: text.length });
+            return { text, source: connection.label };
+        } catch (error) {
+            throw new Error(`${connection.label} · ${readableGenerationError(error)}`, { cause: error });
+        }
+    }
     const combined = [options.systemPrompt, options.prompt].filter(Boolean).join('\n\n');
     let quietError = null;
     if (typeof ctx?.generateQuietPrompt === 'function') {
@@ -275,4 +415,14 @@ export async function generateWithFallback(ctx, options) {
     if (options.signal?.aborted) throw options.signal.reason || new DOMException('已中断生成', 'AbortError');
     options.onText?.(buffered.text, { phase: 'received', source: buffered.source, chunks: 1, updates: 1, length: buffered.text.length });
     return { supported: true, streamed: false, buffered: true, text: buffered.text, source: buffered.source, chunks: 1, updates: 1 };
+}
+
+/**
+ * Direct-only generation for preflight work such as the story director.
+ * It deliberately never falls back to generateQuietPrompt, which would
+ * re-enter SillyTavern's generation events and recursively invoke the director.
+ */
+export async function generateDirectOnly(ctx, options = {}) {
+    const result = await generateStreaming(ctx, options);
+    return result?.supported ? result : null;
 }

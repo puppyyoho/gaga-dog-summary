@@ -120,6 +120,106 @@ body.gds-panel-open { overflow: hidden !important; }
     font-size: 22px;
 }
 
+.gds-tabs {
+    display: flex;
+    gap: 6px;
+    padding: 10px 22px 0;
+    border-bottom: 1px solid var(--gds-line);
+    overflow-x: auto;
+    scrollbar-width: thin;
+}
+.gds-tabs button {
+    flex: 0 0 auto;
+    border: 0;
+    border-bottom: 3px solid transparent;
+    border-radius: 10px 10px 0 0;
+    background: transparent;
+    color: var(--gds-muted);
+    cursor: pointer;
+    padding: 9px 14px 8px;
+    font: inherit;
+    font-size: 13px;
+}
+.gds-tabs button:hover { color: var(--gds-pink-deep); background: #fff0f7; }
+.gds-tabs button.active { border-bottom-color: var(--gds-pink-deep); color: var(--gds-pink-deep); font-weight: 700; }
+
+.gds-tab-content { min-width: 0; padding: 0 22px 18px; }
+.gds-section-title {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 17px 0 4px;
+}
+.gds-section-title h3 { margin: 0; color: var(--gds-pink-deep); font-size: 18px; }
+.gds-section-title p { margin: 4px 0 0; color: var(--gds-muted); font-size: 12px; }
+.gds-section-title button,
+.gds-director-actions button,
+.gds-api-form button,
+.gds-plan-arc button,
+.gds-branch-card button,
+.gds-reply-card button {
+    border: 1px solid var(--gds-line);
+    border-radius: 9px;
+    background: #fff;
+    color: var(--gds-ink);
+    cursor: pointer;
+    padding: 7px 11px;
+    font: inherit;
+    font-size: 12px;
+}
+.gds-section-title button:hover,
+.gds-director-actions button:hover,
+.gds-api-form button:hover,
+.gds-plan-arc button:hover,
+.gds-branch-card button:hover,
+.gds-reply-card button:hover { border-color: var(--gds-pink); color: var(--gds-pink-deep); }
+.gds-section-title button:disabled,
+.gds-director-actions button:disabled,
+.gds-api-form button:disabled,
+.gds-plan-arc button:disabled,
+.gds-branch-card button:disabled,
+.gds-reply-card button:disabled { cursor: not-allowed; opacity: .52; }
+.gds-director-actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 2px 0 14px; }
+.gds-director-actions .gds-primary,
+.gds-reply-card .gds-primary { border-color: var(--gds-pink-deep); background: var(--gds-pink-deep); color: white; }
+.gds-director-block { margin: 16px 0 0; border-top: 1px solid var(--gds-line); padding-top: 12px; }
+.gds-director-block h4 { margin: 0 0 8px; color: var(--gds-pink-deep); font-size: 14px; }
+.gds-plan-head { display: flex; justify-content: space-between; gap: 8px; align-items: baseline; }
+.gds-plan-head strong { font-size: 15px; }
+.gds-plan-head span { color: var(--gds-muted); font-size: 11px; }
+.gds-director-block p { margin: 7px 0; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; }
+.gds-plan-arcs { display: grid; gap: 8px; }
+.gds-plan-arc, .gds-branch-card, .gds-foreshadow-card, .gds-reply-card {
+    border: 1px solid var(--gds-line);
+    border-radius: 12px;
+    background: rgba(255, 255, 255, .72);
+    padding: 10px 12px;
+}
+.gds-plan-arc strong, .gds-branch-card strong, .gds-foreshadow-card strong { display: block; }
+.gds-plan-arc small, .gds-foreshadow-card span, .gds-reply-card small { color: var(--gds-muted); font-size: 11px; }
+.gds-plan-arc em { color: var(--gds-pink-deep); font-size: 12px; font-style: normal; }
+.gds-branch-card.active { border-color: var(--gds-pink-deep); box-shadow: 0 0 0 2px rgba(220, 77, 136, .1); }
+.gds-branch-card button { margin-top: 5px; }
+.gds-branch-card p, .gds-foreshadow-card p { margin: 6px 0; }
+.gds-foreshadow-card small { display: block; color: var(--gds-muted); line-height: 1.45; }
+.gds-reply-list { display: grid; gap: 10px; }
+.gds-reply-card-head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+.gds-reply-card textarea { box-sizing: border-box; width: 100%; min-height: 90px; margin: 8px 0; resize: vertical; border: 1px solid var(--gds-line); border-radius: 9px; padding: 9px; color: var(--gds-ink); background: #fffafd; font: inherit; line-height: 1.55; }
+.gds-reply-card p { margin: 0 0 8px; color: var(--gds-muted); font-size: 12px; }
+.gds-reply-card > div:last-child { display: flex; flex-wrap: wrap; gap: 7px; }
+.gds-provider-grid { max-width: none; grid-template-columns: repeat(3, minmax(0, 1fr)); column-gap: 10px; }
+.gds-provider-grid label { display: flex; flex-direction: column; align-items: stretch; gap: 5px; }
+.gds-provider-grid select, .gds-api-form input, .gds-api-form select, .gds-director-settings select, .gds-director-settings input[type="text"], .gds-reply-settings select, .gds-reply-settings input[type="text"] { box-sizing: border-box; min-width: 0; width: 100%; border: 1px solid var(--gds-line); border-radius: 8px; background: white; color: var(--gds-ink); padding: 7px 8px; font: inherit; }
+.gds-api-form { border-top: 1px dashed var(--gds-line); padding-top: 10px; }
+.gds-api-form .gds-settings-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); max-width: none; margin: 0; padding: 5px 0 10px; column-gap: 12px; }
+.gds-api-form label { display: flex; flex-direction: column; align-items: stretch; gap: 5px; }
+.gds-field input, .gds-field select { box-sizing: border-box; width: 100%; border: 1px solid var(--gds-line); border-radius: 8px; padding: 8px; color: var(--gds-ink); background: #fff; font: inherit; }
+.gds-director-settings, .gds-reply-settings { max-width: none; margin: 0; padding: 10px 0; }
+.gds-director-settings label, .gds-reply-settings label { min-width: 0; }
+.gds-director-settings label:not(.gds-toggle-row), .gds-reply-settings label:not(.gds-toggle-row) { flex-direction: column; align-items: stretch; gap: 5px; }
+.gds-director-settings .gds-toggle-row, .gds-reply-settings .gds-toggle-row { justify-content: flex-start; }
+
 .gds-status {
     margin: 16px 22px 8px;
     min-height: 20px;
@@ -314,6 +414,11 @@ body.gds-panel-open { overflow: hidden !important; }
     .gds-header small { font-size: 11px; white-space: normal; }
     .gds-puppy { width: 40px; height: 40px; flex-basis: 40px; border-radius: 0; }
     .gds-icon-button { flex: 0 0 38px; width: 38px; height: 38px; }
+    .gds-tabs { padding: 8px 14px 0; }
+    .gds-tabs button { padding: 8px 11px 7px; font-size: 12px; }
+    .gds-tab-content { padding: 0 14px 14px; }
+    .gds-section-title { padding-top: 13px; }
+    .gds-section-title h3 { font-size: 17px; }
     .gds-status { margin: 12px 14px 7px; }
     .gds-metrics { padding: 0 14px 12px; }
     .gds-actions { padding: 0 14px 14px; }
@@ -339,6 +444,10 @@ body.gds-panel-open { overflow: hidden !important; }
     .gds-settings-grid .gds-toggle-row { justify-content: flex-start; }
     .gds-settings-grid input[type="number"], .gds-settings-grid select { max-width: 48%; }
     .gds-grid, .gds-settings-grid { grid-template-columns: 1fr; }
+    .gds-provider-grid, .gds-api-form .gds-settings-grid { grid-template-columns: 1fr; }
+    .gds-provider-grid select, .gds-api-form input, .gds-api-form select { max-width: none; }
+    .gds-director-actions { display: grid; grid-template-columns: 1fr; }
+    .gds-director-actions button, .gds-api-form button { width: 100%; min-height: 40px; }
     .gds-wide { grid-column: auto; }
     .gds-checkpoint { grid-template-columns: 1fr; gap: 4px; }
     .gds-footer { flex-direction: column; padding: 16px 14px max(18px, env(safe-area-inset-bottom, 0px)); }

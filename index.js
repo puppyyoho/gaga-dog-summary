@@ -15,6 +15,8 @@ import {
     selectStyleAnchors,
     simpleHash,
     tokenEstimate,
+    renderMixedSummary,
+    renderStructuredSummary,
 } from './memory-core.js';
 import { persistChatMetadata, readChatState, writeChatState } from './chat-state.js';
 import {
@@ -26,22 +28,55 @@ import {
     PROMPT_VERSION,
     renderFactsForProse,
 } from './prompts.js';
-import { generateWithFallback, readableGenerationError } from './generation-client.js';
+import { generateDirectOnly, generateWithFallback, listDirectModels, readableGenerationError } from './generation-client.js';
 import {
     chooseSummaryBatchPlan,
     FALLBACK_BATCH_TOKENS,
     resolveContextWindowTokens,
     resolveOutputReserveTokens,
 } from './context-budget.js';
+import {
+    applyBranchesToDirector,
+    applyForeshadowsToDirector,
+    applyLonglineToDirector,
+    applyProgressToDirector,
+    buildDirectorPrompt,
+    buildExecutionCard,
+    createEmptyDirectorState,
+    getDirectorPreset,
+    lockMainline,
+    normalizeBranches,
+    normalizeDirectorState,
+    normalizeForeshadows,
+    PACING_OPTIONS,
+    parseDirectorPacket,
+    selectBranch,
+} from './director-core.js';
+import {
+    buildReplyPrompt,
+    createEmptyReplyState,
+    normalizeReplyState,
+    parseReplyCandidates,
+    REPLY_DETAIL_LEVELS,
+    REPLY_VIEWPOINTS,
+} from './reply-core.js';
+import {
+    getConnectionManagerProfiles,
+    normalizeProviderProfiles,
+    providerChoiceValue,
+    PROVIDER_CURRENT,
+    resolveModuleProvider,
+} from './provider-profiles.js';
 
 const EXTENSION_NAME = 'gaga-dog-summary';
 const DISPLAY_NAME = '嘎嘎小狗总结';
 const SETTINGS_KEY = 'gagaDogSummary';
 const INJECTION_ID = `${EXTENSION_NAME}:memory`;
+const DIRECTOR_INJECTION_ID = `${EXTENSION_NAME}:director`;
 const PANEL_LOGO_URL = new URL('./assets/gaga-dog-logo.png', import.meta.url).href;
 const FLOATING_LOGO_URL = new URL('./assets/gaga-dog-floating.png', import.meta.url).href;
-const VERSION = '0.1.17';
-const SETTINGS_VERSION = 4;
+const VERSION = '0.2.0';
+const SETTINGS_VERSION = 5;
 
 const DEFAULT_SETTINGS = {
     showFloatingButton: true,
@@ -55,9 +90,10 @@ const DEFAULT_SETTINGS = {
     injectionMaxTokens: 1400,
     recallLimit: 3,
     targetWords: 520,
-    injectionMode: 'balanced',
+    summaryMode: 'mixed',
     streamOutput: true,
-    autoAudit: false,
+    apiProfiles: [],
+    moduleConnections: { memory: PROVIDER_CURRENT, director: PROVIDER_CURRENT, reply: PROVIDER_CURRENT },
     prompts: {},
 };
 
@@ -80,6 +116,12 @@ const runtime = {
     lastChatSignature: '',
     lastError: '',
     lastSuccess: '',
+    directorBusy: false,
+    directorAbortController: null,
+    directorText: '',
+    replyBusy: false,
+    replyAbortController: null,
+    replyText: '',
 };
 
 function getContext() {
@@ -114,6 +156,15 @@ function getSettings(ctx = getContext()) {
     if (migratedDefault) result.triggerTokens = DEFAULT_SETTINGS.triggerTokens;
     result.settingsVersion = SETTINGS_VERSION;
     result.prompts = { ...DEFAULT_PROMPTS, ...(current?.prompts && typeof current.prompts === 'object' ? current.prompts : {}) };
+    result.summaryMode = ['novel', 'structured', 'mixed'].includes(result.summaryMode) ? result.summaryMode : DEFAULT_SETTINGS.summaryMode;
+    result.apiProfiles = normalizeProviderProfiles(result.apiProfiles);
+    result.moduleConnections = {
+        ...DEFAULT_SETTINGS.moduleConnections,
+        ...(current?.moduleConnections && typeof current.moduleConnections === 'object' ? current.moduleConnections : {}),
+    };
+    for (const moduleName of ['memory', 'director', 'reply']) {
+        result.moduleConnections[moduleName] = String(result.moduleConnections[moduleName] || PROVIDER_CURRENT);
+    }
     for (const key of ['triggerTokens', 'keepMessages', 'injectionMaxTokens', 'recallLimit', 'targetWords']) {
         const value = Number(result[key]);
         result[key] = Number.isFinite(value) ? Math.max(1, Math.round(value)) : DEFAULT_SETTINGS[key];
@@ -147,6 +198,34 @@ function getChatState(ctx = getContext()) {
 
 function setChatState(value, ctx = getContext()) {
     return writeChatState(ctx, SETTINGS_KEY, value, normalizeChatState);
+}
+
+function getDirectorState(ctx = getContext()) {
+    const state = getChatState(ctx);
+    return normalizeDirectorState(state.director || createEmptyDirectorState());
+}
+
+function getReplyState(ctx = getContext()) {
+    const state = getChatState(ctx);
+    return normalizeReplyState(state.reply || createEmptyReplyState());
+}
+
+function saveDirectorState(ctx, director) {
+    const state = getChatState(ctx);
+    state.director = normalizeDirectorState(director);
+    setChatState(state, ctx);
+    return state.director;
+}
+
+function saveReplyState(ctx, reply) {
+    const state = getChatState(ctx);
+    state.reply = normalizeReplyState(reply);
+    setChatState(state, ctx);
+    return state.reply;
+}
+
+function moduleProvider(ctx, moduleName) {
+    return resolveModuleProvider(getSettings(ctx), moduleName, ctx);
 }
 
 async function saveChat(ctx = getContext(), options = {}) {
@@ -342,6 +421,8 @@ function snapshotMemory(value) {
         threads: clone(state.threads),
         sceneCards: clone(state.sceneCards),
         recap: state.recap,
+        summaryMode: state.summaryMode,
+        summaryArtifacts: clone(state.summaryArtifacts),
         lastProcessedIndex: state.lastProcessedIndex,
     };
 }
@@ -354,6 +435,12 @@ function restoreSnapshot(state, snapshot) {
     next.threads = clone(snapshot.threads || []);
     next.sceneCards = clone(snapshot.sceneCards || []);
     next.recap = String(snapshot.recap || '');
+    next.summaryMode = ['novel', 'structured', 'mixed'].includes(snapshot.summaryMode) ? snapshot.summaryMode : next.summaryMode;
+    next.summaryArtifacts = {
+        novel: String(snapshot.summaryArtifacts?.novel || next.summaryArtifacts?.novel || ''),
+        structured: String(snapshot.summaryArtifacts?.structured || next.summaryArtifacts?.structured || ''),
+        mixed: String(snapshot.summaryArtifacts?.mixed || next.summaryArtifacts?.mixed || ''),
+    };
     next.lastProcessedIndex = Number(snapshot.lastProcessedIndex ?? -1);
     next.lastStableIndex = next.lastProcessedIndex;
     return next;
@@ -382,6 +469,17 @@ function cleanProse(value) {
         .replace(/^```(?:text|markdown)?\s*/i, '')
         .replace(/\s*```$/i, '')
         .trim();
+}
+
+function renderSelectedSummary(state, novelText, mode) {
+    const selected = ['novel', 'structured', 'mixed'].includes(mode) ? mode : 'mixed';
+    const novel = String(novelText || state.summaryArtifacts?.novel || '').trim();
+    const artifacts = {
+        novel: novel,
+        structured: renderStructuredSummary(state),
+        mixed: renderMixedSummary(state, novel),
+    };
+    return { mode: selected, artifacts, active: artifacts[selected] || novel || artifacts.structured };
 }
 
 function stageName(stage) {
@@ -445,6 +543,7 @@ async function runGenerationStage(ctx, request, settings, pending, controller) {
     updatePendingInMemory(ctx, pending);
     return generateWithFallback(ctx, {
         ...resumableRequest,
+        providerProfile: moduleProvider(ctx, 'memory'),
         preferStream: settings.streamOutput !== false,
         signal: controller.signal,
         onText: (text, meta) => {
@@ -478,6 +577,7 @@ async function summarizeRange(ctx, range, settings, reason = 'manual', resumeTas
     runtime.abortController = controller;
     const current = getChatState(ctx);
     const before = normalizeChatState(current);
+    const summaryMode = ['novel', 'structured', 'mixed'].includes(before.summaryMode) ? before.summaryMode : settings.summaryMode;
     before.pending = null;
     const checkpointId = resumeTask?.checkpointId || `cp_${Date.now()}_${simpleHash(`${range.start}:${range.end}:${range.rangeHash}`)}`;
     const pending = resumeTask ? clone(resumeTask) : {
@@ -539,44 +639,56 @@ async function summarizeRange(ctx, range, settings, reason = 'manual', resumeTas
 
         const draft = mergeMemoryPacket(before, packet, range, checkpointId);
         const styleAnchors = selectStyleAnchors(messages, 3, { includeHidden: true });
-        const factsForProse = renderFactsForProse(draft);
-        const styleText = styleAnchors.map(anchor => `[消息 ${anchor.index}]\n${anchor.text}`).join('\n\n');
-        let proseDraft = cleanProse(pending.proseDraft);
-        if (pending.stage !== 'polish' || !proseDraft) {
-            pending.stage = 'prose';
-            const prosePrompt = buildProsePrompt({
+        let polishedProse = '';
+        if (summaryMode !== 'structured') {
+            const factsForProse = renderFactsForProse(draft);
+            const styleText = styleAnchors.map(anchor => `[消息 ${anchor.index}]\n${anchor.text}`).join('\n\n');
+            let proseDraft = cleanProse(pending.proseDraft);
+            if (pending.stage !== 'polish' || !proseDraft) {
+                pending.stage = 'prose';
+                const prosePrompt = buildProsePrompt({
+                    facts: factsForProse,
+                    currentState: formatState(draft),
+                    openThreads: formatThreads(draft),
+                    previousRecap: before.summaryArtifacts?.novel || before.recap || '',
+                    styleAnchors: styleText,
+                    targetWords: settings.targetWords,
+                    customPrompts: settings.prompts,
+                });
+                const proseResult = await runGenerationStage(ctx, prosePrompt, settings, pending, controller);
+                if (serial !== runtime.taskSerial || controller.signal.aborted) throw controller.signal.reason || new DOMException('已中断生成', 'AbortError');
+                proseDraft = cleanProse(proseResult.text);
+                if (!proseDraft) throw new Error('前情草稿为空，无法进入文学润色');
+                pending.proseDraft = proseDraft;
+                pending.stage = 'polish';
+                pending.partialText = '';
+                await savePending(ctx, pending);
+            }
+
+            const polishPrompt = buildPolishPrompt({
                 facts: factsForProse,
-                currentState: formatState(draft),
-                openThreads: formatThreads(draft),
+                draft: proseDraft,
+                previousRecap: before.summaryArtifacts?.novel || before.recap || '',
                 styleAnchors: styleText,
                 targetWords: settings.targetWords,
                 customPrompts: settings.prompts,
             });
-            const proseResult = await runGenerationStage(ctx, prosePrompt, settings, pending, controller);
+            const polishResult = await runGenerationStage(ctx, polishPrompt, settings, pending, controller);
             if (serial !== runtime.taskSerial || controller.signal.aborted) throw controller.signal.reason || new DOMException('已中断生成', 'AbortError');
-            proseDraft = cleanProse(proseResult.text);
-            if (!proseDraft) throw new Error('前情草稿为空，无法进入文学润色');
-            pending.proseDraft = proseDraft;
-            pending.stage = 'polish';
-            pending.partialText = '';
-            await savePending(ctx, pending);
+            if (runtime.abortController === controller) runtime.abortController = null;
+            setStatus('文学润色完成，正在校验并保存记忆……');
+            refreshUi();
+            polishedProse = cleanProse(polishResult.text);
+            if (!polishedProse) throw new Error('文学润色结果为空，尚不能提交记忆');
+        } else {
+            if (runtime.abortController === controller) runtime.abortController = null;
+            setStatus('结构化记忆整理完成，正在校验并保存记忆……');
+            refreshUi();
         }
-
-        const polishPrompt = buildPolishPrompt({
-            facts: factsForProse,
-            draft: proseDraft,
-            styleAnchors: styleText,
-            targetWords: settings.targetWords,
-            customPrompts: settings.prompts,
-        });
-        const polishResult = await runGenerationStage(ctx, polishPrompt, settings, pending, controller);
-        if (serial !== runtime.taskSerial || controller.signal.aborted) throw controller.signal.reason || new DOMException('已中断生成', 'AbortError');
-        if (runtime.abortController === controller) runtime.abortController = null;
-        setStatus('文学润色完成，正在校验并保存记忆……');
-        refreshUi();
-        const polishedProse = cleanProse(polishResult.text);
-        if (!polishedProse) throw new Error('文学润色结果为空，尚不能提交记忆');
-        draft.recap = polishedProse;
+        const selectedSummary = renderSelectedSummary(draft, polishedProse, summaryMode);
+        draft.summaryMode = selectedSummary.mode;
+        draft.summaryArtifacts = selectedSummary.artifacts;
+        draft.recap = selectedSummary.active;
         draft.styleAnchors = styleAnchors;
         const checkpoint = draft.checkpoints.find(item => item.id === checkpointId);
         if (!checkpoint) throw new Error('记忆检查点未建立，已阻止空结果覆盖旧记忆');
@@ -642,12 +754,8 @@ async function applyInjection(ctx = getContext(), chatState = getChatState(ctx),
         if (typeof ctx.setExtensionPrompt === 'function') await ctx.setExtensionPrompt(INJECTION_ID, '', 1, 0, false, 0);
         return '';
     }
-    const query = recentQuery(messages);
     const injection = compileInjection(chatState, {
-        query,
         maxTokens: settings.injectionMaxTokens,
-        recallLimit: settings.recallLimit,
-        mode: settings.injectionMode,
     });
     chatState.lastInjection = injection;
     chatState.lastInjectionTokens = tokenEstimate(injection);
@@ -656,6 +764,240 @@ async function applyInjection(ctx = getContext(), chatState = getChatState(ctx),
     }
     setChatState(chatState, ctx);
     return injection;
+}
+
+function recentStoryText(ctx, count = 10) {
+    const messages = getMessages(ctx);
+    const start = Math.max(0, messages.length - Math.max(1, count));
+    return formatMessages(messages, start, messages.length - 1);
+}
+
+function userPersonaText(ctx) {
+    return String(ctx?.persona || ctx?.userPersona || ctx?.name1 || '').trim();
+}
+
+async function saveChatStateAndRefresh(ctx, state) {
+    setChatState(state, ctx);
+    await saveChat(ctx);
+    refreshUi();
+}
+
+async function runDirectorTask(ctx, task) {
+    if (runtime.directorBusy || runtime.busy || runtime.workflowActive || runtime.generating) {
+        notify('info', '当前还有生成任务进行中，请稍后再使用情节导演。');
+        return null;
+    }
+    const settings = getSettings(ctx);
+    const previous = getDirectorState(ctx);
+    const prompt = buildDirectorPrompt({
+        task,
+        memory: getChatState(ctx),
+        recentText: recentStoryText(ctx, task === 'longline' ? 18 : 10),
+        state: previous,
+        presetId: previous.presetId,
+        customBrief: previous.customBrief,
+        pacingMode: previous.pacingMode,
+        pacingCustom: previous.pacingCustom,
+        toggles: previous.toggles,
+    });
+    const controller = new AbortController();
+    runtime.directorBusy = true;
+    runtime.directorAbortController = controller;
+    runtime.directorText = '';
+    setStatus(`情节导演正在生成${task === 'longline' ? '长线规划' : task === 'branch' ? '当前分支' : task === 'foreshadow' ? '伏笔方案' : '推进判断'}……`);
+    refreshUi();
+    try {
+        const result = await generateWithFallback(ctx, {
+            ...prompt,
+            providerProfile: moduleProvider(ctx, 'director'),
+            preferStream: settings.streamOutput !== false,
+            signal: controller.signal,
+            onText: text => {
+                runtime.directorText = String(text || '');
+                refreshUi();
+            },
+            onStatus: meta => {
+                if (meta?.phase === 'connecting') setStatus(`情节导演连接${meta.source || '模型'}……`);
+            },
+        });
+        const packet = parseDirectorPacket(result.text, task);
+        let next = previous;
+        if (task === 'longline') next = applyLonglineToDirector(previous, packet);
+        if (task === 'branch') next = applyBranchesToDirector(previous, packet);
+        if (task === 'foreshadow') next = applyForeshadowsToDirector(previous, packet);
+        if (task === 'progress') next = applyProgressToDirector(previous, packet);
+        await saveChatStateAndRefresh(ctx, { ...getChatState(ctx), director: next });
+        await updateDirectorInjection(ctx);
+        notify('success', `${task === 'longline' ? '长线规划' : task === 'branch' ? '当前分支' : task === 'foreshadow' ? '伏笔方案' : '推进状态'}已生成。`);
+        return next;
+    } catch (error) {
+        if (controller.signal.aborted) notify('info', '情节导演已中断。');
+        else {
+            console.error(`[${DISPLAY_NAME}] 情节导演失败`, error);
+            notify('error', `情节导演失败：${readableGenerationError(error)}`);
+        }
+        return null;
+    } finally {
+        if (runtime.directorAbortController === controller) runtime.directorAbortController = null;
+        runtime.directorBusy = false;
+        refreshUi();
+    }
+}
+
+function stopDirectorTask() {
+    runtime.directorAbortController?.abort(new DOMException('已中断导演生成', 'AbortError'));
+}
+
+async function updateDirectorInjection(ctx = getContext()) {
+    const state = getChatState(ctx);
+    const director = normalizeDirectorState(state.director || createEmptyDirectorState());
+    const card = buildExecutionCard({
+        directorState: director,
+        memoryState: state,
+        recentText: recentStoryText(ctx, 6),
+    });
+    if (typeof ctx.setExtensionPrompt === 'function') {
+        await ctx.setExtensionPrompt(DIRECTOR_INJECTION_ID, card, 1, 0, false, 0);
+    }
+    if (card !== director.lastExecutionCard) {
+        const next = { ...state, director: { ...director, lastExecutionCard: card } };
+        setChatState(next, ctx);
+    }
+    return card;
+}
+
+async function trackDirectorProgress(ctx = getContext()) {
+    const settings = getSettings(ctx);
+    const director = getDirectorState(ctx);
+    if (!director.enabled || !director.toggles.autoTrack || !director.currentBeatId || runtime.directorBusy) return null;
+    const prompt = buildDirectorPrompt({
+        task: 'progress',
+        memory: getChatState(ctx),
+        recentText: recentStoryText(ctx, 3),
+        state: director,
+        presetId: director.presetId,
+        customBrief: director.customBrief,
+        pacingMode: director.pacingMode,
+        pacingCustom: director.pacingCustom,
+        toggles: director.toggles,
+    });
+    const controller = new AbortController();
+    runtime.directorBusy = true;
+    runtime.directorAbortController = controller;
+    try {
+        const result = await generateDirectOnly(ctx, {
+            ...prompt,
+            providerProfile: moduleProvider(ctx, 'director'),
+            signal: controller.signal,
+        });
+        if (!result) return null;
+        const progress = parseDirectorPacket(result.text, 'progress');
+        const next = applyProgressToDirector(director, progress);
+        await saveChatStateAndRefresh(ctx, { ...getChatState(ctx), director: next });
+        await updateDirectorInjection(ctx);
+        return next;
+    } catch (error) {
+        if (!controller.signal.aborted) console.warn(`[${DISPLAY_NAME}] 自动推进判断失败`, error);
+        return null;
+    } finally {
+        if (runtime.directorAbortController === controller) runtime.directorAbortController = null;
+        runtime.directorBusy = false;
+        refreshUi();
+        scheduleAutoSummary(1200);
+    }
+}
+
+async function prepareDirectorForGeneration(ctx, type, options, dryRun) {
+    const ignored = new Set(['quiet', 'extension', 'command']);
+    if (dryRun || ignored.has(String(type || '').toLowerCase())) return;
+    try {
+        await updateDirectorInjection(ctx);
+    } catch (error) {
+        console.warn(`[${DISPLAY_NAME}] 导演提示更新失败，本轮继续使用正文生成`, error);
+        try { await ctx.setExtensionPrompt?.(DIRECTOR_INJECTION_ID, '', 1, 0, false, 0); } catch { /* Best effort cleanup. */ }
+    }
+}
+
+async function runReplyTask(ctx) {
+    if (runtime.replyBusy || runtime.busy || runtime.workflowActive || runtime.generating) {
+        notify('info', '当前还有生成任务进行中，请稍后再生成待写回复。');
+        return null;
+    }
+    const settings = getSettings(ctx);
+    const state = getChatState(ctx);
+    const reply = getReplyState(ctx);
+    const director = getDirectorState(ctx);
+    const prompt = buildReplyPrompt({
+        recentText: recentStoryText(ctx, 10),
+        memory: state,
+        directorCard: reply.followDirector ? buildExecutionCard({ directorState: director, memoryState: state, recentText: recentStoryText(ctx, 4) }) : '',
+        userPersona: userPersonaText(ctx),
+        userName: String(ctx?.name1 || '用户'),
+        characterName: String(ctx?.name2 || '角色'),
+        preferences: reply,
+    });
+    const controller = new AbortController();
+    runtime.replyBusy = true;
+    runtime.replyAbortController = controller;
+    runtime.replyText = '';
+    setStatus('待写回复正在生成五个候选……');
+    refreshUi();
+    try {
+        const result = await generateWithFallback(ctx, {
+            ...prompt,
+            providerProfile: moduleProvider(ctx, 'reply'),
+            preferStream: settings.streamOutput !== false,
+            signal: controller.signal,
+            onText: text => {
+                runtime.replyText = String(text || '');
+                refreshUi();
+            },
+        });
+        const candidates = parseReplyCandidates(result.text, reply.candidateCount);
+        const nextReply = { ...reply, lastCandidates: candidates, createdAt: Date.now() };
+        await saveChatStateAndRefresh(ctx, { ...getChatState(ctx), reply: nextReply });
+        notify('success', `已生成 ${candidates.length} 个待写回复。`);
+        return candidates;
+    } catch (error) {
+        if (controller.signal.aborted) notify('info', '待写回复已中断。');
+        else notify('error', `待写回复失败：${readableGenerationError(error)}`);
+        return null;
+    } finally {
+        if (runtime.replyAbortController === controller) runtime.replyAbortController = null;
+        runtime.replyBusy = false;
+        refreshUi();
+    }
+}
+
+function stopReplyTask() {
+    runtime.replyAbortController?.abort(new DOMException('已中断待写回复', 'AbortError'));
+}
+
+async function copyText(text) {
+    if (globalThis.navigator?.clipboard?.writeText) {
+        await globalThis.navigator.clipboard.writeText(String(text || ''));
+        return true;
+    }
+    const textarea = document.createElement('textarea');
+    textarea.value = String(text || '');
+    textarea.style.position = 'fixed';
+    textarea.style.opacity = '0';
+    document.body.appendChild(textarea);
+    textarea.select();
+    const copied = document.execCommand?.('copy');
+    textarea.remove();
+    return Boolean(copied);
+}
+
+function insertIntoSendTextarea(text, append = false) {
+    const input = document.querySelector('#send_textarea, textarea[data-send-textarea]');
+    if (!input) throw new Error('没有找到酒馆编辑栏。');
+    const current = String(input.value || '');
+    input.value = append && current ? `${current}\n\n${text}` : String(text || '');
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+    input.focus();
+    return input.value;
 }
 
 function planEligibleRange(ctx) {
@@ -693,6 +1035,7 @@ async function countTokensForPlan(ctx, text) {
 
 async function buildWorkflowBatchPlan(ctx, goalRange, reason) {
     const settings = getSettings(ctx);
+    const provider = moduleProvider(ctx, 'memory');
     const chatState = getChatState(ctx);
     const sourceText = formatMessages(getMessages(ctx), goalRange.start, goalRange.end);
     const factRequest = buildFactPrompt({
@@ -708,8 +1051,8 @@ async function buildWorkflowBatchPlan(ctx, goalRange, reason) {
     ]);
     return chooseSummaryBatchPlan({
         reason,
-        contextTokens: resolveContextWindowTokens(ctx),
-        outputTokens: resolveOutputReserveTokens(ctx),
+        contextTokens: Number(provider?.contextTokens) > 0 ? Number(provider.contextTokens) : resolveContextWindowTokens(ctx),
+        outputTokens: Number(provider?.outputTokens) >= 128 ? Number(provider.outputTokens) : resolveOutputReserveTokens(ctx),
         sourceTokens,
         promptTokens,
         autoTriggerTokens: settings.triggerTokens,
@@ -720,7 +1063,7 @@ async function buildWorkflowBatchPlan(ctx, goalRange, reason) {
 function shouldAutoSummarize(ctx) {
     const settings = getSettings(ctx);
     const chatState = getChatState(ctx);
-    if (!settings.autoSummarize || !chatState.enabled || chatState.pending || runtime.busy || runtime.workflowActive || runtime.generating) return false;
+    if (!settings.autoSummarize || !chatState.enabled || chatState.pending || runtime.busy || runtime.workflowActive || runtime.generating || runtime.directorBusy || runtime.replyBusy) return false;
     const range = planEligibleRange(ctx);
     if (!range) return false;
     const messages = getMessages(ctx);
@@ -902,7 +1245,14 @@ async function rebuildFromStart() {
     const ctx = getContext();
     const old = getChatState(ctx);
     await restoreOwnedMessages(ctx);
-    const fresh = normalizeChatState({ enabled: old.enabled, autoSummarize: old.autoSummarize, autoHide: old.autoHide });
+    const fresh = normalizeChatState({
+        enabled: old.enabled,
+        autoSummarize: old.autoSummarize,
+        autoHide: old.autoHide,
+        summaryMode: old.summaryMode,
+        director: old.director,
+        reply: old.reply,
+    });
     setChatState(fresh, ctx);
     await saveChat(ctx, { includeMessages: true });
     await applyInjection(ctx, fresh, getSettings(ctx));
@@ -922,6 +1272,7 @@ async function reconcileAndRefresh() {
         } else {
             await applyInjection(ctx, current, getSettings(ctx));
         }
+        await updateDirectorInjection(ctx);
         refreshUi();
         scheduleAutoSummary(1300);
     } catch (error) { console.warn(`[${DISPLAY_NAME}] 上下文同步失败`, error); }
@@ -943,8 +1294,172 @@ function renderCheckpointList(chatState) {
         </div>`).join('');
 }
 
+function renderDirectorPlan(director) {
+    const plan = director?.mainPlan;
+    if (!plan) return '<div class="gds-empty">还没有主线规划。输入要求后点击“生成长线规划”。</div>';
+    const arcs = (plan.arcs || []).map(arc => {
+        const beat = (arc.beats || []).find(item => item.id === director.currentBeatId) || (arc.beats || []).find(item => item.status !== 'completed');
+        return `<div class="gds-plan-arc"><strong>${escapeHtml(arc.title)}</strong><small>${escapeHtml(arc.pacing || 'balanced')} · 预计 ${Number(arc.estimatedTurns || 0)} 轮</small><p>${escapeHtml(arc.goal || '')}</p>${beat ? `<em>当前节拍：${escapeHtml(beat.goal || '')}</em>` : '<em>阶段已完成</em>'}</div>`;
+    }).join('');
+    return `<div class="gds-plan-head"><strong>${escapeHtml(plan.title)}</strong><span>${plan.status === 'locked' ? '已锁定' : '草案'}</span></div><p>${escapeHtml(plan.premise || '')}</p><div class="gds-plan-arcs">${arcs}</div><button data-gds-director-lock ${plan.status === 'locked' ? 'disabled' : ''}>${plan.status === 'locked' ? '主线已锁定' : '确认并锁定主线'}</button>`;
+}
+
+function renderDirectorBranches(director) {
+    const branches = Array.isArray(director?.branchCandidates) ? director.branchCandidates : [];
+    if (!branches.length) return '<div class="gds-empty">还没有分支候选。</div>';
+    return branches.map(branch => `<article class="gds-branch-card ${branch.id === director.activeBranchId ? 'active' : ''}"><strong>${escapeHtml(branch.title)}</strong><p>${escapeHtml(branch.summary)}</p><small>${escapeHtml(branch.reason || '')}</small><button data-gds-director-select-branch="${escapeHtml(branch.id)}">${branch.id === director.activeBranchId ? '当前执行中' : '采用此分支'}</button></article>`).join('');
+}
+
+function renderDirectorForeshadows(director) {
+    const items = Array.isArray(director?.foreshadows) ? director.foreshadows : [];
+    if (!items.length) return '<div class="gds-empty">还没有伏笔方案。</div>';
+    return items.map(item => `<article class="gds-foreshadow-card"><strong>${escapeHtml(item.name)}</strong><span>${escapeHtml(item.status)}</span><p>${escapeHtml(item.surface)}</p><small>真实含义：${escapeHtml(item.meaning || '待补充')}</small></article>`).join('');
+}
+
+function renderReplyCandidates(candidates) {
+    if (!Array.isArray(candidates) || !candidates.length) return '<div class="gds-empty">还没有待写回复。点击“生成五个候选”。</div>';
+    return candidates.map((item, index) => `<article class="gds-reply-card"><div class="gds-reply-card-head"><strong>${escapeHtml(item.title || `候选 ${index + 1}`)}</strong><small>${escapeHtml(item.intent || '')}</small></div><textarea readonly data-gds-reply-text="${escapeHtml(item.id)}">${escapeHtml(item.text)}</textarea><p>${escapeHtml(item.possibleEffect || '')}</p><div><button data-gds-reply-copy="${escapeHtml(item.id)}">复制</button><button class="gds-primary" data-gds-reply-insert="${escapeHtml(item.id)}">放入编辑栏</button></div></article>`).join('');
+}
+
+function populateDirectorOptions(overlay) {
+    const preset = overlay.querySelector('[data-gds-director-preset]');
+    if (preset && !preset.options.length) {
+        preset.innerHTML = [
+            ['balanced', '均衡推进'],
+            ['broken-reunion', '破镜重圆 · 酸涩慢热'],
+            ['dual-growth', '双强成长 · 并肩升级'],
+            ['identity-secret', '身份秘密 · 逐层掉马'],
+            ['slow-burn', '暗恋成真 · 克制渗透'],
+            ['redemption', '救赎陪伴 · 克制治愈'],
+            ['first-marriage', '先婚后爱 · 日常变真心'],
+            ['mystery-ensemble', '悬疑群像 · 感情暗线'],
+        ].map(([value, label]) => `<option value="${value}">${label}</option>`).join('');
+    }
+    const pacing = overlay.querySelector('[data-gds-director-pacing]');
+    if (pacing && !pacing.options.length) pacing.innerHTML = PACING_OPTIONS.map(item => `<option value="${item.id}">${item.name}：${item.description}</option>`).join('');
+    const viewpoint = overlay.querySelector('[data-gds-reply-viewpoint]');
+    if (viewpoint && !viewpoint.options.length) viewpoint.innerHTML = REPLY_VIEWPOINTS.map(item => `<option value="${item.id}">${item.name}</option>`).join('');
+    const detail = overlay.querySelector('[data-gds-reply-detail]');
+    if (detail && !detail.options.length) detail.innerHTML = REPLY_DETAIL_LEVELS.map(item => `<option value="${item.id}">${item.name}</option>`).join('');
+    const length = overlay.querySelector('[data-gds-reply-length]');
+    if (length && !length.options.length) length.innerHTML = '<option value="short">短（1–3句）</option><option value="medium">中（一个完整回合）</option><option value="long">长（多段行动）</option>';
+    const initiative = overlay.querySelector('[data-gds-reply-initiative]');
+    if (initiative && !initiative.options.length) initiative.innerHTML = '<option value="passive">被动回应</option><option value="natural">自然接话</option><option value="active">主动推进</option>';
+}
+
+function providerChoices(ctx) {
+    const settings = getSettings(ctx);
+    const choices = [{ value: PROVIDER_CURRENT, label: '跟随当前酒馆连接' }];
+    for (const profile of getConnectionManagerProfiles(ctx)) choices.push({ value: `connection:${profile.id}`, label: `酒馆连接：${profile.name}` });
+    for (const profile of normalizeProviderProfiles(settings.apiProfiles)) choices.push({ value: profile.id, label: `独立连接：${profile.name}` });
+    return choices;
+}
+
+function populateProviderSelectors(overlay, ctx) {
+    const choices = providerChoices(ctx);
+    const signature = JSON.stringify(choices);
+    for (const moduleName of ['memory', 'director', 'reply']) {
+        const select = overlay.querySelector(`[data-gds-provider="${moduleName}"]`);
+        if (!select) continue;
+        const previous = select.value;
+        if (select.dataset.gdsProviderChoices !== signature) {
+            select.innerHTML = choices.map(item => `<option value="${escapeHtml(item.value)}">${escapeHtml(item.label)}</option>`).join('');
+            select.dataset.gdsProviderChoices = signature;
+        }
+        const desired = getSettings(ctx).moduleConnections?.[moduleName] || PROVIDER_CURRENT;
+        select.value = choices.some(item => item.value === desired) ? desired : (choices.some(item => item.value === previous) ? previous : PROVIDER_CURRENT);
+    }
+}
+
+async function saveApiProfileFromUi(ctx) {
+    const overlay = runtime.overlay;
+    const name = String(overlay.querySelector('[data-gds-api-name]')?.value || '').trim();
+    const baseUrl = String(overlay.querySelector('[data-gds-api-url]')?.value || '').trim();
+    const apiKey = String(overlay.querySelector('[data-gds-api-key]')?.value || '');
+    const model = String(overlay.querySelector('[data-gds-api-model]')?.value || '').trim();
+    if (!baseUrl || !model) throw new Error('请先填写独立 API URL 和模型名。');
+    const id = `custom_${Date.now()}`;
+    const profile = {
+        id,
+        kind: 'openai-compatible',
+        name: name || model,
+        baseUrl,
+        apiKey,
+        model,
+        contextTokens: Math.max(0, Number(overlay.querySelector('[data-gds-api-context]')?.value || 0) || 0),
+        outputTokens: Math.max(128, Number(overlay.querySelector('[data-gds-api-output]')?.value || 4096) || 4096),
+        stream: true,
+    };
+    const settings = getSettings(ctx);
+    settings.apiProfiles = [...normalizeProviderProfiles(settings.apiProfiles), profile];
+    const moduleName = overlay.querySelector('[data-gds-api-module]')?.value || 'director';
+    settings.moduleConnections[moduleName] = id;
+    ctx.extensionSettings[SETTINGS_KEY] = settings;
+    saveSettings(ctx);
+    populateProviderSelectors(overlay, ctx);
+    refreshUi();
+    notify('success', `独立连接已保存并绑定到${moduleName === 'memory' ? '剧情记忆' : moduleName === 'director' ? '情节导演' : '待写回复'}。`);
+}
+
+async function testApiProfileFromUi(ctx) {
+    const overlay = runtime.overlay;
+    const profile = {
+        kind: 'openai-compatible',
+        name: String(overlay.querySelector('[data-gds-api-name]')?.value || '独立连接'),
+        baseUrl: String(overlay.querySelector('[data-gds-api-url]')?.value || '').trim(),
+        apiKey: String(overlay.querySelector('[data-gds-api-key]')?.value || ''),
+        model: String(overlay.querySelector('[data-gds-api-model]')?.value || '').trim(),
+    };
+    const models = await listDirectModels(profile);
+    notify('success', models.length ? `连接成功，模型：${models.slice(0, 8).join('、')}${models.length > 8 ? '……' : ''}` : '连接成功，但服务未返回模型列表。');
+}
+
+function setActiveTab(tab = 'memory') {
+    const windowNode = runtime.overlay?.querySelector('.gds-window');
+    if (!windowNode) return;
+    const active = ['memory', 'director', 'reply'].includes(tab) ? tab : 'memory';
+    windowNode.dataset.gdsTab = active;
+    for (const button of windowNode.querySelectorAll('[data-gds-tab]')) button.classList.toggle('active', button.dataset.gdsTab === active);
+    for (const panel of windowNode.querySelectorAll('[data-gds-tab-panel]')) panel.hidden = panel.dataset.gdsTabPanel !== active;
+}
+
+function updateDirectorFromUi(ctx) {
+    const current = getDirectorState(ctx);
+    const overlay = runtime.overlay;
+    const next = normalizeDirectorState({
+        ...current,
+        enabled: Boolean(overlay.querySelector('[data-gds-director-enabled]')?.checked),
+        presetId: overlay.querySelector('[data-gds-director-preset]')?.value || current.presetId,
+        pacingMode: overlay.querySelector('[data-gds-director-pacing]')?.value || current.pacingMode,
+        pacingCustom: overlay.querySelector('[data-gds-director-pacing-custom]')?.value || '',
+        customBrief: overlay.querySelector('[data-gds-director-brief]')?.value || '',
+        toggles: Object.fromEntries(Object.keys(current.toggles).map(key => [key, Boolean(overlay.querySelector(`[data-gds-director-toggle="${key}"]`)?.checked)])),
+    });
+    saveDirectorState(ctx, next);
+    saveSettings(ctx);
+    return next;
+}
+
+function updateReplyFromUi(ctx) {
+    const current = getReplyState(ctx);
+    const overlay = runtime.overlay;
+    const next = normalizeReplyState({
+        ...current,
+        viewpoint: overlay.querySelector('[data-gds-reply-viewpoint]')?.value || current.viewpoint,
+        detail: overlay.querySelector('[data-gds-reply-detail]')?.value || current.detail,
+        length: overlay.querySelector('[data-gds-reply-length]')?.value || current.length,
+        initiative: overlay.querySelector('[data-gds-reply-initiative]')?.value || current.initiative,
+        tone: overlay.querySelector('[data-gds-reply-tone]')?.value || current.tone,
+        followDirector: Boolean(overlay.querySelector('[data-gds-reply-follow]')?.checked),
+        customInstruction: overlay.querySelector('[data-gds-reply-brief]')?.value || '',
+    });
+    saveReplyState(ctx, next);
+    return next;
+}
+
 function savedRecap(chatState) {
-    const direct = String(chatState?.recap || '').trim();
+    const selected = String(chatState?.summaryArtifacts?.[chatState?.summaryMode] || '').trim();
+    const direct = selected || String(chatState?.recap || '').trim();
     if (direct) return direct;
     const latest = [...(chatState?.checkpoints || [])]
         .reverse()
@@ -956,12 +1471,14 @@ function refreshUi() {
     if (!runtime.overlay) return;
     const ctx = getContext();
     const settings = getSettings(ctx);
+    populateProviderSelectors(runtime.overlay, ctx);
     const chatState = getChatState(ctx);
-    const messages = getMessages(ctx);
     const summary = runtime.overlay.querySelector('[data-gds-summary]');
     const preview = runtime.overlay.querySelector('[data-gds-preview]');
     const streamPreview = runtime.overlay.querySelector('[data-gds-stream-preview]');
     const recap = savedRecap(chatState);
+    const director = getDirectorState(ctx);
+    const reply = getReplyState(ctx);
     if (recap && !chatState.recap.trim()) {
         chatState.recap = recap;
         setChatState(chatState, ctx);
@@ -971,12 +1488,7 @@ function refreshUi() {
     if (streamPreview && document.activeElement !== streamPreview) {
         streamPreview.value = runtime.streamText || chatState.pending?.partialText || '';
     }
-    if (preview) preview.value = compileInjection(chatState, {
-        query: recentQuery(messages),
-        maxTokens: settings.injectionMaxTokens,
-        recallLimit: settings.recallLimit,
-        mode: settings.injectionMode,
-    });
+    if (preview) preview.value = compileInjection(chatState, { maxTokens: settings.injectionMaxTokens });
     const metrics = runtime.overlay.querySelector('[data-gds-metrics]');
     if (metrics) metrics.innerHTML = `
         <span>场景 ${chatState.sceneCards.length}</span>
@@ -991,7 +1503,7 @@ function refreshUi() {
         const orphanOutput = Boolean(runtime.streamText.trim() && !hasCheckpoint && !chatState.pending);
         if (chatState.pending) status.textContent = `总结未完成：${stageName(chatState.pending.stage)}，请点击“继续”`;
         else if (runtime.lastError) status.textContent = `未保存：${runtime.lastError}`;
-        else if (recapMissing) status.textContent = '检查点已保存，但文学前情为空，请点击“恢复并重建”';
+        else if (recapMissing) status.textContent = '检查点已保存，但当前总结成品为空，请点击“恢复并重建”';
         else if (orphanOutput) status.textContent = '收到模型文本，但尚未保存成记忆，请重新总结';
         else if (runtime.lastSuccess) status.textContent = runtime.lastSuccess;
         else status.textContent = hasCheckpoint ? '记忆已保存并正在注入' : '尚未建立记忆，点击“立即总结”';
@@ -999,15 +1511,19 @@ function refreshUi() {
     const summarize = runtime.overlay.querySelector('[data-gds-summarize]');
     const resume = runtime.overlay.querySelector('[data-gds-continue]');
     const stop = runtime.overlay.querySelector('[data-gds-stop]');
+    const directorStop = runtime.overlay.querySelector('[data-gds-director-stop]');
+    const replyStop = runtime.overlay.querySelector('[data-gds-reply-stop]');
     const rebuild = runtime.overlay.querySelector('[data-gds-rebuild]');
     const restore = runtime.overlay.querySelector('[data-gds-restore]');
-    const taskActive = runtime.busy || runtime.workflowActive;
+    const taskActive = runtime.busy || runtime.workflowActive || runtime.directorBusy || runtime.replyBusy;
     if (summarize) summarize.disabled = taskActive || Boolean(chatState.pending);
     if (resume) {
         resume.hidden = taskActive || !chatState.pending;
         resume.disabled = taskActive;
     }
-    if (stop) stop.hidden = !runtime.busy || !runtime.abortController;
+    if (stop) stop.hidden = !(runtime.busy && runtime.abortController);
+    if (directorStop) directorStop.hidden = !(runtime.directorBusy && runtime.directorAbortController);
+    if (replyStop) replyStop.hidden = !(runtime.replyBusy && runtime.replyAbortController);
     if (rebuild) rebuild.disabled = taskActive;
     if (restore) restore.disabled = taskActive;
     const list = runtime.overlay.querySelector('[data-gds-checkpoints]');
@@ -1017,11 +1533,13 @@ function refreshUi() {
     const collapse = runtime.overlay.querySelector('[data-gds-collapse]');
     const stream = runtime.overlay.querySelector('[data-gds-stream]');
     const mode = runtime.overlay.querySelector('[data-gds-mode]');
+    const summaryMode = runtime.overlay.querySelector('[data-gds-summary-mode]');
     if (auto) auto.checked = Boolean(settings.autoSummarize);
     if (hide) hide.checked = Boolean(settings.autoHide);
     if (collapse) collapse.checked = Boolean(settings.collapseHidden);
     if (stream) stream.checked = settings.streamOutput !== false;
-    if (mode) mode.value = settings.injectionMode;
+    if (mode) mode.value = 'balanced';
+    if (summaryMode) summaryMode.value = chatState.summaryMode || settings.summaryMode;
     for (const [selector, value] of [
         ['[data-gds-trigger]', settings.triggerTokens],
         ['[data-gds-keep]', settings.keepMessages],
@@ -1031,6 +1549,46 @@ function refreshUi() {
         const input = runtime.overlay.querySelector(selector);
         if (input && document.activeElement !== input) input.value = value;
     }
+    const directorEnabled = runtime.overlay.querySelector('[data-gds-director-enabled]');
+    const directorPreset = runtime.overlay.querySelector('[data-gds-director-preset]');
+    const directorPacing = runtime.overlay.querySelector('[data-gds-director-pacing]');
+    const directorPacingCustom = runtime.overlay.querySelector('[data-gds-director-pacing-custom]');
+    const directorBrief = runtime.overlay.querySelector('[data-gds-director-brief]');
+    if (directorEnabled) directorEnabled.checked = Boolean(director.enabled);
+    if (directorPreset) directorPreset.value = director.presetId;
+    if (directorPacing) directorPacing.value = director.pacingMode;
+    if (directorPacingCustom && document.activeElement !== directorPacingCustom) directorPacingCustom.value = director.pacingCustom || '';
+    if (directorBrief && document.activeElement !== directorBrief) directorBrief.value = director.customBrief;
+    for (const [selector, value] of Object.entries(director.toggles || {})) {
+        const input = runtime.overlay.querySelector(`[data-gds-director-toggle="${selector}"]`);
+        if (input) input.checked = Boolean(value);
+    }
+    const directorOutput = runtime.overlay.querySelector('[data-gds-director-output]');
+    if (directorOutput && document.activeElement !== directorOutput) directorOutput.value = runtime.directorText || director.lastExecutionCard || '';
+    const directorPlan = runtime.overlay.querySelector('[data-gds-director-plan]');
+    if (directorPlan) directorPlan.innerHTML = renderDirectorPlan(director);
+    const branchList = runtime.overlay.querySelector('[data-gds-director-branches]');
+    if (branchList) branchList.innerHTML = renderDirectorBranches(director);
+    const foreshadowList = runtime.overlay.querySelector('[data-gds-director-foreshadows]');
+    if (foreshadowList) foreshadowList.innerHTML = renderDirectorForeshadows(director);
+    const replyViewpoint = runtime.overlay.querySelector('[data-gds-reply-viewpoint]');
+    const replyDetail = runtime.overlay.querySelector('[data-gds-reply-detail]');
+    const replyLength = runtime.overlay.querySelector('[data-gds-reply-length]');
+    const replyInitiative = runtime.overlay.querySelector('[data-gds-reply-initiative]');
+    const replyTone = runtime.overlay.querySelector('[data-gds-reply-tone]');
+    const replyBrief = runtime.overlay.querySelector('[data-gds-reply-brief]');
+    if (replyViewpoint) replyViewpoint.value = reply.viewpoint;
+    if (replyDetail) replyDetail.value = reply.detail;
+    if (replyLength) replyLength.value = reply.length;
+    if (replyInitiative) replyInitiative.value = reply.initiative;
+    if (replyTone) replyTone.value = reply.tone;
+    const replyFollow = runtime.overlay.querySelector('[data-gds-reply-follow]');
+    if (replyFollow) replyFollow.checked = Boolean(reply.followDirector);
+    if (replyBrief && document.activeElement !== replyBrief) replyBrief.value = reply.customInstruction;
+    const replyOutput = runtime.overlay.querySelector('[data-gds-reply-output]');
+    if (replyOutput && document.activeElement !== replyOutput) replyOutput.value = runtime.replyText || '';
+    const replyList = runtime.overlay.querySelector('[data-gds-reply-list]');
+    if (replyList) replyList.innerHTML = renderReplyCandidates(reply.lastCandidates);
     applyCollapsedView();
 }
 
@@ -1242,24 +1800,26 @@ function createUi() {
     overlay.innerHTML = `
         <div class="gds-window">
             <header class="gds-header" title="桌面端可按住标题栏拖动">
-                <div><img class="gds-puppy" src="${escapeHtml(PANEL_LOGO_URL)}" alt="" aria-hidden="true"><div><h2>嘎嘎小狗总结</h2><small>剧情记忆 · 文风继承 · 自动隐藏</small></div></div>
+                <div><img class="gds-puppy" src="${escapeHtml(PANEL_LOGO_URL)}" alt="" aria-hidden="true"><div><h2>嘎嘎小狗故事工作台</h2><small>剧情记忆 · 情节导演 · 待写回复</small></div></div>
                 <button class="gds-icon-button" data-gds-close title="关闭">×</button>
             </header>
-            <div class="gds-status" data-gds-status>尚未建立记忆，点击“立即总结”</div>
-            <div class="gds-metrics" data-gds-metrics></div>
-            <div class="gds-actions">
+            <nav class="gds-tabs" aria-label="故事工作台功能"><button class="active" data-gds-tab="memory">剧情记忆</button><button data-gds-tab="director">情节导演</button><button data-gds-tab="reply">待写回复</button></nav>
+            <div class="gds-status" data-gds-tab-panel="memory" data-gds-status>尚未建立记忆，点击“立即总结”</div>
+            <div class="gds-metrics" data-gds-tab-panel="memory" data-gds-metrics></div>
+            <div class="gds-actions" data-gds-tab-panel="memory">
                 <button class="gds-primary" data-gds-summarize>立即总结</button>
                 <button class="gds-primary" data-gds-continue hidden>继续</button>
                 <button class="gds-danger" data-gds-stop hidden>中断</button>
                 <button data-gds-rebuild>恢复并重建</button>
                 <button data-gds-restore>恢复隐藏</button>
             </div>
-            <div class="gds-grid">
+            <div class="gds-grid" data-gds-tab-panel="memory">
                 <label class="gds-field gds-wide gds-stream-field"><span>当前阶段原始返回（事实 → 草稿 → 润色，不代表已保存）</span><textarea rows="6" readonly data-gds-stream-preview placeholder="每个阶段会重新显示；正常批次会自动衔接，只有中断或失败后才需要点击继续"></textarea></label>
-                <label class="gds-field gds-wide"><span>文学版前情（可编辑）</span><textarea rows="8" data-gds-summary placeholder="总结后会在这里显示有文笔的前情回顾"></textarea><button data-gds-save-summary>保存前情修改</button></label>
+                <label class="gds-field gds-wide"><span>总结版本</span><select data-gds-summary-mode><option value="novel">小说版：全知视角与文学表达</option><option value="structured">结构化版：事实、状态和未结事项</option><option value="mixed">混合版：文学前情＋必要记忆锚点</option></select></label>
+                <label class="gds-field gds-wide"><span>当前总结成品（可编辑）</span><textarea rows="10" data-gds-summary placeholder="选择总结版本后，这里显示唯一会注入正文模型的记忆成品"></textarea><button data-gds-save-summary>保存当前总结</button></label>
                 <label class="gds-field gds-wide"><span>模型实际收到的记忆注入</span><textarea rows="10" readonly data-gds-preview></textarea></label>
             </div>
-            <details class="gds-details" open><summary>自动总结与上下文</summary>
+            <details class="gds-details" data-gds-tab-panel="memory" open><summary>自动总结与上下文</summary>
                 <div class="gds-settings-grid">
                     <label class="gds-toggle-row"><input type="checkbox" data-gds-auto><span>自动总结</span></label>
                     <label class="gds-toggle-row"><input type="checkbox" data-gds-hide><span>总结成功后自动隐藏旧正文</span></label>
@@ -1269,15 +1829,74 @@ function createUi() {
                     <label>保留近期消息 <input type="number" min="4" step="1" data-gds-keep></label>
                     <label>注入上限 Token <input type="number" min="160" step="100" data-gds-injection></label>
                     <label>前情目标字数 <input type="number" min="80" step="20" data-gds-words></label>
-                    <label>注入模式 <select data-gds-mode><option value="safe">安全：只发事实</option><option value="balanced">平衡：事实与前情</option></select></label>
                 </div>
-                <p class="gds-help">Token 数值只控制自动总结何时启动。手动点击“立即总结”会读取酒馆当前上下文容量：完整旧正文装得下就整段处理，只有装不下时才自适应拆批并在后台连续完成。只有主动中断或生成失败时才会出现“继续”。自动隐藏使用 /hide，恢复隐藏使用 /unhide。</p>
+                <p class="gds-help">手动总结会读取酒馆当前上下文容量：完整旧正文装得下就整段处理，只有装不下时才自适应拆批并在后台连续完成。自动总结仍以触发 Token 为准。只有主动中断或生成失败时才会出现“继续”。</p>
             </details>
-            <details class="gds-details"><summary>检查点</summary><div data-gds-checkpoints></div></details>
+            <details class="gds-details" data-gds-tab-panel="memory"><summary>模型连接</summary>
+                <div class="gds-settings-grid gds-provider-grid">
+                    <label>剧情记忆使用 <select data-gds-provider="memory"></select></label>
+                    <label>情节导演使用 <select data-gds-provider="director"></select></label>
+                    <label>待写回复使用 <select data-gds-provider="reply"></select></label>
+                </div>
+                <div class="gds-api-form">
+                    <p class="gds-help">默认跟随当前酒馆。需要单独模型时，可保存一个 OpenAI 兼容连接，再分别绑定到三个模块。</p>
+                    <div class="gds-settings-grid">
+                        <label>连接名称 <input type="text" data-gds-api-name placeholder="例如：导演创作模型"></label>
+                        <label>API URL <input type="url" data-gds-api-url placeholder="https://example.com/v1"></label>
+                        <label>API Key <input type="password" data-gds-api-key autocomplete="off"></label>
+                        <label>模型 <input type="text" data-gds-api-model placeholder="例如：gpt-4o-mini"></label>
+                        <label>上下文 Token <input type="number" min="0" step="1024" data-gds-api-context placeholder="不知道可留空"></label>
+                        <label>最大输出 Token <input type="number" min="128" step="128" data-gds-api-output value="4096"></label>
+                        <label>绑定模块 <select data-gds-api-module><option value="memory">剧情记忆</option><option value="director">情节导演</option><option value="reply">待写回复</option></select></label>
+                    </div>
+                    <button data-gds-api-save>保存并绑定连接</button><button data-gds-api-test>测试模型列表</button>
+                </div>
+            </details>
+            <details class="gds-details" data-gds-tab-panel="memory"><summary>检查点</summary><div data-gds-checkpoints></div></details>
+            <section class="gds-tab-content" data-gds-tab-panel="director" hidden>
+                <div class="gds-section-title"><div><h3>情节导演</h3><p>规划未来剧情，不会把计划自动写入已发生记忆。</p></div><button data-gds-director-stop hidden>中断导演</button></div>
+                <div class="gds-settings-grid gds-director-settings">
+                    <label class="gds-toggle-row"><input type="checkbox" data-gds-director-enabled><span>启用导演执行卡</span></label>
+                    <label>规划风格 <select data-gds-director-preset></select></label>
+                    <label>推进速度 <select data-gds-director-pacing></select></label>
+                    <label>自定义推进说明 <input type="text" data-gds-director-pacing-custom placeholder="选择自定义时填写每阶段轮数和节奏"></label>
+                    <label class="gds-toggle-row"><input type="checkbox" data-gds-director-toggle="mainline"><span>使用已确认主线</span></label>
+                    <label class="gds-toggle-row"><input type="checkbox" data-gds-director-toggle="branch"><span>使用当前分支</span></label>
+                    <label class="gds-toggle-row"><input type="checkbox" data-gds-director-toggle="pacing"><span>控制每轮推进速度</span></label>
+                    <label class="gds-toggle-row"><input type="checkbox" data-gds-director-toggle="foreshadow"><span>使用伏笔设计</span></label>
+                    <label class="gds-toggle-row"><input type="checkbox" data-gds-director-toggle="newCharacters"><span>允许引入新角色</span></label>
+                    <label class="gds-toggle-row"><input type="checkbox" data-gds-director-toggle="sidePlots"><span>允许额外支线</span></label>
+                    <label class="gds-toggle-row"><input type="checkbox" data-gds-director-toggle="autoTrack"><span>自动判断节拍进度</span></label>
+                </div>
+                <label class="gds-field gds-wide"><span>自定义规划要求（可写题材、必做、禁用和结局）</span><textarea rows="6" data-gds-director-brief placeholder="例如：破镜重圆，过程酸涩慢热；中期引入一名知道秘密的新角色；结局 HE，不使用失忆推动。"></textarea></label>
+                <div class="gds-director-actions"><button class="gds-primary" data-gds-director-longline>生成长线规划</button><button data-gds-director-branch>生成当前分支</button><button data-gds-director-foreshadow>设计伏笔</button><button data-gds-director-save>保存导演设置</button></div>
+                <label class="gds-field gds-wide"><span>导演模型原始返回／当前执行卡</span><textarea rows="8" readonly data-gds-director-output></textarea></label>
+                <div class="gds-director-block"><h4>当前主线</h4><div data-gds-director-plan></div></div>
+                <div class="gds-director-block"><h4>分支候选</h4><div data-gds-director-branches></div></div>
+                <div class="gds-director-block"><h4>伏笔管理</h4><div data-gds-director-foreshadows></div></div>
+            </section>
+            <section class="gds-tab-content" data-gds-tab-panel="reply" hidden>
+                <div class="gds-section-title"><div><h3>待写回复</h3><p>生成五种不同策略的用户回复，选择后放入酒馆编辑栏，不会自动发送。</p></div><button data-gds-reply-stop hidden>中断代写</button></div>
+                <div class="gds-settings-grid gds-reply-settings">
+                    <label>视角 <select data-gds-reply-viewpoint></select></label>
+                    <label>描写密度 <select data-gds-reply-detail></select></label>
+                    <label>回复长度 <select data-gds-reply-length></select></label>
+                    <label>主动程度 <select data-gds-reply-initiative></select></label>
+                    <label>情绪倾向 <input type="text" data-gds-reply-tone value="自然克制"></label>
+                    <label class="gds-toggle-row"><input type="checkbox" data-gds-reply-follow><span>遵循当前导演分支</span></label>
+                </div>
+                <label class="gds-field gds-wide"><span>代写自定义要求</span><textarea rows="4" data-gds-reply-brief placeholder="例如：保持嘴硬，不要直接承认心动，但要给出愿意继续见面的暗示。"></textarea></label>
+                <div class="gds-director-actions"><button class="gds-primary" data-gds-reply-generate>生成五个候选</button></div>
+                <label class="gds-field gds-wide"><span>代写模型原始返回</span><textarea rows="6" readonly data-gds-reply-output></textarea></label>
+                <div class="gds-reply-list" data-gds-reply-list></div>
+            </section>
             <footer class="gds-footer"><span>v${VERSION} · 提示词 ${PROMPT_VERSION}</span><span>原消息可恢复，不会自动删除</span></footer>
         </div>`;
     document.body.appendChild(overlay);
     runtime.overlay = overlay;
+    populateDirectorOptions(overlay);
+    populateProviderSelectors(overlay, getContext());
+    setActiveTab('memory');
     const windowNode = overlay.querySelector('.gds-window');
     const headerNode = overlay.querySelector('.gds-header');
     if (windowNode && headerNode) bindPanelDrag(windowNode, headerNode);
@@ -1292,9 +1911,13 @@ function createUi() {
     bindFloatingDrag(floating);
 
     overlay.addEventListener('click', async event => {
-        const target = event.target.closest('[data-gds-close],[data-gds-summarize],[data-gds-continue],[data-gds-stop],[data-gds-rebuild],[data-gds-restore],[data-gds-save-summary]');
+        const target = event.target.closest('[data-gds-tab],[data-gds-close],[data-gds-summarize],[data-gds-continue],[data-gds-stop],[data-gds-rebuild],[data-gds-restore],[data-gds-save-summary],[data-gds-api-save],[data-gds-api-test],[data-gds-director-longline],[data-gds-director-branch],[data-gds-director-foreshadow],[data-gds-director-save],[data-gds-director-lock],[data-gds-director-select-branch],[data-gds-director-stop],[data-gds-reply-generate],[data-gds-reply-copy],[data-gds-reply-insert],[data-gds-reply-stop]');
         if (!target) return;
         try {
+            if (target.matches('[data-gds-tab]')) {
+                setActiveTab(target.dataset.gdsTab);
+                return;
+            }
             if (target.matches('[data-gds-close]')) togglePanel(false);
             if (target.matches('[data-gds-summarize]')) await startSummary(true);
             if (target.matches('[data-gds-continue]')) await continueSummary();
@@ -1304,17 +1927,78 @@ function createUi() {
             if (target.matches('[data-gds-save-summary]')) {
                 const ctx = getContext();
                 const chatState = getChatState(ctx);
-                chatState.recap = overlay.querySelector('[data-gds-summary]')?.value || '';
+                const selectedMode = overlay.querySelector('[data-gds-summary-mode]')?.value || chatState.summaryMode || 'mixed';
+                const edited = overlay.querySelector('[data-gds-summary]')?.value || '';
+                chatState.summaryMode = selectedMode;
+                chatState.summaryArtifacts = { ...(chatState.summaryArtifacts || {}), [selectedMode]: edited };
+                if (selectedMode === 'novel') chatState.summaryArtifacts.mixed = renderMixedSummary(chatState, edited);
+                if (selectedMode === 'structured' && !chatState.summaryArtifacts.novel) chatState.summaryArtifacts.mixed = edited;
+                chatState.recap = edited;
                 setChatState(chatState, ctx);
                 await applyInjection(ctx, chatState, getSettings(ctx));
                 await saveChat(ctx);
                 notify('success', '前情修改已保存并更新注入。');
             }
-        } catch (error) { console.error(`[${DISPLAY_NAME}] UI 操作失败`, error); }
+            if (target.matches('[data-gds-api-save]')) await saveApiProfileFromUi(getContext());
+            if (target.matches('[data-gds-api-test]')) await testApiProfileFromUi(getContext());
+            if (target.matches('[data-gds-director-save]')) {
+                const ctx = getContext();
+                updateDirectorFromUi(ctx);
+                await saveChat(ctx);
+                await updateDirectorInjection(ctx);
+                notify('success', '导演设置已保存。');
+            }
+            if (target.matches('[data-gds-director-longline],[data-gds-director-branch],[data-gds-director-foreshadow]')) {
+                const ctx = getContext();
+                updateDirectorFromUi(ctx);
+                await saveChat(ctx);
+                const task = target.matches('[data-gds-director-longline]') ? 'longline' : target.matches('[data-gds-director-branch]') ? 'branch' : 'foreshadow';
+                await runDirectorTask(ctx, task);
+            }
+            if (target.matches('[data-gds-director-lock]')) {
+                const ctx = getContext();
+                const next = lockMainline(getDirectorState(ctx));
+                await saveChatStateAndRefresh(ctx, { ...getChatState(ctx), director: next });
+                await updateDirectorInjection(ctx);
+                notify('success', '主线已锁定。');
+            }
+            if (target.matches('[data-gds-director-select-branch]')) {
+                const ctx = getContext();
+                const next = selectBranch(getDirectorState(ctx), target.dataset.gdsDirectorSelectBranch);
+                await saveChatStateAndRefresh(ctx, { ...getChatState(ctx), director: next });
+                await updateDirectorInjection(ctx);
+                notify('success', '当前分支已采用。');
+            }
+            if (target.matches('[data-gds-director-stop]')) stopDirectorTask();
+            if (target.matches('[data-gds-reply-generate]')) {
+                updateReplyFromUi(getContext());
+                await runReplyTask(getContext());
+            }
+            if (target.matches('[data-gds-reply-stop]')) stopReplyTask();
+            if (target.matches('[data-gds-reply-copy]') || target.matches('[data-gds-reply-insert]')) {
+                const ctx = getContext();
+                const candidates = getReplyState(ctx).lastCandidates;
+                const item = candidates.find(candidate => candidate.id === target.dataset.gdsReplyCopy || candidate.id === target.dataset.gdsReplyInsert);
+                if (item?.text) {
+                    if (target.matches('[data-gds-reply-copy]')) {
+                        await copyText(item.text);
+                        notify('success', '候选回复已复制。');
+                    } else {
+                        const input = document.querySelector('#send_textarea, textarea[data-send-textarea]');
+                        const append = Boolean(input?.value?.trim()) && globalThis.confirm?.('编辑栏已有内容，是否追加候选回复？');
+                        insertIntoSendTextarea(item.text, append);
+                        notify('success', '候选回复已放入酒馆编辑栏。');
+                    }
+                }
+            }
+        } catch (error) {
+            console.error(`[${DISPLAY_NAME}] UI 操作失败`, error);
+            notify('error', readableGenerationError(error));
+        }
         refreshUi();
     });
 
-    for (const input of overlay.querySelectorAll('input[data-gds-auto],input[data-gds-hide],input[data-gds-collapse],input[data-gds-stream],input[data-gds-trigger],input[data-gds-keep],input[data-gds-injection],input[data-gds-words],select[data-gds-mode]')) {
+    for (const input of overlay.querySelectorAll('input[data-gds-auto],input[data-gds-hide],input[data-gds-collapse],input[data-gds-stream],input[data-gds-trigger],input[data-gds-keep],input[data-gds-injection],input[data-gds-words],select[data-gds-summary-mode],select[data-gds-provider],input[data-gds-director-enabled],select[data-gds-director-preset],select[data-gds-director-pacing],input[data-gds-director-pacing-custom],input[data-gds-director-toggle],input[data-gds-reply-follow],select[data-gds-reply-viewpoint],select[data-gds-reply-detail],select[data-gds-reply-length],select[data-gds-reply-initiative],input[data-gds-reply-tone]')) {
         input.addEventListener('change', () => {
             const ctx = getContext();
             const settings = getSettings(ctx);
@@ -1326,10 +2010,41 @@ function createUi() {
             if (input.matches('[data-gds-keep]')) settings.keepMessages = Math.max(4, Number(input.value) || DEFAULT_SETTINGS.keepMessages);
             if (input.matches('[data-gds-injection]')) settings.injectionMaxTokens = Math.max(160, Number(input.value) || DEFAULT_SETTINGS.injectionMaxTokens);
             if (input.matches('[data-gds-words]')) settings.targetWords = Math.max(80, Number(input.value) || DEFAULT_SETTINGS.targetWords);
-            if (input.matches('[data-gds-mode]')) settings.injectionMode = input.value === 'safe' ? 'safe' : 'balanced';
+            if (input.matches('[data-gds-summary-mode]')) {
+                const chatState = getChatState(ctx);
+                const mode = ['novel', 'structured', 'mixed'].includes(input.value) ? input.value : 'mixed';
+                chatState.summaryMode = mode;
+                chatState.recap = String(chatState.summaryArtifacts?.[mode] || chatState.recap || '');
+                setChatState(chatState, ctx);
+                settings.summaryMode = mode;
+                ctx.extensionSettings[SETTINGS_KEY] = settings;
+                saveSettings(ctx);
+                applyInjection(ctx, chatState, settings).catch(console.error);
+                saveChat(ctx).catch(console.error);
+            }
+            if (input.matches('[data-gds-provider]')) {
+                const moduleName = input.dataset.gdsProvider;
+                if (['memory', 'director', 'reply'].includes(moduleName)) {
+                    settings.moduleConnections[moduleName] = input.value || PROVIDER_CURRENT;
+                    ctx.extensionSettings[SETTINGS_KEY] = settings;
+                    saveSettings(ctx);
+                    if (moduleName === 'director') updateDirectorInjection(ctx).catch(console.error);
+                    refreshUi();
+                }
+            }
+            if (input.matches('[data-gds-director-enabled],[data-gds-director-preset],[data-gds-director-pacing],[data-gds-director-pacing-custom],input[data-gds-director-toggle]')) {
+                updateDirectorFromUi(ctx);
+                updateDirectorInjection(ctx).catch(console.error);
+                saveChat(ctx).catch(console.error);
+            }
+            if (input.matches('[data-gds-reply-follow],[data-gds-reply-viewpoint],[data-gds-reply-detail],[data-gds-reply-length],[data-gds-reply-initiative],[data-gds-reply-tone]')) {
+                updateReplyFromUi(ctx);
+                saveChat(ctx).catch(console.error);
+            }
             ctx.extensionSettings[SETTINGS_KEY] = settings;
             saveSettings(ctx);
-            applyInjection(ctx, getChatState(ctx), settings).then(refreshUi).catch(console.error);
+            if (!input.matches('[data-gds-director-enabled],[data-gds-director-preset],[data-gds-director-pacing],[data-gds-director-pacing-custom],input[data-gds-director-toggle],[data-gds-reply-follow],[data-gds-reply-viewpoint],[data-gds-reply-detail],[data-gds-reply-length],[data-gds-reply-initiative],[data-gds-reply-tone],[data-gds-provider]')) applyInjection(ctx, getChatState(ctx), settings).then(refreshUi).catch(console.error);
+            else refreshUi();
         });
     }
 }
@@ -1411,7 +2126,13 @@ function bindContextEvents() {
         MESSAGE_EDITED: onMessage,
         MESSAGE_SWIPED: onMessage,
         MESSAGE_DELETED: onMessage,
-        GENERATION_ENDED: () => { runtime.generating = false; scheduleAutoSummary(1500); },
+        GENERATION_AFTER_COMMANDS: (type, options, dryRun) => prepareDirectorForGeneration(ctx, type, options, dryRun),
+        GENERATION_ENDED: () => {
+            runtime.generating = false;
+            trackDirectorProgress(ctx).catch(error => console.warn(`[${DISPLAY_NAME}] 导演进度跟踪失败`, error));
+            scheduleAutoSummary(1800);
+        },
+        GENERATION_STOPPED: () => { runtime.generating = false; },
         GENERATION_STARTED: () => { runtime.generating = true; },
     };
     for (const [name, handler] of Object.entries(bindings)) if (types[name]) source.on(types[name], handler);

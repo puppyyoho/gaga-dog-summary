@@ -1,4 +1,4 @@
-export const PROMPT_VERSION = 'gaga-summary-v2';
+export const PROMPT_VERSION = 'gaga-summary-v3';
 
 export const DEFAULT_PROMPTS = {
     factSystem: `你是“嘎嘎小狗总结”的事实记忆编辑器。你只负责从故事材料中提取已经发生的内容，不负责续写、扮演角色或评价文笔。
@@ -54,11 +54,15 @@ facts 是新增或被确认的记忆；stateUpdates 是当前状态变化；thre
 {{openThreads}}
 </未结事项>
 
+<已有文学版前情>
+{{previousRecap}}
+</已有文学版前情>
+
 <原正文文风参考。只学习叙述特征，不要复用具体句子、事实或人物动作>
 {{styleAnchors}}
 </原正文文风参考>
 
-目标长度约 {{targetWords}} 字。保留关键转折、因果、关系变化和有辨识度的细节，压缩重复过程。`,
+目标长度约 {{targetWords}} 字。若已有文学版前情不为空，请把本批新增事实自然接续到其后，保留前情中仍然有效的关键细节，不要从头重写成重复段落。`,
 
     polishSystem: `你是资深中文小说修订编辑。你的任务是把“前情草稿”润色成可直接交给后续创作模型阅读的正式文学版前情。
 
@@ -79,11 +83,15 @@ facts 是新增或被确认的记忆；stateUpdates 是当前状态变化；thre
 {{draft}}
 </前情草稿>
 
+<上一版文学前情（如有）>
+{{previousRecap}}
+</上一版文学前情>
+
 <原正文文风参考。只学习叙述特征，不得挪用其中未列入事实边界的内容>
 {{styleAnchors}}
 </原正文文风参考>
 
-目标长度约 {{targetWords}} 字。必须保留草稿中的有效细节、关键转折、因果、关系变化和未结余波，只改善表达与结构。`,
+目标长度约 {{targetWords}} 字。必须保留已有前情与本批草稿的有效细节、关键转折、因果、关系变化和未结余波；将新增内容接续到旧前情之后，只改善表达与结构，不要重复旧段落。`,
 
     auditSystem: `你是剧情记忆审校员。比较原始材料、结构化记忆和文学前情，只找出确实存在的问题。
 
@@ -121,21 +129,23 @@ export function buildFactPrompt({ messages, currentState, openThreads, customPro
     return { systemPrompt: customPrompts.factSystem, prompt: body };
 }
 
-export function buildProsePrompt({ facts, currentState, openThreads, styleAnchors, targetWords = 450, customPrompts = DEFAULT_PROMPTS }) {
+export function buildProsePrompt({ facts, currentState, openThreads, styleAnchors, previousRecap = '', targetWords = 450, customPrompts = DEFAULT_PROMPTS }) {
     const prompt = fill(customPrompts.proseUser, {
         facts: String(facts || '无').slice(0, 36000),
         currentState: String(currentState || '无').slice(0, 9000),
         openThreads: String(openThreads || '无').slice(0, 7000),
+        previousRecap: String(previousRecap || '无').slice(0, 20000),
         styleAnchors: String(styleAnchors || '无').slice(0, 6000),
         targetWords: Math.max(80, Number(targetWords) || 450),
     });
     return { systemPrompt: customPrompts.proseSystem, prompt };
 }
 
-export function buildPolishPrompt({ facts, draft, styleAnchors, targetWords = 450, customPrompts = DEFAULT_PROMPTS }) {
+export function buildPolishPrompt({ facts, draft, styleAnchors, previousRecap = '', targetWords = 450, customPrompts = DEFAULT_PROMPTS }) {
     const prompt = fill(customPrompts.polishUser, {
         facts: String(facts || '无').slice(0, 48000),
         draft: String(draft || '').slice(0, 20000),
+        previousRecap: String(previousRecap || '无').slice(0, 20000),
         styleAnchors: String(styleAnchors || '无').slice(0, 6000),
         targetWords: Math.max(80, Number(targetWords) || 450),
     });

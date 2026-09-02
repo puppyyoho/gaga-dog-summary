@@ -50,9 +50,43 @@ test('summary UI exposes streaming, stop, and resumable pending tasks', () => {
     assert.match(js, /pending\.stage = 'polish'/);
     assert.match(js, /buildPolishPrompt/);
     assert.match(js, /事实 → 草稿 → 润色/);
-    assert.match(js, /检查点已保存，但文学前情为空/);
+    assert.match(js, /检查点已保存，但当前总结成品为空/);
     assert.match(js, /function savedRecap\(chatState\)/);
     assert.match(js, /status === 'committed' && String\(item\.recap/);
+});
+
+test('workbench exposes three independent modules and selected summary artifacts', () => {
+    assert.match(js, /data-gds-tab="memory"/);
+    assert.match(js, /data-gds-tab="director"/);
+    assert.match(js, /data-gds-tab="reply"/);
+    assert.match(js, /data-gds-summary-mode/);
+    assert.match(js, /summaryArtifacts/);
+    assert.match(js, /compileInjection\(chatState, \{[\s\S]*maxTokens:\s*settings\.injectionMaxTokens/);
+    assert.match(js, /data-gds-provider="memory"/);
+    assert.match(js, /data-gds-provider="director"/);
+    assert.match(js, /data-gds-provider="reply"/);
+    assert.match(js, /data-gds-api-save/);
+    assert.match(js, /data-gds-api-test/);
+    assert.match(js, /GENERATION_AFTER_COMMANDS/);
+    assert.match(js, /setExtensionPrompt\(DIRECTOR_INJECTION_ID/);
+});
+
+test('director exposes pacing, branch, foreshadow and toggle controls', () => {
+    assert.match(js, /data-gds-director-longline/);
+    assert.match(js, /data-gds-director-branch/);
+    assert.match(js, /data-gds-director-foreshadow/);
+    assert.match(js, /data-gds-director-pacing-custom/);
+    assert.match(js, /data-gds-director-toggle="foreshadow"/);
+    assert.match(js, /data-gds-director-toggle="autoTrack"/);
+    assert.match(js, /buildExecutionCard/);
+});
+
+test('reply candidates can be copied or inserted without auto-sending', () => {
+    assert.match(js, /生成五个候选/);
+    assert.match(js, /data-gds-reply-copy/);
+    assert.match(js, /data-gds-reply-insert/);
+    assert.match(js, /#send_textarea/);
+    assert.doesNotMatch(js, /send_message\(/);
 });
 
 test('uses the supplied dog image instead of emoji branding', () => {

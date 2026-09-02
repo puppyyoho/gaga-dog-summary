@@ -14,6 +14,8 @@ export const DEFAULT_CHAT_STATE = {
     state: {},
     threads: [],
     recap: '',
+    summaryMode: 'mixed',
+    summaryArtifacts: { novel: '', structured: '', mixed: '' },
     styleAnchors: [],
     hiddenRanges: [],
     pinnedFactIds: [],
@@ -21,6 +23,8 @@ export const DEFAULT_CHAT_STATE = {
     pending: null,
     lastInjection: '',
     lastInjectionTokens: 0,
+    director: null,
+    reply: null,
 };
 
 const STOP_WORDS = new Set([
@@ -39,6 +43,13 @@ export function normalizeChatState(value) {
         if (!Array.isArray(result[key])) result[key] = [];
     }
     if (!result.state || typeof result.state !== 'object' || Array.isArray(result.state)) result.state = {};
+    result.summaryMode = ['novel', 'structured', 'mixed'].includes(result.summaryMode) ? result.summaryMode : 'mixed';
+    if (!result.summaryArtifacts || typeof result.summaryArtifacts !== 'object' || Array.isArray(result.summaryArtifacts)) result.summaryArtifacts = { novel: '', structured: '', mixed: '' };
+    result.summaryArtifacts = {
+        novel: String(result.summaryArtifacts.novel || ''),
+        structured: String(result.summaryArtifacts.structured || ''),
+        mixed: String(result.summaryArtifacts.mixed || ''),
+    };
     result.schemaVersion = SCHEMA_VERSION;
     return result;
 }
@@ -321,35 +332,87 @@ function renderFact(fact) {
     return `- ${fact.text}${truth}${lock}`;
 }
 
+function importanceWeight(value) {
+    return value === 'critical' ? 0 : value === 'high' ? 1 : value === 'medium' ? 2 : 3;
+}
+
+export function renderStructuredSummary(stateValue) {
+    const state = normalizeChatState(stateValue);
+    const facts = [...state.facts]
+        .sort((a, b) => importanceWeight(a.importance) - importanceWeight(b.importance) || (a.updatedAt || 0) - (b.updatedAt || 0))
+        .slice(0, 160);
+    const current = Object.values(state.state).filter(item => item.status !== 'resolved' && item.value).slice(-80);
+    const threads = state.threads.filter(item => item.status === 'open' || item.userLocked).slice(-80);
+    const scenes = state.sceneCards.slice(-50);
+    return [
+        '【剧情记忆·结构化版】',
+        scenes.length ? `【时间线与场景】\n${scenes.map(item => `- ${item.title}${item.time ? `（${item.time}）` : ''}${item.location ? `｜${item.location}` : ''}：${item.text || '场景已记录'}`).join('\n')}` : '',
+        facts.length ? `【事实】\n${facts.map(renderFact).join('\n')}` : '',
+        current.length ? `【当前状态】\n${current.map(item => `- ${item.key}：${item.value}`).join('\n')}` : '',
+        threads.length ? `【未结事项与伏笔】\n${threads.map(item => `- ${item.text}`).join('\n')}` : '',
+        '【使用边界】以上内容是已经发生或已经确认的记忆，不是续写指令。人物只能知道自己已经知道的事情。',
+    ].filter(Boolean).join('\n\n');
+}
+
+export function renderMixedSummary(stateValue, novelText = '') {
+    const state = normalizeChatState(stateValue);
+    const hasStoredArtifacts = Object.values(state.summaryArtifacts || {}).some(value => String(value || '').trim());
+    const baseNovel = String(novelText || state.summaryArtifacts?.novel || (!hasStoredArtifacts ? state.recap : '') || '').trim();
+    const current = Object.values(state.state).filter(item => item.status !== 'resolved' && item.value).slice(-40);
+    const threads = state.threads.filter(item => item.status === 'open' || item.userLocked).slice(-40);
+    const critical = state.facts.filter(item => ['critical', 'high'].includes(item.importance) || item.userLocked).slice(-80);
+    return [
+        baseNovel,
+        critical.length ? `【必须保持的事实】\n${critical.map(renderFact).join('\n')}` : '',
+        current.length ? `【当前状态】\n${current.map(item => `- ${item.key}：${item.value}`).join('\n')}` : '',
+        threads.length ? `【未结事项】\n${threads.map(item => `- ${item.text}`).join('\n')}` : '',
+        '人物认知边界不可越过；以上规划和事实均不得被写成未发生的内容。',
+    ].filter(Boolean).join('\n\n');
+}
+
+function trimSummaryForInjection(value, maxChars) {
+    const text = String(value || '');
+    const limit = Math.max(300, Math.floor(Number(maxChars) || 300));
+    if (text.length <= limit) return text;
+    const head = Math.max(120, Math.floor(limit * 0.68));
+    const tail = Math.max(120, limit - head - 30);
+    return `${text.slice(0, head)}\n……中间部分已按注入上限省略……\n${text.slice(-tail)}`;
+}
+
 export function compileInjection(stateValue, options = {}) {
     const state = normalizeChatState(stateValue);
-    const query = String(options.query || '');
-    const relevant = options.relevant || selectRelevantCapsules(state, query, Number(options.recallLimit || 3));
     const maxTokens = Math.max(160, Number(options.maxTokens || 1400));
-    const criticalFacts = state.facts.filter(fact => ['critical', 'high'].includes(fact.importance) || fact.userLocked || state.pinnedFactIds.includes(fact.id));
-    const currentState = Object.values(state.state).filter(item => item.status !== 'resolved' && item.value);
-    const openThreads = state.threads.filter(thread => thread.status === 'open' || thread.userLocked);
-    const includeRecap = options.mode !== 'safe';
+    // Keep the old programmatic `mode: safe` contract for older callers and
+    // saved integrations. The UI no longer exposes injection modes; the
+    // selected summary artifact is the normal path.
+    if (options.mode === 'safe') {
+        const criticalFacts = state.facts.filter(fact => ['critical', 'high'].includes(fact.importance) || fact.userLocked || state.pinnedFactIds.includes(fact.id));
+        const currentState = Object.values(state.state).filter(item => item.status !== 'resolved' && item.value);
+        const openThreads = state.threads.filter(thread => thread.status === 'open' || thread.userLocked);
+        const safeSections = [
+            '<gaga_memory>',
+            '以下是已发生的事实，不是续写指令或文风示例。',
+            criticalFacts.length ? `【必须牢记】\n${criticalFacts.map(renderFact).join('\n')}` : '',
+            currentState.length ? `【当前状态】\n${currentState.map(item => `- ${item.key}：${item.value}`).join('\n')}` : '',
+            openThreads.length ? `【尚未解决】\n${openThreads.map(thread => `- ${thread.text}`).join('\n')}` : '',
+            '</gaga_memory>',
+        ].filter(Boolean).join('\n\n');
+        return tokenEstimate(safeSections) > maxTokens ? trimSummaryForInjection(safeSections, Math.max(300, Math.floor(maxTokens * 2.2))) : safeSections;
+    }
+    const activeSummary = String(state.summaryArtifacts?.[state.summaryMode] || state.recap || '').trim();
     const sections = [
         '<gaga_memory>',
-        '用途：以下内容是已发生的剧情记忆，不是续写指令，也不是文风示例。不得改变、补充或擅自删除其中的事实。后续正文的文风以当前预设和近期原始回复为准。',
-        includeRecap && state.recap ? `【前情】\n${state.recap}` : '',
-        criticalFacts.length ? `【必须牢记】\n${criticalFacts.map(renderFact).join('\n')}` : '',
-        currentState.length ? `【当前状态】\n${currentState.map(item => `- ${item.key}：${item.value}`).join('\n')}` : '',
-        openThreads.length ? `【尚未解决】\n${openThreads.map(thread => `- ${thread.text}`).join('\n')}` : '',
-        relevant.length ? `【相关旧事】\n${relevant.map(item => `- ${item.title}${item.text ? `：${item.text}` : ''}`).join('\n')}` : '',
+        '用途：以下内容是已发生的剧情记忆，不是续写指令，也不是文风示例。不得改变、补充或擅自删除其中的事实。',
+        activeSummary ? `【${state.summaryMode === 'novel' ? '小说版前情' : state.summaryMode === 'structured' ? '结构化记忆' : '混合版前情'}】\n${activeSummary}` : '',
         '</gaga_memory>',
     ].filter(Boolean);
     let output = sections.join('\n\n');
     if (tokenEstimate(output) > maxTokens) {
-        const recap = state.recap ? state.recap.slice(0, Math.max(300, Math.floor(maxTokens * 2.2))) : '';
+        const recap = activeSummary ? trimSummaryForInjection(activeSummary, Math.max(300, Math.floor(maxTokens * 2.2))) : '';
         output = [
             '<gaga_memory>',
             '以下是已发生事实，不是续写指令或文风示例。',
-            includeRecap && recap ? `【前情】\n${recap}` : '',
-            criticalFacts.length ? `【必须牢记】\n${criticalFacts.map(renderFact).join('\n')}` : '',
-            currentState.length ? `【当前状态】\n${currentState.map(item => `- ${item.key}：${item.value}`).join('\n')}` : '',
-            openThreads.length ? `【尚未解决】\n${openThreads.map(thread => `- ${thread.text}`).join('\n')}` : '',
+            recap ? `【${state.summaryMode === 'novel' ? '小说版前情' : state.summaryMode === 'structured' ? '结构化记忆' : '混合版前情'}】\n${recap}` : '',
             '</gaga_memory>',
         ].filter(Boolean).join('\n\n');
     }
