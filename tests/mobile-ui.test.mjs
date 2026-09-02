@@ -25,6 +25,7 @@ test('settings checkboxes have a high-contrast custom checked state', () => {
     assert.match(css, /\.gds-settings-grid input\[type="checkbox"\]\s*\{[\s\S]*?appearance:\s*none/);
     assert.match(css, /\.gds-settings-grid input\[type="checkbox"\]:checked\s*\{[\s\S]*?background:\s*var\(--gds-pink-deep\)/);
     assert.match(css, /\.gds-settings-grid input\[type="checkbox"\]:checked::after/);
+    assert.match(css, /background-image:\s*url\("data:image\/svg\+xml/);
 });
 
 test('opening the panel locks background scrolling and resets panel scroll', () => {

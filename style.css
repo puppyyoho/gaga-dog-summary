@@ -177,6 +177,10 @@ body.gds-panel-open { overflow: hidden !important; }
 .gds-settings-grid input[type="checkbox"]:checked {
     border-color: var(--gds-pink-deep);
     background: var(--gds-pink-deep);
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M3 8.5 6.5 12 13 4.5' fill='none' stroke='%23fff' stroke-width='2.3' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: center;
+    background-size: 15px 15px;
     box-shadow: 0 2px 7px rgba(220, 77, 136, .35);
 }
 .gds-settings-grid input[type="checkbox"]:checked::after { transform: translateY(-1px) rotate(-45deg) scale(1); }
