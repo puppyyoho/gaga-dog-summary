@@ -232,10 +232,12 @@ body.gds-panel-open { overflow: hidden !important; }
 .gds-branch-card button { margin-top: 5px; }
 .gds-branch-card p, .gds-foreshadow-card p { margin: 6px 0; }
 .gds-foreshadow-card small { display: block; color: var(--gds-muted); line-height: 1.45; }
-.gds-reply-list { display: grid; gap: 10px; }
+.gds-reply-list { display: grid; gap: 7px; }
 .gds-reply-card-head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
-.gds-reply-card textarea { box-sizing: border-box; width: 100%; min-height: 90px; margin: 8px 0; resize: vertical; border: 1px solid var(--gds-line); border-radius: 9px; padding: 9px; color: var(--gds-ink); background: #fffafd; font: inherit; line-height: 1.55; }
-.gds-reply-card p { margin: 0 0 8px; color: var(--gds-muted); font-size: 12px; }
+.gds-reply-card { padding: 8px 10px; font-size: 13px; }
+.gds-reply-card-head strong { font-size: 14px; }
+.gds-reply-card textarea { box-sizing: border-box; width: 100%; min-height: 72px; max-height: 240px; margin: 6px 0; resize: vertical; border: 1px solid var(--gds-line); border-radius: 8px; padding: 7px 8px; color: var(--gds-ink); background: #fffafd; font-family: inherit; font-size: 13px; line-height: 1.48; }
+.gds-reply-card p { margin: 0 0 6px; color: var(--gds-muted); font-size: 11px; line-height: 1.4; }
 .gds-reply-card > div:last-child { display: flex; flex-wrap: wrap; gap: 7px; }
 .gds-calendar-block .gds-section-title { align-items: center; }
 .gds-calendar-block .gds-section-title h4 { margin: 0; }

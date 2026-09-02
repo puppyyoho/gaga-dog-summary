@@ -136,6 +136,8 @@ test('reply candidates can be copied or inserted without auto-sending', () => {
     assert.match(js, /data-gds-reply-insert/);
     assert.match(js, /#send_textarea/);
     assert.doesNotMatch(js, /send_message\(/);
+    assert.match(css, /\.gds-reply-card textarea[^}]*font-size:\s*13px/);
+    assert.match(css, /\.gds-reply-list[^}]*gap:\s*7px/);
 });
 
 test('uses the supplied dog image instead of emoji branding', () => {

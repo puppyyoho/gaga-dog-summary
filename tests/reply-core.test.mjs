@@ -9,6 +9,9 @@ test('reply prompt carries viewpoint, detail, initiative and director context', 
     assert.match(request.prompt, /完整行动描写/);
     assert.match(request.prompt, /主动程度：active/);
     assert.match(request.prompt, /慢热/);
+    assert.match(request.systemPrompt, /文风/);
+    assert.match(request.systemPrompt, /破折号/);
+    assert.match(request.prompt, /正文段落之间只保留一个换行/);
 });
 
 test('parses up to five selectable candidate replies', () => {
@@ -34,4 +37,12 @@ test('repairs reply JSON that uses literal newline escapes around dialogue', () 
     assert.equal(candidates.length, 1);
     assert.match(candidates[0].text, /你说什么/);
     assert.match(candidates[0].text, /\n/);
+});
+
+test('compacts reply paragraphs and removes forbidden dash and contrast constructions', () => {
+    const raw = JSON.stringify({ candidates: [{ title: '测试——候选', intent: '不是退缩，而是试探', text: '她没有开口。\n\n不是不想回答，而是还在犹豫——她抬眼看他。' }] });
+    const candidates = parseReplyCandidates(raw, 5);
+    assert.equal(candidates[0].text, '她没有开口。\n只是还在犹豫，她抬眼看他。');
+    assert.doesNotMatch(candidates[0].text, /—|–|―|－|--/);
+    assert.doesNotMatch(candidates[0].text, /不是[^。！？\n]*而是/);
 });
