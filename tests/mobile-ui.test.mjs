@@ -52,13 +52,16 @@ test('summary UI exposes streaming, stop, and resumable pending tasks', () => {
 });
 
 test('uses the supplied dog image instead of emoji branding', () => {
-    assert.match(js, /new URL\('\.\/assets\/gaga-dog-logo\.png', import\.meta\.url\)/);
-    assert.match(js, /class="gds-puppy" src="\$\{escapeHtml\(LOGO_URL\)\}"/);
-    assert.match(js, /class="gds-floating-image" src="\$\{escapeHtml\(LOGO_URL\)\}"/);
-    assert.match(js, /class="gds-entry-puppy" src="\$\{escapeHtml\(LOGO_URL\)\}"/);
+    assert.match(js, /PANEL_LOGO_URL = new URL\('\.\/assets\/gaga-dog-logo\.png', import\.meta\.url\)/);
+    assert.match(js, /FLOATING_LOGO_URL = new URL\('\.\/assets\/gaga-dog-floating\.png', import\.meta\.url\)/);
+    assert.match(js, /class="gds-puppy" src="\$\{escapeHtml\(PANEL_LOGO_URL\)\}"/);
+    assert.match(js, /class="gds-floating-image" src="\$\{escapeHtml\(FLOATING_LOGO_URL\)\}"/);
+    assert.match(js, /class="gds-entry-puppy" src="\$\{escapeHtml\(PANEL_LOGO_URL\)\}"/);
     assert.doesNotMatch(js, /textContent\s*=\s*['"]🐶['"]/);
     assert.match(css, /\.gds-puppy\s*\{[\s\S]*?object-fit:\s*cover/);
-    assert.doesNotMatch(css, /\.gds-puppy\s*\{[\s\S]*?mix-blend-mode/);
+    assert.match(css, /\.gds-floating\s*\{[\s\S]*?background:\s*transparent\s*!important/);
+    assert.match(css, /\.gds-floating-image\s*\{[^}]*object-fit:\s*contain/);
+    assert.match(css, /\.gds-floating-image\s*\{[^}]*border-radius:\s*0/);
 });
 
 test('uses a 60000 Token default and labels it as a per-batch target', () => {
