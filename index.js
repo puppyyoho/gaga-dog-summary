@@ -1,6 +1,7 @@
 import {
     assertMemoryPacket,
     clone,
+    compactText,
     compileInjection,
     DEFAULT_CHAT_STATE,
     makeSourceRange,
@@ -18,6 +19,7 @@ import { persistChatMetadata, readChatState, writeChatState } from './chat-state
 import {
     buildAuditPrompt,
     buildFactPrompt,
+    buildPolishPrompt,
     buildProsePrompt,
     DEFAULT_PROMPTS,
     PROMPT_VERSION,
@@ -29,14 +31,15 @@ const EXTENSION_NAME = 'gaga-dog-summary';
 const DISPLAY_NAME = '嘎嘎小狗总结';
 const SETTINGS_KEY = 'gagaDogSummary';
 const INJECTION_ID = `${EXTENSION_NAME}:memory`;
-const VERSION = '0.1.5';
+const VERSION = '0.1.6';
+const SETTINGS_VERSION = 2;
 
 const DEFAULT_SETTINGS = {
     showFloatingButton: true,
     autoSummarize: true,
     autoHide: true,
     collapseHidden: true,
-    triggerTokens: 1800,
+    triggerTokens: 60000,
     keepMessages: 10,
     manualKeepMessages: 4,
     injectionMaxTokens: 1400,
@@ -95,12 +98,18 @@ function getSettings(ctx = getContext()) {
     ctx.extensionSettings ??= {};
     const current = ctx.extensionSettings[SETTINGS_KEY];
     const result = { ...DEFAULT_SETTINGS, ...(current && typeof current === 'object' ? current : {}) };
+    const migratedDefault = Boolean(current && typeof current === 'object' && !current.settingsVersion && Number(current.triggerTokens) === 1800);
+    if (migratedDefault) result.triggerTokens = DEFAULT_SETTINGS.triggerTokens;
+    result.settingsVersion = SETTINGS_VERSION;
     result.prompts = { ...DEFAULT_PROMPTS, ...(current?.prompts && typeof current.prompts === 'object' ? current.prompts : {}) };
     for (const key of ['triggerTokens', 'keepMessages', 'manualKeepMessages', 'injectionMaxTokens', 'recallLimit', 'targetWords']) {
         const value = Number(result[key]);
         result[key] = Number.isFinite(value) ? Math.max(1, Math.round(value)) : DEFAULT_SETTINGS[key];
     }
     ctx.extensionSettings[SETTINGS_KEY] = result;
+    if (migratedDefault) {
+        try { ctx.saveSettingsDebounced?.(); } catch (error) { console.warn(`[${DISPLAY_NAME}] 默认批次迁移保存失败`, error); }
+    }
     return result;
 }
 
@@ -126,9 +135,11 @@ async function saveChat(ctx = getContext(), options = {}) {
 }
 
 function formatMessages(messages, start = 0, end = messages.length - 1) {
-    return normalizeMessages(messages.slice(start, end + 1)).map(item => (
-        `[消息 ${item.index + start}｜${item.name}]\n${item.content}`
-    )).join('\n\n');
+    return messages.slice(start, end + 1).map((message, offset) => {
+        const [item] = normalizeMessages([message]);
+        const content = compactText(message?.mes ?? message?.content ?? '', 300000);
+        return `[消息 ${offset + start}｜${item.name}]\n${content}`;
+    }).join('\n\n');
 }
 
 function formatState(value) {
@@ -245,7 +256,9 @@ function cleanProse(value) {
 }
 
 function stageName(stage) {
-    return stage === 'prose' ? '文学前情' : '事实记忆';
+    if (stage === 'polish') return '文学润色';
+    if (stage === 'prose') return '前情草稿';
+    return '事实记忆';
 }
 
 function isInterrupted(error, controller) {
@@ -279,10 +292,11 @@ function updateStreamPreview(text, meta = {}) {
 function requestForResume(request, pending) {
     const partial = String(pending.partialText || '').trim();
     if (!partial) return request;
-    if (pending.stage === 'prose') {
+    if (pending.stage === 'prose' || pending.stage === 'polish') {
+        const label = pending.stage === 'polish' ? '润色稿' : '前情草稿';
         return {
             ...request,
-            prompt: `${request.prompt}\n\n<interrupted_draft>\n${partial}\n</interrupted_draft>\n\n上一次生成在途中被中断。请以这份未完成草稿为基础，输出一份从头到尾完整、连贯的最终前情；保留其中正确细节并续完，不要解释中断。`,
+            prompt: `${request.prompt}\n\n<interrupted_draft>\n${partial}\n</interrupted_draft>\n\n上一次${label}在途中被中断。请以这份未完成内容为基础，重新输出一份从头到尾完整、连贯的本阶段成稿；保留其中正确细节并续完，不要解释中断。`,
         };
     }
     return {
@@ -342,6 +356,7 @@ async function summarizeRange(ctx, range, settings, reason = 'manual', resumeTas
         partialText: '',
         factRaw: '',
         packet: null,
+        proseDraft: '',
         createdAt: Date.now(),
     };
     pending.range = clone(range);
@@ -359,10 +374,10 @@ async function summarizeRange(ctx, range, settings, reason = 'manual', resumeTas
         });
 
         let packet = pending.packet;
-        if (pending.stage === 'prose' && !packet && pending.factRaw) {
+        if ((pending.stage === 'prose' || pending.stage === 'polish') && !packet && pending.factRaw) {
             try { packet = assertMemoryPacket(parseModelPacket(pending.factRaw)); } catch { pending.stage = 'facts'; }
         }
-        if (pending.stage !== 'prose' || !packet) {
+        if (!['prose', 'polish'].includes(pending.stage) || !packet) {
             pending.stage = 'facts';
             const factResult = await runGenerationStage(ctx, factPrompt, settings, pending, controller);
             if (serial !== runtime.taskSerial || controller.signal.aborted) throw controller.signal.reason || new DOMException('已中断生成', 'AbortError');
@@ -381,6 +396,7 @@ async function summarizeRange(ctx, range, settings, reason = 'manual', resumeTas
             }
             pending.factRaw = rawPacket;
             pending.packet = clone(packet);
+            pending.proseDraft = '';
             pending.stage = 'prose';
             pending.partialText = '';
             await savePending(ctx, pending);
@@ -388,22 +404,44 @@ async function summarizeRange(ctx, range, settings, reason = 'manual', resumeTas
 
         const draft = mergeMemoryPacket(before, packet, range, checkpointId);
         const styleAnchors = selectStyleAnchors(messages, 3, { includeHidden: true });
-        const prosePrompt = buildProsePrompt({
-            facts: renderFactsForProse(draft),
-            currentState: formatState(draft),
-            openThreads: formatThreads(draft),
-            styleAnchors: styleAnchors.map(anchor => `[消息 ${anchor.index}]\n${anchor.text}`).join('\n\n'),
+        const factsForProse = renderFactsForProse(draft);
+        const styleText = styleAnchors.map(anchor => `[消息 ${anchor.index}]\n${anchor.text}`).join('\n\n');
+        let proseDraft = cleanProse(pending.proseDraft);
+        if (pending.stage !== 'polish' || !proseDraft) {
+            pending.stage = 'prose';
+            const prosePrompt = buildProsePrompt({
+                facts: factsForProse,
+                currentState: formatState(draft),
+                openThreads: formatThreads(draft),
+                styleAnchors: styleText,
+                targetWords: settings.targetWords,
+                customPrompts: settings.prompts,
+            });
+            const proseResult = await runGenerationStage(ctx, prosePrompt, settings, pending, controller);
+            if (serial !== runtime.taskSerial || controller.signal.aborted) throw controller.signal.reason || new DOMException('已中断生成', 'AbortError');
+            proseDraft = cleanProse(proseResult.text);
+            if (!proseDraft) throw new Error('前情草稿为空，无法进入文学润色');
+            pending.proseDraft = proseDraft;
+            pending.stage = 'polish';
+            pending.partialText = '';
+            await savePending(ctx, pending);
+        }
+
+        const polishPrompt = buildPolishPrompt({
+            facts: factsForProse,
+            draft: proseDraft,
+            styleAnchors: styleText,
             targetWords: settings.targetWords,
             customPrompts: settings.prompts,
         });
-        const proseResult = await runGenerationStage(ctx, prosePrompt, settings, pending, controller);
+        const polishResult = await runGenerationStage(ctx, polishPrompt, settings, pending, controller);
         if (serial !== runtime.taskSerial || controller.signal.aborted) throw controller.signal.reason || new DOMException('已中断生成', 'AbortError');
         if (runtime.abortController === controller) runtime.abortController = null;
-        setStatus('生成完成，正在校验并保存记忆……');
+        setStatus('文学润色完成，正在校验并保存记忆……');
         refreshUi();
-        const prose = cleanProse(proseResult.text);
-        draft.recap = prose || cleanProse(packet.recap) || before.recap;
-        if (!draft.recap.trim()) throw new Error('文学前情为空，尚不能提交记忆');
+        const polishedProse = cleanProse(polishResult.text);
+        if (!polishedProse) throw new Error('文学润色结果为空，尚不能提交记忆');
+        draft.recap = polishedProse;
         draft.styleAnchors = styleAnchors;
         const checkpoint = draft.checkpoints.find(item => item.id === checkpointId);
         if (!checkpoint) throw new Error('记忆检查点未建立，已阻止空结果覆盖旧记忆');
@@ -457,6 +495,7 @@ async function summarizeRange(ctx, range, settings, reason = 'manual', resumeTas
         runtime.busy = false;
         runtime.activeStage = '';
         refreshUi();
+        if (!runtime.lastError && !getChatState(ctx).pending) scheduleAutoSummary(1200);
     }
 }
 
@@ -485,7 +524,10 @@ async function applyInjection(ctx = getContext(), chatState = getChatState(ctx),
 function planRange(ctx, manual = false) {
     const settings = getSettings(ctx);
     const chatState = getChatState(ctx);
-    const options = { keepMessages: manual ? settings.manualKeepMessages : settings.keepMessages };
+    const options = {
+        keepMessages: manual ? settings.manualKeepMessages : settings.keepMessages,
+        targetTokens: settings.triggerTokens,
+    };
     return rangeForNewSummary(getMessages(ctx), chatState, options);
 }
 
@@ -726,7 +768,7 @@ function createUi() {
                 <button data-gds-restore>恢复隐藏</button>
             </div>
             <div class="gds-grid">
-                <label class="gds-field gds-wide gds-stream-field"><span>生成进度 / 原始返回（不代表已保存）</span><textarea rows="6" readonly data-gds-stream-preview placeholder="生成时会在这里实时显示；只有出现已保存检查点才算完成，中断后可点击继续"></textarea></label>
+                <label class="gds-field gds-wide gds-stream-field"><span>当前阶段原始返回（事实 → 草稿 → 润色，不代表已保存）</span><textarea rows="6" readonly data-gds-stream-preview placeholder="每个阶段会重新显示；只有出现已保存检查点才算完成，中断后可点击继续"></textarea></label>
                 <label class="gds-field gds-wide"><span>文学版前情（可编辑）</span><textarea rows="8" data-gds-summary placeholder="总结后会在这里显示有文笔的前情回顾"></textarea><button data-gds-save-summary>保存前情修改</button></label>
                 <label class="gds-field gds-wide"><span>模型实际收到的记忆注入</span><textarea rows="10" readonly data-gds-preview></textarea></label>
             </div>
@@ -736,7 +778,7 @@ function createUi() {
                     <label><input type="checkbox" data-gds-hide> 总结成功后自动隐藏旧正文</label>
                     <label><input type="checkbox" data-gds-collapse> 在界面折叠已隐藏范围</label>
                     <label><input type="checkbox" data-gds-stream> 流式生成与实时显示</label>
-                    <label>触发 Token <input type="number" min="200" step="100" data-gds-trigger></label>
+                    <label>每批总结约 Token <input type="number" min="5000" step="5000" data-gds-trigger></label>
                     <label>保留近期消息 <input type="number" min="4" step="1" data-gds-keep></label>
                     <label>注入上限 Token <input type="number" min="160" step="100" data-gds-injection></label>
                     <label>前情目标字数 <input type="number" min="80" step="20" data-gds-words></label>
@@ -788,7 +830,7 @@ function createUi() {
             if (input.matches('[data-gds-hide]')) settings.autoHide = input.checked;
             if (input.matches('[data-gds-collapse]')) settings.collapseHidden = input.checked;
             if (input.matches('[data-gds-stream]')) settings.streamOutput = input.checked;
-            if (input.matches('[data-gds-trigger]')) settings.triggerTokens = Math.max(200, Number(input.value) || DEFAULT_SETTINGS.triggerTokens);
+            if (input.matches('[data-gds-trigger]')) settings.triggerTokens = Math.max(5000, Number(input.value) || DEFAULT_SETTINGS.triggerTokens);
             if (input.matches('[data-gds-keep]')) settings.keepMessages = Math.max(4, Number(input.value) || DEFAULT_SETTINGS.keepMessages);
             if (input.matches('[data-gds-injection]')) settings.injectionMaxTokens = Math.max(160, Number(input.value) || DEFAULT_SETTINGS.injectionMaxTokens);
             if (input.matches('[data-gds-words]')) settings.targetWords = Math.max(80, Number(input.value) || DEFAULT_SETTINGS.targetWords);

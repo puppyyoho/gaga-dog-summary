@@ -66,12 +66,32 @@ test('detects changed source ranges', () => {
     assert.equal(rangeStillMatches(edited, range), false);
 });
 
+test('detects edits beyond the legacy 6000-character compatibility hash', () => {
+    const long = [{ name: 'Char', mes: `${'前'.repeat(7000)}原结尾`, send_date: 'long' }];
+    const range = makeSourceRange(long, 0, 0);
+    const edited = [{ ...long[0], mes: `${'前'.repeat(7000)}新结尾` }];
+    assert.equal(rangeStillMatches(edited, range), false);
+});
+
 test('plans a range while protecting recent messages', () => {
     const state = normalizeChatState({ lastProcessedIndex: -1 });
     const range = rangeForNewSummary(messages, state, { keepMessages: 4 });
     assert.equal(range.start, 0);
     assert.equal(range.end, 1);
     assert.equal(selectHideEnd(messages, state, { keepMessages: 4 }), 1);
+});
+
+test('splits a large backlog into approximately token-sized summary batches', () => {
+    const longMessages = Array.from({ length: 10 }, (_, index) => ({
+        name: index % 2 ? 'Char' : 'User',
+        is_user: index % 2 === 0,
+        mes: '长'.repeat(10000),
+        send_date: String(index),
+    }));
+    const state = normalizeChatState({ lastProcessedIndex: -1 });
+    const range = rangeForNewSummary(longMessages, state, { keepMessages: 4, targetTokens: 18000 });
+    assert.equal(range.start, 0);
+    assert.equal(range.end, 1);
 });
 
 test('injection modes and recall remain bounded', () => {

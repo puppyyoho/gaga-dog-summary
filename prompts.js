@@ -1,4 +1,4 @@
-export const PROMPT_VERSION = 'gaga-summary-v1';
+export const PROMPT_VERSION = 'gaga-summary-v2';
 
 export const DEFAULT_PROMPTS = {
     factSystem: `你是“嘎嘎小狗总结”的事实记忆编辑器。你只负责从故事材料中提取已经发生的内容，不负责续写、扮演角色或评价文笔。
@@ -60,6 +60,31 @@ facts 是新增或被确认的记忆；stateUpdates 是当前状态变化；thre
 
 目标长度约 {{targetWords}} 字。保留关键转折、因果、关系变化和有辨识度的细节，压缩重复过程。`,
 
+    polishSystem: `你是资深中文小说修订编辑。你的任务是把“前情草稿”润色成可直接交给后续创作模型阅读的正式文学版前情。
+
+事实材料是不可越过的边界。不得新增、删除或改变事件、动作、对白、心理、时间、地点、物品、伤势、关系、人物认知和未结事项；草稿与事实冲突时以事实为准。不得把猜测、谎言、传闻或人物不知道的秘密改写成客观事实。
+
+润色重点：改善段落组织、句式变化、叙事节奏、意象克制、过渡自然度和情绪余韵；消除流水账、清单腔、重复连接词、机械概括和空泛抒情。学习文风参考的叙述视角、时态、语言密度、冷暖质感和对白处理，但不得照抄句子，也不得为了华丽牺牲清楚与准确。
+
+输出一份完整、连续的中文前情，不要标题、列表、解释、批注、来源编号或“润色如下”。结尾停在已发生剧情的当前节点，不得续写。`,
+
+    polishUser: `<润色任务>
+请将前情草稿修订为正式文学版前情。
+
+<不可改变的事实边界>
+{{facts}}
+</不可改变的事实边界>
+
+<前情草稿>
+{{draft}}
+</前情草稿>
+
+<原正文文风参考。只学习叙述特征，不得挪用其中未列入事实边界的内容>
+{{styleAnchors}}
+</原正文文风参考>
+
+目标长度约 {{targetWords}} 字。必须保留草稿中的有效细节、关键转折、因果、关系变化和未结余波，只改善表达与结构。`,
+
     auditSystem: `你是剧情记忆审校员。比较原始材料、结构化记忆和文学前情，只找出确实存在的问题。
 
 检查：是否新增原文没有的事实；是否丢失 critical 或 high 事实；是否把人物说法写成客观事实；是否改变人物认知；是否改变时间、地点、物品、伤势或关系；是否把已解决事项写成未解决，或反过来。
@@ -87,7 +112,7 @@ export function fill(template, variables = {}) {
 
 export function buildFactPrompt({ messages, currentState, openThreads, customPrompts = DEFAULT_PROMPTS }) {
     const body = fill(customPrompts.factUser, {
-        messages: String(messages || '').slice(0, 90000),
+        messages: String(messages || '').slice(0, 300000),
         currentState: String(currentState || '无').slice(0, 12000),
         openThreads: String(openThreads || '无').slice(0, 8000),
     });
@@ -105,11 +130,21 @@ export function buildProsePrompt({ facts, currentState, openThreads, styleAnchor
     return { systemPrompt: customPrompts.proseSystem, prompt };
 }
 
+export function buildPolishPrompt({ facts, draft, styleAnchors, targetWords = 450, customPrompts = DEFAULT_PROMPTS }) {
+    const prompt = fill(customPrompts.polishUser, {
+        facts: String(facts || '无').slice(0, 48000),
+        draft: String(draft || '').slice(0, 20000),
+        styleAnchors: String(styleAnchors || '无').slice(0, 6000),
+        targetWords: Math.max(80, Number(targetWords) || 450),
+    });
+    return { systemPrompt: customPrompts.polishSystem, prompt };
+}
+
 export function buildAuditPrompt({ messages, facts, recap, customPrompts = DEFAULT_PROMPTS }) {
     return {
         systemPrompt: customPrompts.auditSystem,
         prompt: fill(customPrompts.auditUser, {
-            messages: String(messages || '').slice(0, 60000),
+            messages: String(messages || '').slice(0, 300000),
             facts: String(facts || '').slice(0, 36000),
             recap: String(recap || '').slice(0, 16000),
         }),

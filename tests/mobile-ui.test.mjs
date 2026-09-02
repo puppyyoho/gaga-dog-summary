@@ -34,6 +34,15 @@ test('summary UI exposes streaming, stop, and resumable pending tasks', () => {
     assert.match(js, /new AbortController\(\)/);
     assert.match(js, /state\.pending = clone\(pending\)/);
     assert.match(js, /rangeStillMatches\(getMessages\(ctx\), pending\.range\)/);
+    assert.match(js, /pending\.stage = 'polish'/);
+    assert.match(js, /buildPolishPrompt/);
+    assert.match(js, /事实 → 草稿 → 润色/);
+});
+
+test('uses a 60000 Token default and labels it as a per-batch target', () => {
+    assert.match(js, /triggerTokens:\s*60000/);
+    assert.match(js, /每批总结约 Token/);
+    assert.match(js, /targetTokens:\s*settings\.triggerTokens/);
 });
 
 test('settings entry uses a standard drawer and cannot become vertical text', () => {

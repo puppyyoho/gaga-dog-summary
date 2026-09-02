@@ -88,12 +88,17 @@ export function makeSourceRange(messages, start, end) {
     const normalized = normalizeMessages(messages);
     const safeStart = Math.max(0, Math.min(Number(start) || 0, Math.max(0, normalized.length - 1)));
     const safeEnd = Math.max(safeStart, Math.min(Number(end) || safeStart, Math.max(0, normalized.length - 1)));
-    const refs = normalized.slice(safeStart, safeEnd + 1).map(item => ({
-        index: item.index,
-        key: item.key,
-        hash: item.hash,
-        name: item.name,
-    }));
+    const refs = normalized.slice(safeStart, safeEnd + 1).map(item => {
+        const raw = messages[item.index];
+        const fullContent = compactText(raw?.mes ?? raw?.content ?? '', 300000);
+        return {
+            index: item.index,
+            key: item.key,
+            hash: item.hash,
+            fullHash: simpleHash(`${item.name}\n${fullContent}`),
+            name: item.name,
+        };
+    });
     return {
         start: safeStart,
         end: safeEnd,
@@ -107,7 +112,11 @@ export function rangeStillMatches(messages, range) {
     const normalized = normalizeMessages(messages);
     return range.refs.every(ref => {
         const current = normalized.find(item => item.key === ref.key) || normalized[ref.index];
-        return Boolean(current && current.hash === ref.hash);
+        if (!current || current.hash !== ref.hash) return false;
+        if (!ref.fullHash) return true;
+        const raw = messages[current.index];
+        const fullContent = compactText(raw?.mes ?? raw?.content ?? '', 300000);
+        return simpleHash(`${current.name}\n${fullContent}`) === ref.fullHash;
     });
 }
 
@@ -360,8 +369,22 @@ export function rangeForNewSummary(messages, state, options = {}) {
     const normalized = normalizeMessages(messages);
     if (!normalized.length) return null;
     const start = Math.max(0, Number(state?.lastProcessedIndex ?? -1) + 1);
-    const end = selectHideEnd(messages, state, options);
-    if (end < start) return null;
+    const availableEnd = selectHideEnd(messages, state, options);
+    if (availableEnd < start) return null;
+    const targetTokens = Math.max(0, Number(options.targetTokens || 0));
+    let end = availableEnd;
+    if (targetTokens > 0) {
+        let accumulated = 0;
+        end = start;
+        for (let index = start; index <= availableEnd; index += 1) {
+            const item = normalized[index];
+            const raw = messages[index];
+            const fullContent = compactText(raw?.mes ?? raw?.content ?? '', 300000);
+            accumulated += tokenEstimate(`[消息 ${index}｜${item.name}]\n${fullContent}\n\n`);
+            end = index;
+            if (accumulated >= targetTokens) break;
+        }
+    }
     return makeSourceRange(messages, start, end);
 }
 
