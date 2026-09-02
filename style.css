@@ -33,7 +33,6 @@
     height: 100%;
     object-fit: contain;
     border-radius: 0;
-    filter: drop-shadow(0 6px 8px rgba(109, 47, 83, .2));
 }
 
 .gds-floating:hover { transform: translateY(-2px) scale(1.05); }
