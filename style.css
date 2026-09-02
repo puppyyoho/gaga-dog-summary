@@ -35,13 +35,17 @@
     place-items: center;
     padding: 22px;
     background: rgba(40, 18, 32, .34);
+    box-sizing: border-box;
+    overflow: hidden;
 }
 
 .gds-overlay[hidden] { display: none; }
 
 .gds-window {
+    box-sizing: border-box;
     width: min(920px, 100%);
     max-height: min(900px, 92vh);
+    min-width: 0;
     overflow: auto;
     border: 1px solid var(--gds-line);
     border-radius: 22px;
@@ -50,6 +54,8 @@
     box-shadow: var(--gds-shadow);
     font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
 }
+
+body.gds-panel-open { overflow: hidden !important; }
 
 .gds-header {
     display: flex;
@@ -61,7 +67,7 @@
     background: linear-gradient(135deg, #fff8fc 0%, #fff0f7 100%);
 }
 
-.gds-header > div { display: flex; align-items: center; gap: 12px; }
+.gds-header > div { display: flex; align-items: center; gap: 12px; min-width: 0; }
 .gds-puppy { font-size: 32px; }
 .gds-header h2 { margin: 0; color: var(--gds-pink-deep); font-size: 20px; }
 .gds-header small, .gds-footer, .gds-checkpoint small { color: var(--gds-muted); }
@@ -112,9 +118,9 @@
 .gds-actions button:hover, .gds-field button:hover { border-color: var(--gds-pink); }
 .gds-actions .gds-primary { border-color: var(--gds-pink-deep); background: var(--gds-pink-deep); color: white; }
 
-.gds-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; padding: 0 22px; }
+.gds-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 14px; padding: 0 22px; min-width: 0; }
 .gds-wide { grid-column: 1 / -1; }
-.gds-field { display: flex; flex-direction: column; gap: 7px; color: var(--gds-muted); font-size: 13px; }
+.gds-field { display: flex; flex-direction: column; gap: 7px; min-width: 0; color: var(--gds-muted); font-size: 13px; }
 .gds-field textarea {
     box-sizing: border-box;
     width: 100%;
@@ -127,6 +133,9 @@
     padding: 11px;
     font: inherit;
     line-height: 1.6;
+    overflow: auto;
+    overflow-wrap: anywhere;
+    word-break: break-word;
 }
 .gds-field textarea:focus { outline: 2px solid rgba(255, 130, 179, .35); border-color: var(--gds-pink); }
 .gds-field button { align-self: flex-start; color: var(--gds-pink-deep); }
@@ -147,14 +156,82 @@
 .gds-settings-entry { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 8px 0; }
 .gds-settings-entry small { color: var(--gds-muted); }
 
-@media (max-width: 700px) {
-    .gds-overlay { padding: 8px; }
-    .gds-window { max-height: 96vh; border-radius: 16px; }
+@media (max-width: 900px) {
+    .gds-overlay {
+        top: 0 !important;
+        right: 0 !important;
+        bottom: auto !important;
+        left: 0 !important;
+        width: 100vw !important;
+        max-width: 100vw !important;
+        height: var(--gds-viewport-height, 100vh) !important;
+        min-height: 0 !important;
+        padding: 0 !important;
+        place-items: stretch !important;
+        background: var(--gds-paper) !important;
+    }
+    .gds-window {
+        width: 100% !important;
+        max-width: none !important;
+        height: 100% !important;
+        max-height: none !important;
+        min-height: 0 !important;
+        margin: 0 !important;
+        padding: 0 0 calc(18px + env(safe-area-inset-bottom, 0px)) !important;
+        border: 0 !important;
+        border-radius: 0 !important;
+        overflow-x: hidden !important;
+        overflow-y: auto !important;
+        overscroll-behavior: contain;
+        -webkit-overflow-scrolling: touch;
+        touch-action: pan-y;
+        font-size: 14px;
+    }
+    .gds-header {
+        position: sticky;
+        top: 0;
+        z-index: 5;
+        padding: calc(12px + env(safe-area-inset-top, 0px)) 14px 11px;
+        box-shadow: 0 4px 16px rgba(109, 47, 83, .1);
+    }
+    .gds-header h2 { font-size: 18px; }
+    .gds-header small { font-size: 11px; white-space: normal; }
+    .gds-puppy { font-size: 27px; }
+    .gds-icon-button { flex: 0 0 38px; width: 38px; height: 38px; }
+    .gds-status { margin: 12px 14px 7px; }
+    .gds-metrics { padding: 0 14px 12px; }
+    .gds-actions { padding: 0 14px 14px; }
+    .gds-actions button { flex: 1 1 128px; min-height: 40px; }
+    .gds-grid { display: block; padding: 0 14px; }
+    .gds-field { width: 100%; margin-bottom: 14px; }
+    .gds-field textarea {
+        width: 100% !important;
+        max-width: 100% !important;
+        min-width: 0 !important;
+        min-height: 132px;
+        max-height: 38vh;
+        max-height: 38dvh;
+        padding: 10px !important;
+        font-size: 14px !important;
+        line-height: 1.55 !important;
+    }
+    .gds-field button { width: 100%; min-height: 40px; }
+    .gds-details { margin: 14px 14px 0; }
+    .gds-details summary { min-height: 38px; display: flex; align-items: center; }
+    .gds-settings-grid { grid-template-columns: 1fr; }
+    .gds-settings-grid label { justify-content: space-between; min-width: 0; }
+    .gds-settings-grid input[type="number"], .gds-settings-grid select { max-width: 48%; }
     .gds-grid, .gds-settings-grid { grid-template-columns: 1fr; }
     .gds-wide { grid-column: auto; }
     .gds-checkpoint { grid-template-columns: 1fr; gap: 4px; }
-    .gds-footer { flex-direction: column; }
+    .gds-footer { flex-direction: column; padding: 16px 14px max(18px, env(safe-area-inset-bottom, 0px)); }
     .gds-floating { right: 14px; bottom: 14px; }
+}
+
+@supports (height: 100dvh) {
+    @media (max-width: 900px) {
+        .gds-overlay { height: var(--gds-viewport-height, 100dvh) !important; }
+    }
 }
 
 /* When the optional collapse helper is enabled, the extension may mark old messages. */

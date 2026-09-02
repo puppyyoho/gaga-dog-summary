@@ -27,7 +27,7 @@ const EXTENSION_NAME = 'gaga-dog-summary';
 const DISPLAY_NAME = '嘎嘎小狗总结';
 const SETTINGS_KEY = 'gagaDogSummary';
 const INJECTION_ID = `${EXTENSION_NAME}:memory`;
-const VERSION = '0.1.0';
+const VERSION = '0.1.1';
 
 const DEFAULT_SETTINGS = {
     showFloatingButton: true,
@@ -629,7 +629,21 @@ function togglePanel(open) {
     createUi();
     runtime.open = Boolean(open);
     runtime.overlay.hidden = !runtime.open;
-    if (runtime.open) refreshUi();
+    document.body.classList.toggle('gds-panel-open', runtime.open);
+    if (runtime.open) {
+        syncMobileViewport();
+        const windowNode = runtime.overlay.querySelector('.gds-window');
+        if (windowNode) {
+            windowNode.scrollTop = 0;
+            requestAnimationFrame(() => { windowNode.scrollTop = 0; });
+        }
+        refreshUi();
+    }
+}
+
+function syncMobileViewport() {
+    const height = Math.round(globalThis.visualViewport?.height || globalThis.innerHeight || 0);
+    if (height > 0) document.documentElement.style.setProperty('--gds-viewport-height', `${height}px`);
 }
 
 function bindContextEvents() {
@@ -669,6 +683,9 @@ export async function init() {
         createUi();
         createSettingsEntry();
         bindContextEvents();
+        syncMobileViewport();
+        globalThis.visualViewport?.addEventListener?.('resize', syncMobileViewport);
+        globalThis.addEventListener?.('orientationchange', syncMobileViewport);
         await reconcileAndRefresh();
         const settings = getSettings(ctx);
         if (runtime.floating) runtime.floating.hidden = !settings.showFloatingButton;
