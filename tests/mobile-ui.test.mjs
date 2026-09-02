@@ -11,7 +11,7 @@ const js = readFileSync(join(here, '..', 'index.js'), 'utf8');
 test('mobile panel uses a full dynamic viewport with its own scrolling', () => {
     assert.match(css, /@media \(max-width: 900px\)/);
     assert.match(css, /height:\s*var\(--gds-viewport-height, 100vh\)\s*!important/);
-    assert.match(css, /overflow-y:\s*auto\s*!important/);
+    assert.match(css, /\.gds-page-host[\s\S]*overflow-y:\s*auto/);
     assert.match(css, /-webkit-overflow-scrolling:\s*touch/);
 });
 
@@ -71,6 +71,8 @@ test('workbench exposes three independent modules and selected summary artifacts
     assert.match(js, /setExtensionPrompt\(DIRECTOR_INJECTION_ID/);
     assert.match(js, /data-gds-tab-panel="home"/);
     assert.match(js, /gds-home-card/);
+    assert.match(js, /class="gds-page-host"/);
+    assert.match(js, /data-gds-tab="connections"/);
     assert.match(js, /setActiveTab\('home'\)/);
 });
 
@@ -105,6 +107,13 @@ test('director exposes stop, continue and restart controls', () => {
     assert.match(js, /continuationDraft/);
     assert.match(js, /taskState: \{ task, status: 'completed'/);
     assert.match(css, /\.gds-director-task-actions/);
+});
+
+test('keeps switched pages in a dedicated scrolling viewport and resists theme hidden overrides', () => {
+    assert.match(css, /\.gds-page-host/);
+    assert.match(css, /\.gds-window \[data-gds-tab-panel\]\[hidden\]\s*\{\s*display:\s*none !important/);
+    assert.match(css, /overflow:\s*hidden !important/);
+    assert.match(js, /pageHost\.scrollTop = 0/);
 });
 
 test('reply candidates can be copied or inserted without auto-sending', () => {

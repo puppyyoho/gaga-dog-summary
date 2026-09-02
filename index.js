@@ -81,7 +81,7 @@ const INJECTION_ID = `${EXTENSION_NAME}:memory`;
 const DIRECTOR_INJECTION_ID = `${EXTENSION_NAME}:director`;
 const PANEL_LOGO_URL = new URL('./assets/gaga-dog-logo.png', import.meta.url).href;
 const FLOATING_LOGO_URL = new URL('./assets/gaga-dog-floating.png', import.meta.url).href;
-const VERSION = '0.3.0';
+const VERSION = '0.3.1';
 const SETTINGS_VERSION = 5;
 
 const DEFAULT_SETTINGS = {
@@ -1518,18 +1518,21 @@ async function testApiProfileFromUi(ctx) {
 function setActiveTab(tab = 'home') {
     const windowNode = runtime.overlay?.querySelector('.gds-window');
     if (!windowNode) return;
-    const active = ['home', 'memory', 'director', 'reply'].includes(tab) ? tab : 'home';
+    const active = ['home', 'memory', 'director', 'reply', 'connections'].includes(tab) ? tab : 'home';
     windowNode.dataset.gdsTab = active;
     for (const button of windowNode.querySelectorAll('[data-gds-tab]')) button.classList.toggle('active', button.dataset.gdsTab === active);
     for (const panel of windowNode.querySelectorAll('[data-gds-tab-panel]')) panel.hidden = panel.dataset.gdsTabPanel !== active;
     const navigation = windowNode.querySelector('.gds-tabs');
     if (navigation) navigation.hidden = active === 'home';
+    const pageHost = windowNode.querySelector('.gds-page-host');
+    if (pageHost) pageHost.scrollTop = 0;
     const title = windowNode.querySelector('[data-gds-page-title]');
     const subtitles = {
         home: ['嘎嘎小狗故事工作台', '选择一个功能开始'],
         memory: ['剧情记忆', '精简前情 · 保留细节 · 自动隐藏'],
         director: ['情节导演', '规划主线 · 分支 · 伏笔 · 日历'],
         reply: ['待写回复', '生成候选 · 复制或放入编辑栏'],
+        connections: ['模型连接', '分别绑定酒馆连接或独立 API'],
     };
     if (title) title.textContent = subtitles[active][0];
     const subtitle = windowNode.querySelector('[data-gds-page-subtitle]');
@@ -1999,15 +2002,17 @@ function createUi() {
                 <div><img class="gds-puppy" src="${escapeHtml(PANEL_LOGO_URL)}" alt="" aria-hidden="true"><div><h2 data-gds-page-title>嘎嘎小狗故事工作台</h2><small data-gds-page-subtitle>选择一个功能开始</small></div></div>
                 <button class="gds-icon-button" data-gds-close title="关闭">×</button>
             </header>
-            <nav class="gds-tabs" aria-label="故事工作台功能"><button data-gds-tab="home">功能首页</button><button data-gds-tab="memory">剧情记忆</button><button data-gds-tab="director">情节导演</button><button data-gds-tab="reply">待写回复</button></nav>
-            <section class="gds-home" data-gds-tab-panel="home">
-                <div class="gds-home-intro"><h3>选择要使用的功能</h3><p>三个模块各自独立，切换后只显示当前页面。</p></div>
-                <div class="gds-home-grid">
-                    <button class="gds-home-card" data-gds-tab="memory"><strong>剧情记忆</strong><span>总结前情、保留文风、隐藏旧正文</span></button>
-                    <button class="gds-home-card" data-gds-tab="director"><strong>情节导演</strong><span>长线规划、分支、伏笔与故事日历</span></button>
-                    <button class="gds-home-card" data-gds-tab="reply"><strong>待写回复</strong><span>生成多个用户回复候选并放入编辑栏</span></button>
-                </div>
-            </section>
+            <nav class="gds-tabs" aria-label="故事工作台功能"><button data-gds-tab="home">功能首页</button><button data-gds-tab="memory">剧情记忆</button><button data-gds-tab="director">情节导演</button><button data-gds-tab="reply">待写回复</button><button data-gds-tab="connections">模型连接</button></nav>
+            <main class="gds-page-host">
+                <section class="gds-home" data-gds-tab-panel="home">
+                    <div class="gds-home-intro"><h3>选择要使用的功能</h3><p>三个模块各自独立，切换后只显示当前页面。</p></div>
+                    <div class="gds-home-grid">
+                        <button class="gds-home-card" data-gds-tab="memory"><strong>剧情记忆</strong><span>总结前情、保留文风、隐藏旧正文</span></button>
+                        <button class="gds-home-card" data-gds-tab="director"><strong>情节导演</strong><span>长线规划、分支、伏笔与故事日历</span></button>
+                        <button class="gds-home-card" data-gds-tab="reply"><strong>待写回复</strong><span>生成多个用户回复候选并放入编辑栏</span></button>
+                        <button class="gds-home-card" data-gds-tab="connections"><strong>模型连接</strong><span>分别配置三个功能使用的酒馆连接或独立 API</span></button>
+                    </div>
+                </section>
             <div class="gds-status" data-gds-tab-panel="memory" data-gds-status>尚未建立记忆，点击“立即总结”</div>
             <div class="gds-metrics" data-gds-tab-panel="memory" data-gds-metrics></div>
             <div class="gds-actions" data-gds-tab-panel="memory">
@@ -2036,7 +2041,7 @@ function createUi() {
                 </div>
                 <p class="gds-help">手动总结会读取酒馆当前上下文容量：完整旧正文装得下就整段处理，只有装不下时才自适应拆批并在后台连续完成。自动总结仍以触发 Token 为准。只有主动中断或生成失败时才会出现“继续”。</p>
             </details>
-            <details class="gds-details" data-gds-tab-panel="memory"><summary>模型连接</summary>
+            <details class="gds-details" data-gds-tab-panel="connections"><summary>模型连接</summary>
                 <div class="gds-settings-grid gds-provider-grid">
                     <label>剧情记忆使用 <select data-gds-provider="memory"></select></label>
                     <label>情节导演使用 <select data-gds-provider="director"></select></label>
@@ -2105,6 +2110,7 @@ function createUi() {
                 <label class="gds-field gds-wide"><span>代写模型原始返回</span><textarea rows="6" readonly data-gds-reply-output></textarea></label>
                 <div class="gds-reply-list" data-gds-reply-list></div>
             </section>
+            </main>
             <footer class="gds-footer"><span>v${VERSION} · 提示词 ${PROMPT_VERSION}</span><span>原消息可恢复，不会自动删除</span></footer>
         </div>`;
     document.body.appendChild(overlay);

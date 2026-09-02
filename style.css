@@ -67,7 +67,9 @@
     width: min(920px, 100%);
     max-height: min(900px, 92vh);
     min-width: 0;
-    overflow: auto;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
     border: 1px solid var(--gds-line);
     border-radius: 22px;
     background: var(--gds-paper);
@@ -75,6 +77,19 @@
     box-shadow: var(--gds-shadow);
     font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
     transform: translate3d(var(--gds-window-x), var(--gds-window-y), 0);
+}
+
+/* Keep each feature as a real view inside the workbench. Some Tavern themes
+   override the browser's default [hidden] rule, so make the page switch
+   explicit and theme-resistant. */
+.gds-window [data-gds-tab-panel][hidden] { display: none !important; }
+.gds-tabs[hidden] { display: none !important; }
+.gds-header, .gds-tabs, .gds-footer { flex: 0 0 auto; }
+.gds-page-host {
+    min-height: 0;
+    flex: 1 1 auto;
+    overflow: auto;
+    overscroll-behavior: contain;
 }
 
 body.gds-panel-open { overflow: hidden !important; }
@@ -426,13 +441,19 @@ body.gds-panel-open { overflow: hidden !important; }
         padding: 0 0 calc(18px + env(safe-area-inset-bottom, 0px)) !important;
         border: 0 !important;
         border-radius: 0 !important;
-        overflow-x: hidden !important;
-        overflow-y: auto !important;
+        overflow: hidden !important;
         overscroll-behavior: contain;
         -webkit-overflow-scrolling: touch;
         touch-action: pan-y;
         font-size: 14px;
         transform: none !important;
+    }
+    .gds-page-host {
+        width: 100%;
+        overflow-x: hidden;
+        overflow-y: auto;
+        overscroll-behavior: contain;
+        -webkit-overflow-scrolling: touch;
     }
     .gds-header {
         position: sticky;
