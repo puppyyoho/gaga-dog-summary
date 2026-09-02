@@ -31,7 +31,7 @@ const EXTENSION_NAME = 'gaga-dog-summary';
 const DISPLAY_NAME = '嘎嘎小狗总结';
 const SETTINGS_KEY = 'gagaDogSummary';
 const INJECTION_ID = `${EXTENSION_NAME}:memory`;
-const VERSION = '0.1.8';
+const VERSION = '0.1.9';
 const SETTINGS_VERSION = 2;
 
 const DEFAULT_SETTINGS = {

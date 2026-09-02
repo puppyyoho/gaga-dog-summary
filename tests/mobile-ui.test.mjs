@@ -21,6 +21,12 @@ test('mobile header remains reachable and fields cannot overflow horizontally', 
     assert.match(css, /overflow-wrap:\s*anywhere/);
 });
 
+test('settings checkboxes have a high-contrast custom checked state', () => {
+    assert.match(css, /\.gds-settings-grid input\[type="checkbox"\]\s*\{[\s\S]*?appearance:\s*none/);
+    assert.match(css, /\.gds-settings-grid input\[type="checkbox"\]:checked\s*\{[\s\S]*?background:\s*var\(--gds-pink-deep\)/);
+    assert.match(css, /\.gds-settings-grid input\[type="checkbox"\]:checked::after/);
+});
+
 test('opening the panel locks background scrolling and resets panel scroll', () => {
     assert.match(js, /classList\.toggle\('gds-panel-open'/);
     assert.match(js, /windowNode\.scrollTop = 0/);
