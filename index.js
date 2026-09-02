@@ -31,7 +31,7 @@ const EXTENSION_NAME = 'gaga-dog-summary';
 const DISPLAY_NAME = '嘎嘎小狗总结';
 const SETTINGS_KEY = 'gagaDogSummary';
 const INJECTION_ID = `${EXTENSION_NAME}:memory`;
-const VERSION = '0.1.6';
+const VERSION = '0.1.7';
 const SETTINGS_VERSION = 2;
 
 const DEFAULT_SETTINGS = {
@@ -661,6 +661,15 @@ function renderCheckpointList(chatState) {
         </div>`).join('');
 }
 
+function savedRecap(chatState) {
+    const direct = String(chatState?.recap || '').trim();
+    if (direct) return direct;
+    const latest = [...(chatState?.checkpoints || [])]
+        .reverse()
+        .find(item => item.status === 'committed' && String(item.recap || '').trim());
+    return String(latest?.recap || '').trim();
+}
+
 function refreshUi() {
     if (!runtime.overlay) return;
     const ctx = getContext();
@@ -670,7 +679,13 @@ function refreshUi() {
     const summary = runtime.overlay.querySelector('[data-gds-summary]');
     const preview = runtime.overlay.querySelector('[data-gds-preview]');
     const streamPreview = runtime.overlay.querySelector('[data-gds-stream-preview]');
-    if (summary && document.activeElement !== summary) summary.value = chatState.recap || '';
+    const recap = savedRecap(chatState);
+    if (recap && !chatState.recap.trim()) {
+        chatState.recap = recap;
+        setChatState(chatState, ctx);
+        saveChat(ctx).catch(error => console.warn(`[${DISPLAY_NAME}] 检查点前情回填保存失败`, error));
+    }
+    if (summary && (document.activeElement !== summary || !summary.value.trim())) summary.value = recap;
     if (streamPreview && document.activeElement !== streamPreview) {
         streamPreview.value = runtime.streamText || chatState.pending?.partialText || '';
     }
@@ -690,9 +705,11 @@ function refreshUi() {
     const status = runtime.overlay.querySelector('[data-gds-status]');
     if (status && !runtime.busy) {
         const hasCheckpoint = chatState.checkpoints.some(item => item.status === 'committed');
+        const recapMissing = hasCheckpoint && !recap;
         const orphanOutput = Boolean(runtime.streamText.trim() && !hasCheckpoint && !chatState.pending);
         if (chatState.pending) status.textContent = `总结未完成：${stageName(chatState.pending.stage)}，请点击“继续”`;
         else if (runtime.lastError) status.textContent = `未保存：${runtime.lastError}`;
+        else if (recapMissing) status.textContent = '检查点已保存，但文学前情为空，请点击“恢复并重建”';
         else if (orphanOutput) status.textContent = '收到模型文本，但尚未保存成记忆，请重新总结';
         else if (runtime.lastSuccess) status.textContent = runtime.lastSuccess;
         else status.textContent = hasCheckpoint ? '记忆已保存并正在注入' : '尚未建立记忆，点击“立即总结”';

@@ -37,6 +37,9 @@ test('summary UI exposes streaming, stop, and resumable pending tasks', () => {
     assert.match(js, /pending\.stage = 'polish'/);
     assert.match(js, /buildPolishPrompt/);
     assert.match(js, /事实 → 草稿 → 润色/);
+    assert.match(js, /检查点已保存，但文学前情为空/);
+    assert.match(js, /function savedRecap\(chatState\)/);
+    assert.match(js, /status === 'committed' && String\(item\.recap/);
 });
 
 test('uses a 60000 Token default and labels it as a per-batch target', () => {
