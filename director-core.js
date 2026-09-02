@@ -96,6 +96,12 @@ export function createEmptyDirectorState() {
             autoTrack: false,
         },
         calendar: createEmptyCalendarState(),
+        taskState: {
+            task: '',
+            status: 'idle',
+            partial: '',
+            updatedAt: 0,
+        },
         mainPlan: null,
         branchCandidates: [],
         activeBranchId: '',
@@ -118,6 +124,12 @@ export function normalizeDirectorState(value) {
         ...input,
         toggles: { ...defaults.toggles, ...record(input.toggles) },
         calendar: normalizeCalendarState(input.calendar),
+        taskState: {
+            task: String(input.taskState?.task || ''),
+            status: ['idle', 'running', 'stopped', 'error', 'completed'].includes(input.taskState?.status) ? input.taskState.status : 'idle',
+            partial: compactText(input.taskState?.partial || '', 60000),
+            updatedAt: Number(input.taskState?.updatedAt || 0) || 0,
+        },
         mainPlan: input.mainPlan && typeof input.mainPlan === 'object' ? input.mainPlan : null,
         branchCandidates: list(input.branchCandidates),
         foreshadows: list(input.foreshadows),
@@ -153,23 +165,25 @@ function stringifyState(memory) {
     ].filter(Boolean).join('\n\n');
 }
 
-export function buildDirectorPrompt({ task = 'longline', memory, recentText = '', characterCard = '', calendarContext = null, state = {}, presetId, customBrief = '', pacingMode = 'dynamic', pacingCustom = '', toggles = {} }) {
+export function buildDirectorPrompt({ task = 'longline', memory, recentText = '', characterCard = '', calendarContext = null, continuationDraft = '', continuationMode = '', state = {}, presetId, customBrief = '', pacingMode = 'dynamic', pacingCustom = '', toggles = {} }) {
     const preset = getDirectorPreset(presetId);
     const director = normalizeDirectorState({ ...state, presetId, customBrief, pacingMode, pacingCustom, toggles });
     const currentPlan = director.mainPlan ? JSON.stringify(director.mainPlan, null, 2) : '暂无已确认主线';
     const branch = director.activeBranchId
         ? JSON.stringify(director.branchCandidates.find(item => item.id === director.activeBranchId) || {}, null, 2)
         : '暂无当前分支';
-    const taskInstruction = task === 'longline'
-        ? '请生成一份可供用户审阅的长线剧情规划草案。不要把未来计划写成已经发生的事实。'
-        : task === 'branch'
-            ? '请基于当前主线生成 3 到 5 条互相区别的当前分支候选，并说明每条的后果。'
-            : task === 'foreshadow'
-                ? '请设计可以自然埋入当前剧情的伏笔，并记录表面信号、真实含义、知情者和建议回收阶段。'
-                : '请判断最近正文是否完成当前节拍，并只返回结构化的进度判断。';
+    const taskInstruction = continuationMode === 'advance' && task === 'longline'
+        ? '请在已保存的当前主线和节拍之后继续设计下一段可执行规划，不要重写已锁定内容。'
+        : task === 'longline'
+            ? '请生成一份可供用户审阅的长线剧情规划草案。不要把未来计划写成已经发生的事实。'
+            : task === 'branch'
+                ? '请基于当前主线生成 3 到 5 条互相区别的当前分支候选，并说明每条的后果。'
+                : task === 'foreshadow'
+                    ? '请设计可以自然埋入当前剧情的伏笔，并记录表面信号、真实含义、知情者和建议回收阶段。'
+                    : '请判断最近正文是否完成当前节拍，并只返回结构化的进度判断。';
     return {
         systemPrompt: `你是“嘎嘎小狗”的幕后情节导演。你只负责规划、检查和整理故事，不直接续写正文。\n\n已发生事实是不可修改的边界；未来计划、分支和伏笔都是“可能发生”，除非正文真正写出，否则不能称为已发生。人物只能依据自己已经知道的内容行动。\n\n输出必须是合法 JSON，不要输出 Markdown、解释或正文。`,
-        prompt: `<导演任务>\n${taskInstruction}\n\n<内置规划风格>\n名称：${preset.name}\n说明：${preset.description}\n规划规则：${preset.rules}\n节奏曲线：${preset.paceCurve}\n</内置规划风格>\n\n<用户自定义要求>\n${compactText(customBrief, 30000) || '无'}\n</用户自定义要求>\n\n<推进设置>\n模式：${pacingMode}\n自定义节奏：${compactText(pacingCustom, 10000) || '无'}\n主线：${director.toggles.mainline ? '启用' : '关闭'}\n分支：${director.toggles.branch ? '启用' : '关闭'}\n推进速度：${director.toggles.pacing ? '启用' : '关闭'}\n伏笔：${director.toggles.foreshadow ? '启用' : '关闭'}\n新角色：${director.toggles.newCharacters ? '允许' : '禁止'}\n额外支线：${director.toggles.sidePlots ? '允许' : '禁止'}\n</推进设置>\n\n<故事日历>\n${calendarContext?.cardText || '未启用或暂无日历提醒。'}\n日历日期只是创作参考；如果与正文因果、人物认知或角色卡冲突，以正文为准。\n</故事日历>\n\n<角色卡背景>\n${compactText(characterCard, 16000) || '无'}\n</角色卡背景>\n\n<已发生记忆>\n${stringifyState(memory) || '无'}\n</已发生记忆>\n\n<最近正文>\n${compactText(recentText, 30000) || '无'}\n</最近正文>\n\n<当前主线>\n${currentPlan}\n</当前主线>\n\n<当前分支>\n${branch}\n</当前分支>\n\n<输出字段>\nlongline：{title, premise, ending, arcs:[{id,title,goal,conflict,pacing,estimatedTurns,beats:[{id,goal,allowed,forbidden,completion,pace}]}], characterArcs, constraints}\nbranches：[{id,title,summary,reason,consequences,risks,estimatedTurns}]\nforeshadows：[{id,name,surface,meaning,signals,knowers,earliestReveal,targetArc,status}]\nprogress：{beatCompleted,completedGoals,remainingGoals,triggeredForeshadows,recommendedPace,confidence,nextBeatId}\n</输出字段>`,
+        prompt: `<导演任务>\n${taskInstruction}\n${continuationMode ? `\n<续写模式>\n${continuationMode === 'draft' ? '上一轮生成曾被停止或失败。请参考下面的部分草稿，补全并返回一份完整合法 JSON，不要只重复草稿。' : '当前规划已经保存。请在不改写既有主线事实的前提下，继续设计下一段可执行规划。'}\n</续写模式>` : ''}\n\n<内置规划风格>\n名称：${preset.name}\n说明：${preset.description}\n规划规则：${preset.rules}\n节奏曲线：${preset.paceCurve}\n</内置规划风格>\n\n<用户自定义要求>\n${compactText(customBrief, 30000) || '无'}\n</用户自定义要求>\n\n<推进设置>\n模式：${pacingMode}\n自定义节奏：${compactText(pacingCustom, 10000) || '无'}\n主线：${director.toggles.mainline ? '启用' : '关闭'}\n分支：${director.toggles.branch ? '启用' : '关闭'}\n推进速度：${director.toggles.pacing ? '启用' : '关闭'}\n伏笔：${director.toggles.foreshadow ? '启用' : '关闭'}\n新角色：${director.toggles.newCharacters ? '允许' : '禁止'}\n额外支线：${director.toggles.sidePlots ? '允许' : '禁止'}\n</推进设置>\n\n<故事日历>\n${calendarContext?.cardText || '未启用或暂无日历提醒。'}\n日历日期只是创作参考；如果与正文因果、人物认知或角色卡冲突，以正文为准。\n</故事日历>\n\n<角色卡背景>\n${compactText(characterCard, 16000) || '无'}\n</角色卡背景>\n\n<已发生记忆>\n${stringifyState(memory) || '无'}\n</已发生记忆>\n\n<最近正文>\n${compactText(recentText, 30000) || '无'}\n</最近正文>\n\n<当前主线>\n${currentPlan}\n</当前主线>\n\n<当前分支>\n${branch}\n</当前分支>\n\n${continuationDraft ? `<上一轮部分草稿>\n${compactText(continuationDraft, 60000)}\n</上一轮部分草稿>\n` : ''}\n<输出字段>\nlongline：{title, premise, ending, arcs:[{id,title,goal,conflict,pacing,estimatedTurns,beats:[{id,goal,allowed,forbidden,completion,pace}]}], characterArcs, constraints}\nbranches：[{id,title,summary,reason,consequences,risks,estimatedTurns}]\nforeshadows：[{id,name,surface,meaning,signals,knowers,earliestReveal,targetArc,status}]\nprogress：{beatCompleted,completedGoals,remainingGoals,triggeredForeshadows,recommendedPace,confidence,nextBeatId}\n</输出字段>`,
     };
 }
 
@@ -325,8 +339,9 @@ export function buildExecutionCard({ directorState, memoryState, recentText = ''
 
 export function applyLonglineToDirector(state, packet) {
     const next = normalizeDirectorState(state);
+    const previousStatus = next.mainPlan?.status;
     next.mainPlan = normalizeMainPlan(packet);
-    next.mainPlan.status = 'draft';
+    next.mainPlan.status = previousStatus === 'locked' ? 'locked' : 'draft';
     next.currentArcId = next.mainPlan.arcs[0]?.id || '';
     next.currentBeatId = next.mainPlan.arcs[0]?.beats[0]?.id || '';
     next.turnsSpent = 0;

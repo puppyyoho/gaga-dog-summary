@@ -143,6 +143,16 @@ body.gds-panel-open { overflow: hidden !important; }
 .gds-tabs button:hover { color: var(--gds-pink-deep); background: #fff0f7; }
 .gds-tabs button.active { border-bottom-color: var(--gds-pink-deep); color: var(--gds-pink-deep); font-weight: 700; }
 
+.gds-home { padding: 34px 24px 42px; }
+.gds-home-intro { text-align: center; margin-bottom: 22px; }
+.gds-home-intro h3 { margin: 0; color: var(--gds-pink-deep); font-size: 20px; }
+.gds-home-intro p { margin: 7px 0 0; color: var(--gds-muted); font-size: 13px; }
+.gds-home-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; max-width: 840px; margin: 0 auto; }
+.gds-home-card { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; min-height: 132px; padding: 20px 18px; border: 1px solid var(--gds-line); border-radius: 16px; background: rgba(255, 255, 255, .8); color: var(--gds-ink); cursor: pointer; text-align: left; font: inherit; box-shadow: 0 6px 18px rgba(109, 47, 83, .06); transition: transform .15s ease, border-color .15s ease, box-shadow .15s ease; }
+.gds-home-card:hover { border-color: var(--gds-pink); box-shadow: 0 8px 22px rgba(220, 77, 136, .14); transform: translateY(-2px); }
+.gds-home-card strong { color: var(--gds-pink-deep); font-size: 17px; }
+.gds-home-card span { color: var(--gds-muted); font-size: 12px; line-height: 1.55; }
+
 .gds-tab-content { min-width: 0; padding: 0 22px 18px; }
 .gds-section-title {
     display: flex;
@@ -181,6 +191,8 @@ body.gds-panel-open { overflow: hidden !important; }
 .gds-branch-card button:disabled,
 .gds-reply-card button:disabled { cursor: not-allowed; opacity: .52; }
 .gds-director-actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 2px 0 14px; }
+.gds-director-task-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
+.gds-director-task-actions button { min-width: 58px; }
 .gds-director-actions .gds-primary,
 .gds-reply-card .gds-primary { border-color: var(--gds-pink-deep); background: var(--gds-pink-deep); color: white; }
 .gds-director-block { margin: 16px 0 0; border-top: 1px solid var(--gds-line); padding-top: 12px; }
@@ -437,6 +449,9 @@ body.gds-panel-open { overflow: hidden !important; }
     .gds-icon-button { flex: 0 0 38px; width: 38px; height: 38px; }
     .gds-tabs { padding: 8px 14px 0; }
     .gds-tabs button { padding: 8px 11px 7px; font-size: 12px; }
+    .gds-home { padding: 28px 14px 34px; }
+    .gds-home-grid { grid-template-columns: 1fr; gap: 10px; }
+    .gds-home-card { min-height: 88px; padding: 16px; }
     .gds-tab-content { padding: 0 14px 14px; }
     .gds-section-title { padding-top: 13px; }
     .gds-section-title h3 { font-size: 17px; }
@@ -469,6 +484,8 @@ body.gds-panel-open { overflow: hidden !important; }
     .gds-provider-grid select, .gds-api-form input, .gds-api-form select { max-width: none; }
     .gds-director-actions { display: grid; grid-template-columns: 1fr; }
     .gds-director-actions button, .gds-api-form button { width: 100%; min-height: 40px; }
+    .gds-director-task-actions { justify-content: stretch; margin-top: 9px; }
+    .gds-director-task-actions button { flex: 1 1 0; min-height: 38px; }
     .gds-calendar-block .gds-section-title { display: block; }
     .gds-calendar-block .gds-section-title button { width: 100%; margin-top: 8px; min-height: 38px; }
     .gds-calendar-add .gds-settings-grid { grid-template-columns: 1fr; }

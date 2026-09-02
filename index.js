@@ -81,7 +81,7 @@ const INJECTION_ID = `${EXTENSION_NAME}:memory`;
 const DIRECTOR_INJECTION_ID = `${EXTENSION_NAME}:director`;
 const PANEL_LOGO_URL = new URL('./assets/gaga-dog-logo.png', import.meta.url).href;
 const FLOATING_LOGO_URL = new URL('./assets/gaga-dog-floating.png', import.meta.url).href;
-const VERSION = '0.2.1';
+const VERSION = '0.3.0';
 const SETTINGS_VERSION = 5;
 
 const DEFAULT_SETTINGS = {
@@ -810,7 +810,22 @@ async function saveChatStateAndRefresh(ctx, state) {
     refreshUi();
 }
 
-async function runDirectorTask(ctx, task) {
+function directorTaskLabel(task) {
+    return task === 'longline' ? '长线规划' : task === 'branch' ? '当前分支' : task === 'foreshadow' ? '伏笔方案' : '推进判断';
+}
+
+async function persistDirectorTaskState(ctx, task, status, partial = '') {
+    const current = getDirectorState(ctx);
+    const next = normalizeDirectorState({
+        ...current,
+        taskState: { task: String(task || ''), status, partial: compactText(partial, 60000), updatedAt: Date.now() },
+    });
+    setChatState({ ...getChatState(ctx), director: next }, ctx);
+    try { await saveChat(ctx); } catch (error) { console.warn(`[${DISPLAY_NAME}] 导演任务状态保存失败`, error); }
+    return next;
+}
+
+async function runDirectorTask(ctx, task, options = {}) {
     if (runtime.directorBusy || runtime.busy || runtime.workflowActive || runtime.generating) {
         notify('info', '当前还有生成任务进行中，请稍后再使用情节导演。');
         return null;
@@ -818,12 +833,17 @@ async function runDirectorTask(ctx, task) {
     const settings = getSettings(ctx);
     const previous = getDirectorState(ctx);
     const calendarContext = calendarContextFor(ctx, previous, task === 'longline' ? 18 : 10);
+    const previousTask = previous.taskState || {};
+    const continuationDraft = options.continueFromDraft && previousTask.task === task ? previousTask.partial : '';
+    const continuationMode = continuationDraft ? 'draft' : options.continueFromDraft ? 'advance' : '';
     const prompt = buildDirectorPrompt({
         task,
         memory: getChatState(ctx),
         recentText: recentStoryText(ctx, task === 'longline' ? 18 : 10),
         characterCard: characterCardText(ctx),
         calendarContext,
+        continuationDraft,
+        continuationMode,
         state: previous,
         presetId: previous.presetId,
         customBrief: previous.customBrief,
@@ -834,8 +854,9 @@ async function runDirectorTask(ctx, task) {
     const controller = new AbortController();
     runtime.directorBusy = true;
     runtime.directorAbortController = controller;
-    runtime.directorText = '';
-    setStatus(`情节导演正在生成${task === 'longline' ? '长线规划' : task === 'branch' ? '当前分支' : task === 'foreshadow' ? '伏笔方案' : '推进判断'}……`);
+    runtime.directorText = continuationDraft;
+    setStatus(`情节导演正在生成${directorTaskLabel(task)}${continuationDraft ? '（续写）' : ''}……`);
+    await persistDirectorTaskState(ctx, task, 'running', continuationDraft);
     refreshUi();
     try {
         const result = await generateWithFallback(ctx, {
@@ -857,12 +878,15 @@ async function runDirectorTask(ctx, task) {
         if (task === 'branch') next = applyBranchesToDirector(previous, packet);
         if (task === 'foreshadow') next = applyForeshadowsToDirector(previous, packet);
         if (task === 'progress') next = applyProgressToDirector(previous, packet);
+        next = normalizeDirectorState({ ...next, taskState: { task, status: 'completed', partial: '', updatedAt: Date.now() } });
         await saveChatStateAndRefresh(ctx, { ...getChatState(ctx), director: next });
         await updateDirectorInjection(ctx);
         notify('success', `${task === 'longline' ? '长线规划' : task === 'branch' ? '当前分支' : task === 'foreshadow' ? '伏笔方案' : '推进状态'}已生成。`);
         return next;
     } catch (error) {
-        if (controller.signal.aborted) notify('info', '情节导演已中断。');
+        const stopped = controller.signal.aborted;
+        await persistDirectorTaskState(ctx, task, stopped ? 'stopped' : 'error', runtime.directorText);
+        if (stopped) notify('info', '情节导演已停止，草稿已保留。');
         else {
             console.error(`[${DISPLAY_NAME}] 情节导演失败`, error);
             notify('error', `情节导演失败：${readableGenerationError(error)}`);
@@ -877,6 +901,34 @@ async function runDirectorTask(ctx, task) {
 
 function stopDirectorTask() {
     runtime.directorAbortController?.abort(new DOMException('已中断导演生成', 'AbortError'));
+}
+
+async function continueDirectorTask(ctx) {
+    const director = getDirectorState(ctx);
+    const task = director.taskState?.task || (director.mainPlan ? 'longline' : '');
+    if (!task) {
+        notify('info', '还没有可续写的导演任务，请先生成一次长线规划。');
+        return null;
+    }
+    return runDirectorTask(ctx, task, { continueFromDraft: true });
+}
+
+async function restartDirectorTask(ctx) {
+    if (runtime.directorBusy) {
+        notify('info', '请先停止当前导演生成，再重新开始。');
+        return null;
+    }
+    const director = getDirectorState(ctx);
+    const task = director.taskState?.task || 'longline';
+    if (task === 'longline' && director.mainPlan?.status === 'locked') {
+        notify('info', '当前主线已经锁定；重新开始不会覆盖它。请先继续当前主线，或手动编辑后再生成分支。');
+        return null;
+    }
+    if (director.taskState?.partial && globalThis.confirm && !globalThis.confirm('确定清除当前未保存的导演草稿并重新开始吗？')) return null;
+    runtime.directorText = '';
+    const reset = normalizeDirectorState({ ...director, taskState: { task, status: 'idle', partial: '', updatedAt: Date.now() } });
+    await saveChatStateAndRefresh(ctx, { ...getChatState(ctx), director: reset });
+    return runDirectorTask(ctx, task, { restart: true });
 }
 
 async function updateDirectorInjection(ctx = getContext()) {
@@ -1463,13 +1515,25 @@ async function testApiProfileFromUi(ctx) {
     notify('success', models.length ? `连接成功，模型：${models.slice(0, 8).join('、')}${models.length > 8 ? '……' : ''}` : '连接成功，但服务未返回模型列表。');
 }
 
-function setActiveTab(tab = 'memory') {
+function setActiveTab(tab = 'home') {
     const windowNode = runtime.overlay?.querySelector('.gds-window');
     if (!windowNode) return;
-    const active = ['memory', 'director', 'reply'].includes(tab) ? tab : 'memory';
+    const active = ['home', 'memory', 'director', 'reply'].includes(tab) ? tab : 'home';
     windowNode.dataset.gdsTab = active;
     for (const button of windowNode.querySelectorAll('[data-gds-tab]')) button.classList.toggle('active', button.dataset.gdsTab === active);
     for (const panel of windowNode.querySelectorAll('[data-gds-tab-panel]')) panel.hidden = panel.dataset.gdsTabPanel !== active;
+    const navigation = windowNode.querySelector('.gds-tabs');
+    if (navigation) navigation.hidden = active === 'home';
+    const title = windowNode.querySelector('[data-gds-page-title]');
+    const subtitles = {
+        home: ['嘎嘎小狗故事工作台', '选择一个功能开始'],
+        memory: ['剧情记忆', '精简前情 · 保留细节 · 自动隐藏'],
+        director: ['情节导演', '规划主线 · 分支 · 伏笔 · 日历'],
+        reply: ['待写回复', '生成候选 · 复制或放入编辑栏'],
+    };
+    if (title) title.textContent = subtitles[active][0];
+    const subtitle = windowNode.querySelector('[data-gds-page-subtitle]');
+    if (subtitle) subtitle.textContent = subtitles[active][1];
 }
 
 function updateDirectorFromUi(ctx) {
@@ -1624,6 +1688,8 @@ function refreshUi() {
     const resume = runtime.overlay.querySelector('[data-gds-continue]');
     const stop = runtime.overlay.querySelector('[data-gds-stop]');
     const directorStop = runtime.overlay.querySelector('[data-gds-director-stop]');
+    const directorContinue = runtime.overlay.querySelector('[data-gds-director-continue]');
+    const directorRestart = runtime.overlay.querySelector('[data-gds-director-restart]');
     const replyStop = runtime.overlay.querySelector('[data-gds-reply-stop]');
     const rebuild = runtime.overlay.querySelector('[data-gds-rebuild]');
     const restore = runtime.overlay.querySelector('[data-gds-restore]');
@@ -1635,6 +1701,12 @@ function refreshUi() {
     }
     if (stop) stop.hidden = !(runtime.busy && runtime.abortController);
     if (directorStop) directorStop.hidden = !(runtime.directorBusy && runtime.directorAbortController);
+    if (directorContinue) {
+        const resumable = Boolean(director.taskState?.task || director.mainPlan);
+        directorContinue.disabled = taskActive || !resumable;
+        directorContinue.title = director.taskState?.partial ? '从上次停止的草稿继续' : '从当前导演状态继续规划';
+    }
+    if (directorRestart) directorRestart.disabled = taskActive;
     if (replyStop) replyStop.hidden = !(runtime.replyBusy && runtime.replyAbortController);
     if (rebuild) rebuild.disabled = taskActive;
     if (restore) restore.disabled = taskActive;
@@ -1924,10 +1996,18 @@ function createUi() {
     overlay.innerHTML = `
         <div class="gds-window">
             <header class="gds-header" title="桌面端可按住标题栏拖动">
-                <div><img class="gds-puppy" src="${escapeHtml(PANEL_LOGO_URL)}" alt="" aria-hidden="true"><div><h2>嘎嘎小狗故事工作台</h2><small>剧情记忆 · 情节导演 · 待写回复</small></div></div>
+                <div><img class="gds-puppy" src="${escapeHtml(PANEL_LOGO_URL)}" alt="" aria-hidden="true"><div><h2 data-gds-page-title>嘎嘎小狗故事工作台</h2><small data-gds-page-subtitle>选择一个功能开始</small></div></div>
                 <button class="gds-icon-button" data-gds-close title="关闭">×</button>
             </header>
-            <nav class="gds-tabs" aria-label="故事工作台功能"><button class="active" data-gds-tab="memory">剧情记忆</button><button data-gds-tab="director">情节导演</button><button data-gds-tab="reply">待写回复</button></nav>
+            <nav class="gds-tabs" aria-label="故事工作台功能"><button data-gds-tab="home">功能首页</button><button data-gds-tab="memory">剧情记忆</button><button data-gds-tab="director">情节导演</button><button data-gds-tab="reply">待写回复</button></nav>
+            <section class="gds-home" data-gds-tab-panel="home">
+                <div class="gds-home-intro"><h3>选择要使用的功能</h3><p>三个模块各自独立，切换后只显示当前页面。</p></div>
+                <div class="gds-home-grid">
+                    <button class="gds-home-card" data-gds-tab="memory"><strong>剧情记忆</strong><span>总结前情、保留文风、隐藏旧正文</span></button>
+                    <button class="gds-home-card" data-gds-tab="director"><strong>情节导演</strong><span>长线规划、分支、伏笔与故事日历</span></button>
+                    <button class="gds-home-card" data-gds-tab="reply"><strong>待写回复</strong><span>生成多个用户回复候选并放入编辑栏</span></button>
+                </div>
+            </section>
             <div class="gds-status" data-gds-tab-panel="memory" data-gds-status>尚未建立记忆，点击“立即总结”</div>
             <div class="gds-metrics" data-gds-tab-panel="memory" data-gds-metrics></div>
             <div class="gds-actions" data-gds-tab-panel="memory">
@@ -1978,7 +2058,7 @@ function createUi() {
             </details>
             <details class="gds-details" data-gds-tab-panel="memory"><summary>检查点</summary><div data-gds-checkpoints></div></details>
             <section class="gds-tab-content" data-gds-tab-panel="director" hidden>
-                <div class="gds-section-title"><div><h3>情节导演</h3><p>规划未来剧情，不会把计划自动写入已发生记忆。</p></div><button data-gds-director-stop hidden>中断导演</button></div>
+                <div class="gds-section-title"><div><h3>情节导演</h3><p>规划未来剧情，不会把计划自动写入已发生记忆。</p></div><div class="gds-director-task-actions"><button data-gds-director-stop hidden>停止</button><button data-gds-director-continue disabled>续写</button><button data-gds-director-restart>重新开始</button></div></div>
                 <div class="gds-settings-grid gds-director-settings">
                     <label class="gds-toggle-row"><input type="checkbox" data-gds-director-enabled><span>启用导演执行卡</span></label>
                     <label>规划风格 <select data-gds-director-preset></select></label>
@@ -2031,7 +2111,7 @@ function createUi() {
     runtime.overlay = overlay;
     populateDirectorOptions(overlay);
     populateProviderSelectors(overlay, getContext());
-    setActiveTab('memory');
+    setActiveTab('home');
     const windowNode = overlay.querySelector('.gds-window');
     const headerNode = overlay.querySelector('.gds-header');
     if (windowNode && headerNode) bindPanelDrag(windowNode, headerNode);
@@ -2046,7 +2126,7 @@ function createUi() {
     bindFloatingDrag(floating);
 
     overlay.addEventListener('click', async event => {
-        const target = event.target.closest('[data-gds-tab],[data-gds-close],[data-gds-summarize],[data-gds-continue],[data-gds-stop],[data-gds-rebuild],[data-gds-restore],[data-gds-save-summary],[data-gds-api-save],[data-gds-api-test],[data-gds-director-longline],[data-gds-director-branch],[data-gds-director-foreshadow],[data-gds-director-save],[data-gds-director-lock],[data-gds-director-select-branch],[data-gds-director-stop],[data-gds-calendar-add],[data-gds-calendar-remove],[data-gds-calendar-sync],[data-gds-reply-generate],[data-gds-reply-copy],[data-gds-reply-insert],[data-gds-reply-stop]');
+        const target = event.target.closest('[data-gds-tab],[data-gds-close],[data-gds-summarize],[data-gds-continue],[data-gds-stop],[data-gds-rebuild],[data-gds-restore],[data-gds-save-summary],[data-gds-api-save],[data-gds-api-test],[data-gds-director-longline],[data-gds-director-branch],[data-gds-director-foreshadow],[data-gds-director-save],[data-gds-director-lock],[data-gds-director-select-branch],[data-gds-director-stop],[data-gds-director-continue],[data-gds-director-restart],[data-gds-calendar-add],[data-gds-calendar-remove],[data-gds-calendar-sync],[data-gds-reply-generate],[data-gds-reply-copy],[data-gds-reply-insert],[data-gds-reply-stop]');
         if (!target) return;
         try {
             if (target.matches('[data-gds-tab]')) {
@@ -2105,6 +2185,8 @@ function createUi() {
                 notify('success', '当前分支已采用。');
             }
             if (target.matches('[data-gds-director-stop]')) stopDirectorTask();
+            if (target.matches('[data-gds-director-continue]')) await continueDirectorTask(getContext());
+            if (target.matches('[data-gds-director-restart]')) await restartDirectorTask(getContext());
             if (target.matches('[data-gds-calendar-add]')) {
                 const ctx = getContext();
                 updateDirectorFromUi(ctx);

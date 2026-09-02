@@ -60,6 +60,18 @@ test('keeps calendar reminders out of factual memory and marks them as optional'
     assert.match(card, /不是已发生事实/);
 });
 
+test('builds a continuation prompt from an interrupted director draft', () => {
+    const request = buildDirectorPrompt({
+        task: 'longline',
+        continuationMode: 'draft',
+        continuationDraft: '{"title":"未完成草稿"',
+        memory: { recap: '已发生内容', facts: [], state: {}, threads: [] },
+    });
+    assert.match(request.prompt, /续写模式/);
+    assert.match(request.prompt, /未完成草稿/);
+    assert.match(request.prompt, /完整合法 JSON/);
+});
+
 test('normalizes, locks, selects branches and advances beats without mutating facts', () => {
     let state = applyLonglineToDirector(createEmptyDirectorState(), {
         title: '主线', premise: '前进', arcs: [{ id: 'a', title: '阶段', goal: '目标', beats: [{ id: 'b', goal: '节拍' }] }],
@@ -73,6 +85,13 @@ test('normalizes, locks, selects branches and advances beats without mutating fa
     const next = applyProgressToDirector(state, { beatCompleted: true, completedGoals: ['节拍'], remainingGoals: [] });
     assert.equal(next.mainPlan.arcs[0].beats[0].status, 'completed');
     assert.equal(next.foreshadows[0].name, '线索');
+});
+
+test('preserves a locked mainline when a later director plan is applied', () => {
+    let state = applyLonglineToDirector(createEmptyDirectorState(), { title: '旧主线', premise: '已确认', arcs: [{ id: 'a', title: '阶段', goal: '目标', beats: [] }] });
+    state = lockMainline(state);
+    const next = applyLonglineToDirector(state, { title: '续写草案', premise: '补充', arcs: [{ id: 'b', title: '后续', goal: '后续目标', beats: [] }] });
+    assert.equal(next.mainPlan.status, 'locked');
 });
 
 test('parses fenced and wrapped director JSON', () => {

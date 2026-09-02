@@ -69,6 +69,9 @@ test('workbench exposes three independent modules and selected summary artifacts
     assert.match(js, /data-gds-api-test/);
     assert.match(js, /GENERATION_AFTER_COMMANDS/);
     assert.match(js, /setExtensionPrompt\(DIRECTOR_INJECTION_ID/);
+    assert.match(js, /data-gds-tab-panel="home"/);
+    assert.match(js, /gds-home-card/);
+    assert.match(js, /setActiveTab\('home'\)/);
 });
 
 test('director exposes pacing, branch, foreshadow and toggle controls', () => {
@@ -91,6 +94,17 @@ test('director exposes a story calendar with built-ins, custom events and date s
     assert.match(js, /buildCalendarContext/);
     assert.match(js, /故事日期/);
     assert.match(css, /\.gds-calendar-alert/);
+});
+
+test('director exposes stop, continue and restart controls', () => {
+    assert.match(js, /data-gds-director-stop/);
+    assert.match(js, /data-gds-director-continue/);
+    assert.match(js, /data-gds-director-restart/);
+    assert.match(js, /async function continueDirectorTask/);
+    assert.match(js, /async function restartDirectorTask/);
+    assert.match(js, /continuationDraft/);
+    assert.match(js, /taskState: \{ task, status: 'completed'/);
+    assert.match(css, /\.gds-director-task-actions/);
 });
 
 test('reply candidates can be copied or inserted without auto-sending', () => {
