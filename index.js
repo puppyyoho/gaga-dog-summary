@@ -18,16 +18,16 @@ import {
     buildFactPrompt,
     buildProsePrompt,
     DEFAULT_PROMPTS,
-    defaultJsonSchema,
     PROMPT_VERSION,
     renderFactsForProse,
 } from './prompts.js';
+import { generateCompatible as runCompatibleGeneration } from './generation-client.js';
 
 const EXTENSION_NAME = 'gaga-dog-summary';
 const DISPLAY_NAME = '嘎嘎小狗总结';
 const SETTINGS_KEY = 'gagaDogSummary';
 const INJECTION_ID = `${EXTENSION_NAME}:memory`;
-const VERSION = '0.1.1';
+const VERSION = '0.1.2';
 
 const DEFAULT_SETTINGS = {
     showFloatingButton: true,
@@ -232,22 +232,14 @@ function invalidateIfNeeded(ctx, chatState) {
     return { state: next, changed: true, affected: affected.length };
 }
 
-async function generateRaw(ctx, request) {
-    if (typeof ctx.generateRaw !== 'function') throw new Error('当前 SillyTavern 没有可用的 generateRaw()。');
-    const result = await ctx.generateRaw(request);
-    const text = typeof result === 'string' ? result : result?.text || result?.content || '';
-    if (!String(text).trim()) throw new Error('模型返回了空内容。');
-    return String(text);
+async function generateCompatible(ctx, request) {
+    return runCompatibleGeneration(ctx, request, quietError => {
+        console.warn(`[${DISPLAY_NAME}] Quiet 生成不可用，尝试 Raw 兼容通道`, quietError);
+    });
 }
 
 async function generateQuiet(ctx, request) {
-    const combined = [request.systemPrompt, request.prompt].filter(Boolean).join('\n\n');
-    if (typeof ctx.generateQuietPrompt === 'function') {
-        const result = await ctx.generateQuietPrompt({ quietPrompt: combined });
-        const text = typeof result === 'string' ? result : result?.text || result?.content || '';
-        if (String(text).trim()) return String(text);
-    }
-    return generateRaw(ctx, { systemPrompt: request.systemPrompt, prompt: request.prompt });
+    return generateCompatible(ctx, request);
 }
 
 function cleanProse(value) {
@@ -276,19 +268,18 @@ async function summarizeRange(ctx, range, settings, reason = 'manual') {
             customPrompts: settings.prompts,
         });
         setStatus('正在提取事实与状态……');
-        let rawPacket;
-        try {
-            rawPacket = await generateRaw(ctx, { ...factPrompt, jsonSchema: defaultJsonSchema() });
-        } catch (schemaError) {
-            console.warn(`[${DISPLAY_NAME}] 结构化输出不可用，回退普通 JSON`, schemaError);
-            rawPacket = await generateRaw(ctx, factPrompt);
-        }
+        const factRequest = { ...factPrompt };
+        let rawPacket = await generateCompatible(ctx, factRequest);
         if (serial !== runtime.taskSerial) throw new Error('总结任务已取消。');
         let packet;
         try {
             packet = parseModelPacket(rawPacket);
         } catch (error) {
-            rawPacket = await generateRaw(ctx, factPrompt);
+            console.warn(`[${DISPLAY_NAME}] 首次记忆结构无法解析，要求模型重新输出纯 JSON`, error);
+            rawPacket = await generateCompatible(ctx, {
+                ...factRequest,
+                prompt: `${factRequest.prompt}\n\n上一次回答无法解析。请重新完成任务，并且只输出一个完整、合法的 JSON 对象；不要输出 Markdown 代码块、解释或思考过程。`,
+            });
             packet = parseModelPacket(rawPacket);
         }
 

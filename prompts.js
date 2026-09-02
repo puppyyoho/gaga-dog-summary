@@ -116,25 +116,6 @@ export function buildAuditPrompt({ messages, facts, recap, customPrompts = DEFAU
     };
 }
 
-export function defaultJsonSchema() {
-    return {
-        name: 'GagaDogMemoryPacket',
-        description: 'A structured packet of story facts, current state changes, open threads, and a recap.',
-        strict: true,
-        value: {
-            type: 'object',
-            properties: {
-                scene: { type: 'object' },
-                facts: { type: 'array', items: { type: 'object' } },
-                stateUpdates: { type: 'array', items: { type: 'object' } },
-                threads: { type: 'array', items: { type: 'object' } },
-                recap: { type: 'string' },
-            },
-            required: ['scene', 'facts', 'stateUpdates', 'threads', 'recap'],
-        },
-    };
-}
-
 export function renderFactsForProse(state) {
     const facts = Array.isArray(state?.facts) ? state.facts : [];
     const stateValues = Object.values(state?.state || {});
