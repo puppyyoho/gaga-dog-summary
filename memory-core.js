@@ -148,6 +148,22 @@ export function parseModelPacket(raw) {
     };
 }
 
+export function assertMemoryPacket(packet) {
+    const scene = packet?.scene && typeof packet.scene === 'object' ? packet.scene : {};
+    const hasScene = [scene.title, scene.name, scene.text, scene.summary, scene.description, scene.location, scene.place]
+        .some(value => String(value || '').trim());
+    const hasFact = (Array.isArray(packet?.facts) ? packet.facts : [])
+        .some(item => String(item?.text || item?.content || item?.fact || item?.description || '').trim());
+    const hasState = (Array.isArray(packet?.stateUpdates) ? packet.stateUpdates : [])
+        .some(item => String(item?.key || item?.path || item?.target || '').trim());
+    const hasThread = (Array.isArray(packet?.threads) ? packet.threads : [])
+        .some(item => String(item?.text || item?.description || item?.thread || '').trim());
+    if (!hasScene && !hasFact && !hasState && !hasThread) {
+        throw new Error('模型返回了空的记忆结构，尚不能保存为总结');
+    }
+    return packet;
+}
+
 function factIdentity(fact, fallbackIndex = 0) {
     const explicit = String(fact?.id || '').trim();
     if (explicit) return explicit;

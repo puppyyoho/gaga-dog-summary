@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+    assertMemoryPacket,
     compileInjection,
     makeSourceRange,
     mergeMemoryPacket,
@@ -29,6 +30,12 @@ test('parses JSON and JSONL memory packets', () => {
     const jsonl = parseModelPacket('{"type":"event","text":"进入客栈"}\n{"type":"state","key":"地点","value":"客栈"}');
     assert.equal(jsonl.facts.length, 1);
     assert.equal(jsonl.stateUpdates.length, 1);
+});
+
+test('rejects prose-only and empty memory packets before committing a checkpoint', () => {
+    assert.throws(() => assertMemoryPacket(parseModelPacket(JSON.stringify({ recap: '只有散文，没有事实结构' }))));
+    assert.throws(() => assertMemoryPacket(parseModelPacket(JSON.stringify({ facts: [], stateUpdates: [], threads: [] }))));
+    assert.equal(assertMemoryPacket(parseModelPacket(JSON.stringify({ facts: [{ text: '沈砚带伤抵达客栈' }] }))).facts.length, 1);
 });
 
 test('merges facts, state and threads while protecting locked memory', () => {

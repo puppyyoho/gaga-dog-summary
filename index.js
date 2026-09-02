@@ -1,4 +1,5 @@
 import {
+    assertMemoryPacket,
     clone,
     compileInjection,
     DEFAULT_CHAT_STATE,
@@ -13,6 +14,7 @@ import {
     simpleHash,
     tokenEstimate,
 } from './memory-core.js';
+import { persistChatMetadata, readChatState, writeChatState } from './chat-state.js';
 import {
     buildAuditPrompt,
     buildFactPrompt,
@@ -27,7 +29,7 @@ const EXTENSION_NAME = 'gaga-dog-summary';
 const DISPLAY_NAME = '嘎嘎小狗总结';
 const SETTINGS_KEY = 'gagaDogSummary';
 const INJECTION_ID = `${EXTENSION_NAME}:memory`;
-const VERSION = '0.1.4';
+const VERSION = '0.1.5';
 
 const DEFAULT_SETTINGS = {
     showFloatingButton: true,
@@ -62,6 +64,7 @@ const runtime = {
     generating: false,
     lastChatSignature: '',
     lastError: '',
+    lastSuccess: '',
 };
 
 function getContext() {
@@ -106,22 +109,18 @@ function saveSettings(ctx = getContext()) {
 }
 
 function getChatState(ctx = getContext()) {
-    ctx.chat_metadata ??= {};
-    return normalizeChatState(ctx.chat_metadata[SETTINGS_KEY]);
+    return readChatState(ctx, SETTINGS_KEY, normalizeChatState);
 }
 
 function setChatState(value, ctx = getContext()) {
-    ctx.chat_metadata ??= {};
-    ctx.chat_metadata[SETTINGS_KEY] = normalizeChatState(value);
+    return writeChatState(ctx, SETTINGS_KEY, value, normalizeChatState);
 }
 
-async function saveChat(ctx = getContext()) {
+async function saveChat(ctx = getContext(), options = {}) {
     try {
-        if (typeof ctx.saveChat === 'function') await ctx.saveChat();
-        else if (typeof ctx.saveChatDebounced === 'function') ctx.saveChatDebounced();
-        else if (typeof ctx.saveMetadataDebounced === 'function') ctx.saveMetadataDebounced();
+        await persistChatMetadata(ctx, options);
     } catch (error) {
-        console.warn(`[${DISPLAY_NAME}] 聊天保存失败`, error);
+        console.warn(`[${DISPLAY_NAME}] 聊天元数据保存失败`, error);
         throw error;
     }
 }
@@ -325,6 +324,7 @@ async function summarizeRange(ctx, range, settings, reason = 'manual', resumeTas
     if (!rangeStillMatches(messages, range)) throw new Error('待总结消息已发生变化，请重新开始总结。');
     runtime.busy = true;
     runtime.lastError = '';
+    runtime.lastSuccess = '';
     runtime.taskSerial += 1;
     const serial = runtime.taskSerial;
     const controller = new AbortController();
@@ -360,7 +360,7 @@ async function summarizeRange(ctx, range, settings, reason = 'manual', resumeTas
 
         let packet = pending.packet;
         if (pending.stage === 'prose' && !packet && pending.factRaw) {
-            try { packet = parseModelPacket(pending.factRaw); } catch { pending.stage = 'facts'; }
+            try { packet = assertMemoryPacket(parseModelPacket(pending.factRaw)); } catch { pending.stage = 'facts'; }
         }
         if (pending.stage !== 'prose' || !packet) {
             pending.stage = 'facts';
@@ -368,7 +368,7 @@ async function summarizeRange(ctx, range, settings, reason = 'manual', resumeTas
             if (serial !== runtime.taskSerial || controller.signal.aborted) throw controller.signal.reason || new DOMException('已中断生成', 'AbortError');
             let rawPacket = factResult.text;
             try {
-                packet = parseModelPacket(rawPacket);
+                packet = assertMemoryPacket(parseModelPacket(rawPacket));
             } catch (error) {
                 console.warn(`[${DISPLAY_NAME}] 首次记忆结构无法解析，要求模型重新输出纯 JSON`, error);
                 pending.partialText = rawPacket;
@@ -377,7 +377,7 @@ async function summarizeRange(ctx, range, settings, reason = 'manual', resumeTas
                     prompt: `${factPrompt.prompt}\n\n上一次回答无法解析。请重新完成任务，并且只输出一个完整、合法的 JSON 对象；不要输出 Markdown 代码块、解释或思考过程。`,
                 }, settings, pending, controller);
                 rawPacket = repairResult.text;
-                packet = parseModelPacket(rawPacket);
+                packet = assertMemoryPacket(parseModelPacket(rawPacket));
             }
             pending.factRaw = rawPacket;
             pending.packet = clone(packet);
@@ -403,35 +403,45 @@ async function summarizeRange(ctx, range, settings, reason = 'manual', resumeTas
         refreshUi();
         const prose = cleanProse(proseResult.text);
         draft.recap = prose || cleanProse(packet.recap) || before.recap;
+        if (!draft.recap.trim()) throw new Error('文学前情为空，尚不能提交记忆');
         draft.styleAnchors = styleAnchors;
         const checkpoint = draft.checkpoints.find(item => item.id === checkpointId);
-        if (checkpoint) {
-            checkpoint.recap = draft.recap;
-            checkpoint.promptVersion = PROMPT_VERSION;
-            checkpoint.reason = pending.reason || reason;
-            checkpoint.memorySnapshot = snapshotMemory(draft);
-            checkpoint.beforeSnapshot = snapshotMemory(before);
-        }
+        if (!checkpoint) throw new Error('记忆检查点未建立，已阻止空结果覆盖旧记忆');
+        checkpoint.recap = draft.recap;
+        checkpoint.promptVersion = PROMPT_VERSION;
+        checkpoint.reason = pending.reason || reason;
+        checkpoint.memorySnapshot = snapshotMemory(draft);
+        checkpoint.beforeSnapshot = snapshotMemory(before);
         draft.pending = null;
         setChatState(draft, ctx);
         await applyInjection(ctx, draft, settings);
         await saveChat(ctx);
+
+        const committed = getChatState(ctx);
+        if (!committed.recap.trim() || !committed.checkpoints.some(item => item.id === checkpointId && item.status === 'committed')) {
+            throw new Error('总结已生成，但没有通过聊天记忆保存校验');
+        }
 
         if (settings.autoHide) {
             const hidden = hideRange(ctx, range, checkpointId);
             draft.hiddenRanges.push({ checkpointId, range, hidden, createdAt: Date.now() });
             if (checkpoint) checkpoint.hiddenCount = hidden.length;
             setChatState(draft, ctx);
-            await saveChat(ctx);
+            await saveChat(ctx, { includeMessages: true });
         }
         runtime.lastError = '';
+        runtime.lastSuccess = `已保存检查点 · 消息 ${range.start}–${range.end}`;
         notify('success', `已总结消息 ${range.start}–${range.end}${settings.autoHide ? '，旧正文已退出上下文' : ''}。`);
         return draft;
     } catch (error) {
         pending.partialText = runtime.streamText || pending.partialText || '';
         pending.lastError = readableGenerationError(error);
         pending.interruptedAt = Date.now();
-        await savePending(ctx, pending);
+        let progressSaveError = null;
+        try { await savePending(ctx, pending); } catch (saveError) {
+            progressSaveError = saveError;
+            console.error(`[${DISPLAY_NAME}] 未完成任务进度也无法保存`, saveError);
+        }
         if (isInterrupted(error, controller)) {
             runtime.lastError = `已中断${stageName(pending.stage)}，可以继续`;
             notify('info', runtime.lastError);
@@ -440,6 +450,7 @@ async function summarizeRange(ctx, range, settings, reason = 'manual', resumeTas
             console.error(`[${DISPLAY_NAME}] 总结生成失败`, error);
             notify('error', runtime.lastError);
         }
+        if (progressSaveError) runtime.lastError += `；未完成进度保存失败：${readableGenerationError(progressSaveError)}`;
         return null;
     } finally {
         if (runtime.abortController === controller) runtime.abortController = null;
@@ -557,7 +568,7 @@ async function restoreAll() {
     const chatState = getChatState(ctx);
     chatState.hiddenRanges = [];
     setChatState(chatState, ctx);
-    await saveChat(ctx);
+    await saveChat(ctx, { includeMessages: true });
     await applyInjection(ctx, chatState, getSettings(ctx));
     refreshUi();
     notify('success', count ? `已恢复 ${count} 条由插件隐藏的消息。` : '没有需要恢复的插件隐藏消息。');
@@ -569,7 +580,7 @@ async function rebuildFromStart() {
     restoreOwnedMessages(ctx);
     const fresh = normalizeChatState({ enabled: old.enabled, autoSummarize: old.autoSummarize, autoHide: old.autoHide });
     setChatState(fresh, ctx);
-    await saveChat(ctx);
+    await saveChat(ctx, { includeMessages: true });
     await applyInjection(ctx, fresh, getSettings(ctx));
     refreshUi();
     notify('info', '已恢复原文并清空当前检查点。点击“立即总结”重新建立记忆。');
@@ -635,7 +646,15 @@ function refreshUi() {
         <span>检查点 ${chatState.checkpoints.length}</span>
         <span>注入约 ${chatState.lastInjectionTokens || tokenEstimate(chatState.lastInjection || '')} Token</span>`;
     const status = runtime.overlay.querySelector('[data-gds-status]');
-    if (status && !runtime.busy) status.textContent = runtime.lastError ? `上次任务：${runtime.lastError}` : '已就绪';
+    if (status && !runtime.busy) {
+        const hasCheckpoint = chatState.checkpoints.some(item => item.status === 'committed');
+        const orphanOutput = Boolean(runtime.streamText.trim() && !hasCheckpoint && !chatState.pending);
+        if (chatState.pending) status.textContent = `总结未完成：${stageName(chatState.pending.stage)}，请点击“继续”`;
+        else if (runtime.lastError) status.textContent = `未保存：${runtime.lastError}`;
+        else if (orphanOutput) status.textContent = '收到模型文本，但尚未保存成记忆，请重新总结';
+        else if (runtime.lastSuccess) status.textContent = runtime.lastSuccess;
+        else status.textContent = hasCheckpoint ? '记忆已保存并正在注入' : '尚未建立记忆，点击“立即总结”';
+    }
     const summarize = runtime.overlay.querySelector('[data-gds-summarize]');
     const resume = runtime.overlay.querySelector('[data-gds-continue]');
     const stop = runtime.overlay.querySelector('[data-gds-stop]');
@@ -697,7 +716,7 @@ function createUi() {
                 <div><span class="gds-puppy">🐶</span><div><h2>嘎嘎小狗总结</h2><small>剧情记忆 · 文风继承 · 自动隐藏</small></div></div>
                 <button class="gds-icon-button" data-gds-close title="关闭">×</button>
             </header>
-            <div class="gds-status" data-gds-status>已就绪</div>
+            <div class="gds-status" data-gds-status>尚未建立记忆，点击“立即总结”</div>
             <div class="gds-metrics" data-gds-metrics></div>
             <div class="gds-actions">
                 <button class="gds-primary" data-gds-summarize>立即总结</button>
@@ -707,7 +726,7 @@ function createUi() {
                 <button data-gds-restore>恢复隐藏</button>
             </div>
             <div class="gds-grid">
-                <label class="gds-field gds-wide gds-stream-field"><span>生成进度（流式接收）</span><textarea rows="6" readonly data-gds-stream-preview placeholder="生成时会在这里实时显示；中断后会保留当前阶段，可点击继续"></textarea></label>
+                <label class="gds-field gds-wide gds-stream-field"><span>生成进度 / 原始返回（不代表已保存）</span><textarea rows="6" readonly data-gds-stream-preview placeholder="生成时会在这里实时显示；只有出现已保存检查点才算完成，中断后可点击继续"></textarea></label>
                 <label class="gds-field gds-wide"><span>文学版前情（可编辑）</span><textarea rows="8" data-gds-summary placeholder="总结后会在这里显示有文笔的前情回顾"></textarea><button data-gds-save-summary>保存前情修改</button></label>
                 <label class="gds-field gds-wide"><span>模型实际收到的记忆注入</span><textarea rows="10" readonly data-gds-preview></textarea></label>
             </div>
