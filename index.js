@@ -81,7 +81,7 @@ const INJECTION_ID = `${EXTENSION_NAME}:memory`;
 const DIRECTOR_INJECTION_ID = `${EXTENSION_NAME}:director`;
 const PANEL_LOGO_URL = new URL('./assets/gaga-dog-logo.png', import.meta.url).href;
 const FLOATING_LOGO_URL = new URL('./assets/gaga-dog-floating.png', import.meta.url).href;
-const VERSION = '0.3.4';
+const VERSION = '0.3.5';
 const SETTINGS_VERSION = 5;
 
 const DEFAULT_SETTINGS = {
@@ -1073,7 +1073,7 @@ async function prepareDirectorForGeneration(ctx, type, options, dryRun) {
 async function runReplyTask(ctx) {
     reconcileGeneratingFlag(ctx);
     if (runtime.replyBusy || runtime.busy || runtime.workflowActive || hostGenerationActive(ctx)) {
-        notify('info', '当前还有生成任务进行中，请稍后再生成待写回复。');
+        notify('info', '当前还有生成任务进行中，请稍后再生成代写回复。');
         return null;
     }
     const settings = getSettings(ctx);
@@ -1094,7 +1094,7 @@ async function runReplyTask(ctx) {
     runtime.replyBusy = true;
     runtime.replyAbortController = controller;
     runtime.replyText = '';
-    setStatus('待写回复正在生成五个候选……');
+    setStatus('代写回复正在生成五个候选……');
     refreshUi();
     try {
         const result = await generateWithFallback(ctx, {
@@ -1110,11 +1110,11 @@ async function runReplyTask(ctx) {
         const candidates = parseReplyCandidates(result.text, reply.candidateCount);
         const nextReply = { ...reply, lastCandidates: candidates, createdAt: Date.now() };
         await saveChatStateAndRefresh(ctx, { ...getChatState(ctx), reply: nextReply });
-        notify('success', `已生成 ${candidates.length} 个待写回复。`);
+        notify('success', `已生成 ${candidates.length} 个代写回复。`);
         return candidates;
     } catch (error) {
-        if (controller.signal.aborted) notify('info', '待写回复已中断。');
-        else notify('error', `待写回复失败：${readableGenerationError(error)}`);
+        if (controller.signal.aborted) notify('info', '代写回复已中断。');
+        else notify('error', `代写回复失败：${readableGenerationError(error)}`);
         return null;
     } finally {
         if (runtime.replyAbortController === controller) runtime.replyAbortController = null;
@@ -1124,7 +1124,7 @@ async function runReplyTask(ctx) {
 }
 
 function stopReplyTask() {
-    runtime.replyAbortController?.abort(new DOMException('已中断待写回复', 'AbortError'));
+    runtime.replyAbortController?.abort(new DOMException('已中断代写回复', 'AbortError'));
 }
 
 async function copyText(text) {
@@ -1485,7 +1485,7 @@ function renderCalendarEvents(calendar, context) {
 }
 
 function renderReplyCandidates(candidates) {
-    if (!Array.isArray(candidates) || !candidates.length) return '<div class="gds-empty">还没有待写回复。点击“生成五个候选”。</div>';
+    if (!Array.isArray(candidates) || !candidates.length) return '<div class="gds-empty">还没有代写回复。点击“生成五个候选”。</div>';
     return candidates.map((item, index) => `<article class="gds-reply-card"><div class="gds-reply-card-head"><strong>${escapeHtml(item.title || `候选 ${index + 1}`)}</strong><small>${escapeHtml(item.intent || '')}</small></div><textarea readonly data-gds-reply-text="${escapeHtml(item.id)}">${escapeHtml(item.text)}</textarea><p>${escapeHtml(item.possibleEffect || '')}</p><div><button data-gds-reply-copy="${escapeHtml(item.id)}">复制</button><button class="gds-primary" data-gds-reply-insert="${escapeHtml(item.id)}">放入编辑栏</button></div></article>`).join('');
 }
 
@@ -1566,7 +1566,7 @@ async function saveApiProfileFromUi(ctx) {
     saveSettings(ctx);
     populateProviderSelectors(overlay, ctx);
     refreshUi();
-    notify('success', `独立连接已保存并绑定到${moduleName === 'memory' ? '剧情记忆' : moduleName === 'director' ? '情节导演' : '待写回复'}。`);
+    notify('success', `独立连接已保存并绑定到${moduleName === 'memory' ? '剧情记忆' : moduleName === 'director' ? '情节导演' : '代写回复'}。`);
 }
 
 async function testApiProfileFromUi(ctx) {
@@ -1598,7 +1598,7 @@ function setActiveTab(tab = 'home') {
         home: ['嘎嘎小狗故事工作台', '选择一个功能开始'],
         memory: ['剧情记忆', '精简前情 · 保留细节 · 自动隐藏'],
         director: ['情节导演', '规划主线 · 分支 · 伏笔 · 日历'],
-        reply: ['待写回复', '生成候选 · 复制或放入编辑栏'],
+        reply: ['代写回复', '生成候选 · 复制或放入编辑栏'],
         connections: ['模型连接', '分别绑定酒馆连接或独立 API'],
     };
     if (title) title.textContent = subtitles[active][0];
@@ -2072,14 +2072,14 @@ function createUi() {
                 <div><img class="gds-puppy" src="${escapeHtml(PANEL_LOGO_URL)}" alt="" aria-hidden="true"><div><h2 data-gds-page-title>嘎嘎小狗故事工作台</h2><small data-gds-page-subtitle>选择一个功能开始</small></div></div>
                 <button class="gds-icon-button" data-gds-close title="关闭">×</button>
             </header>
-            <nav class="gds-tabs" aria-label="故事工作台功能"><button data-gds-tab="home">功能首页</button><button data-gds-tab="memory">剧情记忆</button><button data-gds-tab="director">情节导演</button><button data-gds-tab="reply">待写回复</button><button data-gds-tab="connections">模型连接</button></nav>
+            <nav class="gds-tabs" aria-label="故事工作台功能"><button data-gds-tab="home">功能首页</button><button data-gds-tab="memory">剧情记忆</button><button data-gds-tab="director">情节导演</button><button data-gds-tab="reply">代写回复</button><button data-gds-tab="connections">模型连接</button></nav>
             <main class="gds-page-host">
                 <section class="gds-home" data-gds-tab-panel="home">
                     <div class="gds-home-intro"><h3>选择要使用的功能</h3></div>
                     <div class="gds-home-grid">
                         <button class="gds-home-card" data-gds-tab="memory"><strong>剧情记忆</strong><span>总结前情、保留文风、隐藏旧正文</span></button>
                         <button class="gds-home-card" data-gds-tab="director"><strong>情节导演</strong><span>长线规划、分支、伏笔与故事日历</span></button>
-                        <button class="gds-home-card" data-gds-tab="reply"><strong>待写回复</strong><span>生成多个用户回复候选并放入编辑栏</span></button>
+                        <button class="gds-home-card" data-gds-tab="reply"><strong>代写回复</strong><span>生成多个用户回复候选并放入编辑栏</span></button>
                         <button class="gds-home-card" data-gds-tab="connections"><strong>模型连接</strong><span>分别配置三个功能使用的酒馆连接或独立 API</span></button>
                     </div>
                 </section>
@@ -2115,7 +2115,7 @@ function createUi() {
                 <div class="gds-settings-grid gds-provider-grid">
                     <label>剧情记忆使用 <select data-gds-provider="memory"></select></label>
                     <label>情节导演使用 <select data-gds-provider="director"></select></label>
-                    <label>待写回复使用 <select data-gds-provider="reply"></select></label>
+                    <label>代写回复使用 <select data-gds-provider="reply"></select></label>
                 </div>
                 <div class="gds-api-form">
                     <p class="gds-help">默认跟随当前酒馆。需要单独模型时，可保存一个 OpenAI 兼容连接，再分别绑定到三个模块。</p>
@@ -2126,7 +2126,7 @@ function createUi() {
                         <label>模型 <input type="text" data-gds-api-model placeholder="例如：gpt-4o-mini"></label>
                         <label>上下文 Token <input type="number" min="0" step="1024" data-gds-api-context placeholder="不知道可留空"></label>
                         <label>最大输出 Token <input type="number" min="128" step="128" data-gds-api-output value="4096"></label>
-                        <label>绑定模块 <select data-gds-api-module><option value="memory">剧情记忆</option><option value="director">情节导演</option><option value="reply">待写回复</option></select></label>
+                        <label>绑定模块 <select data-gds-api-module><option value="memory">剧情记忆</option><option value="director">情节导演</option><option value="reply">代写回复</option></select></label>
                     </div>
                     <button data-gds-api-save>保存并绑定连接</button><button data-gds-api-test>测试模型列表</button>
                 </div>
@@ -2166,7 +2166,7 @@ function createUi() {
                 </div>
             </section>
             <section class="gds-tab-content" data-gds-tab-panel="reply" hidden>
-                <div class="gds-section-title"><div><h3>待写回复</h3><p>生成五种不同策略的用户回复，选择后放入酒馆编辑栏，不会自动发送。</p></div><button data-gds-reply-stop hidden>中断代写</button></div>
+                <div class="gds-section-title"><div><h3>代写回复</h3><p>生成五种不同策略的用户回复，选择后放入酒馆编辑栏，不会自动发送。</p></div><button data-gds-reply-stop hidden>中断代写</button></div>
                 <div class="gds-settings-grid gds-reply-settings">
                     <label>视角 <select data-gds-reply-viewpoint></select></label>
                     <label>描写密度 <select data-gds-reply-detail></select></label>

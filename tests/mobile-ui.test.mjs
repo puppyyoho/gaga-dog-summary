@@ -129,6 +129,8 @@ test('keeps switched pages in a dedicated scrolling viewport and resists theme h
 });
 
 test('reply candidates can be copied or inserted without auto-sending', () => {
+    assert.doesNotMatch(js, /待写回复/);
+    assert.match(js, /代写回复/);
     assert.match(js, /生成五个候选/);
     assert.match(js, /data-gds-reply-copy/);
     assert.match(js, /data-gds-reply-insert/);
