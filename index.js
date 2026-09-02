@@ -32,7 +32,7 @@ const DISPLAY_NAME = '嘎嘎小狗总结';
 const SETTINGS_KEY = 'gagaDogSummary';
 const INJECTION_ID = `${EXTENSION_NAME}:memory`;
 const LOGO_URL = new URL('./assets/gaga-dog-logo.png', import.meta.url).href;
-const VERSION = '0.1.12';
+const VERSION = '0.1.13';
 const SETTINGS_VERSION = 2;
 
 const DEFAULT_SETTINGS = {
@@ -897,10 +897,10 @@ function createUi() {
             </div>
             <details class="gds-details" open><summary>自动总结与上下文</summary>
                 <div class="gds-settings-grid">
-                    <label><input type="checkbox" data-gds-auto> 自动总结</label>
-                    <label><input type="checkbox" data-gds-hide> 总结成功后自动隐藏旧正文</label>
-                    <label><input type="checkbox" data-gds-collapse> 在界面折叠已隐藏范围</label>
-                    <label><input type="checkbox" data-gds-stream> 流式生成与实时显示</label>
+                    <label class="gds-toggle-row"><span>自动总结</span><input type="checkbox" data-gds-auto></label>
+                    <label class="gds-toggle-row"><span>总结成功后自动隐藏旧正文</span><input type="checkbox" data-gds-hide></label>
+                    <label class="gds-toggle-row"><span>在界面折叠已隐藏范围</span><input type="checkbox" data-gds-collapse></label>
+                    <label class="gds-toggle-row"><span>流式生成与实时显示</span><input type="checkbox" data-gds-stream></label>
                     <label>每批总结约 Token <input type="number" min="5000" step="5000" data-gds-trigger></label>
                     <label>保留近期消息 <input type="number" min="4" step="1" data-gds-keep></label>
                     <label>注入上限 Token <input type="number" min="160" step="100" data-gds-injection></label>

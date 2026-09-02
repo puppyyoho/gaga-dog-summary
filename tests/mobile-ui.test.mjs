@@ -21,11 +21,13 @@ test('mobile header remains reachable and fields cannot overflow horizontally', 
     assert.match(css, /overflow-wrap:\s*anywhere/);
 });
 
-test('settings checkboxes have a high-contrast custom checked state', () => {
-    assert.match(css, /\.gds-settings-grid input\[type="checkbox"\]\s*\{[\s\S]*?appearance:\s*none/);
-    assert.match(css, /\.gds-settings-grid input\[type="checkbox"\]:checked\s*\{[\s\S]*?background:\s*var\(--gds-pink-deep\)/);
-    assert.match(css, /\.gds-settings-grid input\[type="checkbox"\]:checked::after/);
-    assert.match(css, /background-image:\s*url\("data:image\/svg\+xml/);
+test('settings use theme-resistant pink toggle switches', () => {
+    assert.match(css, /\.gds-settings-grid input\[type="checkbox"\]\s*\{[\s\S]*?appearance:\s*none\s*!important/);
+    assert.match(css, /width:\s*42px\s*!important/);
+    assert.match(css, /background-image:\s*radial-gradient\(circle at 11px 50%/);
+    assert.match(css, /\.gds-settings-grid input\[type="checkbox"\]:checked\s*\{[\s\S]*?background-color:\s*var\(--gds-pink-deep\)\s*!important/);
+    assert.match(css, /background-image:\s*radial-gradient\(circle at 31px 50%/);
+    assert.match(js, /class="gds-toggle-row"><span>自动总结<\/span><input type="checkbox" data-gds-auto>/);
 });
 
 test('opening the panel locks background scrolling and resets panel scroll', () => {
