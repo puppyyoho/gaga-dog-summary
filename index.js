@@ -31,7 +31,7 @@ const EXTENSION_NAME = 'gaga-dog-summary';
 const DISPLAY_NAME = '嘎嘎小狗总结';
 const SETTINGS_KEY = 'gagaDogSummary';
 const INJECTION_ID = `${EXTENSION_NAME}:memory`;
-const VERSION = '0.1.7';
+const VERSION = '0.1.8';
 const SETTINGS_VERSION = 2;
 
 const DEFAULT_SETTINGS = {
@@ -171,32 +171,137 @@ function locateMessage(messages, ref) {
     return null;
 }
 
-function hideRange(ctx, range, checkpointId) {
+let tavernVisibilityImport;
+
+function messageDomNode(index) {
+    if (typeof document === 'undefined' || !Number.isInteger(index)) return null;
+    try { return document.querySelector(`.mes[mesid="${index}"]`); } catch { return null; }
+}
+
+function syncMessageVisibilityDom(index, hidden) {
+    messageDomNode(index)?.setAttribute('is_system', String(Boolean(hidden)));
+}
+
+function visibilityCommand(start, end, hidden) {
+    const range = start === end ? String(start) : `${start}-${end}`;
+    return `/${hidden ? 'hide' : 'unhide'} ${range}`;
+}
+
+async function loadTavernHideChatMessageRange() {
+    if (tavernVisibilityImport !== undefined) return tavernVisibilityImport;
+    tavernVisibilityImport = import('/scripts/chats.js')
+        .then(module => typeof module.hideChatMessageRange === 'function' ? module.hideChatMessageRange : null)
+        .catch(error => {
+            console.debug(`[${DISPLAY_NAME}] 无法加载酒馆聊天隐藏模块，将使用消息标记兼容模式`, error);
+            return null;
+        });
+    return tavernVisibilityImport;
+}
+
+/**
+ * Use SillyTavern's own visibility path whenever the host exposes it. The
+ * slash-command adapter is intentionally first: it is the same `/hide` /
+ * `/unhide` path a user can run, including DOM refresh and chat persistence.
+ */
+async function setTavernRangeVisibility(ctx, start, end, hidden) {
+    if (!Number.isInteger(start) || !Number.isInteger(end) || start < 0 || end < start) return false;
+    const command = visibilityCommand(start, end, hidden);
+    const executeSlashCommands = ctx?.executeSlashCommands || globalThis.executeSlashCommands;
+    if (typeof executeSlashCommands === 'function') {
+        try {
+            await executeSlashCommands(command);
+            return true;
+        } catch (error) {
+            console.warn(`[${DISPLAY_NAME}] ${command} 执行失败，尝试直接调用酒馆隐藏接口`, error);
+        }
+    }
+    const hideChatMessageRange = ctx?.hideChatMessageRange || globalThis.hideChatMessageRange || await loadTavernHideChatMessageRange();
+    if (typeof hideChatMessageRange === 'function') {
+        try {
+            await hideChatMessageRange(start, end, !hidden);
+            return true;
+        } catch (error) {
+            console.warn(`[${DISPLAY_NAME}] 酒馆隐藏接口调用失败，使用兼容标记模式`, error);
+        }
+    }
+    return false;
+}
+
+function contiguousRanges(indexes) {
+    const sorted = [...new Set(indexes)].filter(Number.isInteger).sort((a, b) => a - b);
+    const ranges = [];
+    for (const index of sorted) {
+        const previous = ranges[ranges.length - 1];
+        if (previous && index === previous.end + 1) previous.end = index;
+        else ranges.push({ start: index, end: index });
+    }
+    return ranges;
+}
+
+async function hideRange(ctx, range, checkpointId) {
     const messages = getMessages(ctx);
-    const hidden = [];
+    const candidates = [];
     for (const ref of range?.refs || []) {
         const located = locateMessage(messages, ref);
         const message = located?.message;
         if (!message || message.is_system || message.extra?.gagaDogHiddenBy) continue;
+        candidates.push({
+            ...located,
+            hadSystemField: Object.prototype.hasOwnProperty.call(message, 'is_system'),
+            originalSystem: Boolean(message.is_system),
+        });
+    }
+    if (!candidates.length) return [];
+
+    const start = Math.min(...candidates.map(item => item.index));
+    const end = Math.max(...candidates.map(item => item.index));
+    const usedTavernPath = await setTavernRangeVisibility(ctx, start, end, true);
+    const hidden = [];
+    for (const located of candidates) {
+        const message = located.message;
+        // The host path updates `is_system` and the rendered .mes block. If an
+        // older build has no command/helper, keep the same flag as a fallback.
+        if (!usedTavernPath || !message.is_system) {
+            message.is_system = true;
+            syncMessageVisibilityDom(located.index, true);
+        }
+        if (!message.is_system) continue;
         message.extra = message.extra && typeof message.extra === 'object' ? message.extra : {};
         message.extra.gagaDogHiddenBy = checkpointId;
-        message.extra.gagaDogHadSystemField = Object.prototype.hasOwnProperty.call(message, 'is_system');
-        message.extra.gagaDogOriginalSystem = Boolean(message.is_system);
-        message.is_system = true;
+        message.extra.gagaDogHadSystemField = located.hadSystemField;
+        message.extra.gagaDogOriginalSystem = located.originalSystem;
         hidden.push({ index: located.index, key: located.item.key, checkpointId });
     }
     return hidden;
 }
 
-function restoreOwnedMessages(ctx, checkpointIds = null) {
+async function restoreOwnedMessages(ctx, checkpointIds = null) {
     const ids = checkpointIds ? new Set(checkpointIds) : null;
+    const messages = getMessages(ctx);
+    const owned = messages.map((message, index) => ({ message, index }))
+        .filter(({ message }) => {
+            const owner = message?.extra?.gagaDogHiddenBy;
+            return owner && (!ids || ids.has(owner));
+        });
+    if (!owned.length) return 0;
+
+    const usedTavernRanges = [];
+    for (const range of contiguousRanges(owned.map(item => item.index))) {
+        if (await setTavernRangeVisibility(ctx, range.start, range.end, false)) usedTavernRanges.push(range);
+    }
     let restored = 0;
-    for (const message of getMessages(ctx)) {
-        const extra = message?.extra;
-        const owner = extra?.gagaDogHiddenBy;
-        if (!owner || (ids && !ids.has(owner))) continue;
-        if (extra.gagaDogHadSystemField) message.is_system = Boolean(extra.gagaDogOriginalSystem);
-        else delete message.is_system;
+    for (const { message, index } of owned) {
+        const extra = message.extra;
+        if (!usedTavernRanges.some(range => index >= range.start && index <= range.end)) {
+            if (extra.gagaDogHadSystemField) message.is_system = Boolean(extra.gagaDogOriginalSystem);
+            else delete message.is_system;
+            syncMessageVisibilityDom(index, Boolean(message.is_system));
+        } else if (extra.gagaDogOriginalSystem) {
+            // We currently avoid taking ownership of already-hidden messages,
+            // but preserve this field for old checkpoints made by v0.1.7.
+            message.is_system = true;
+            syncMessageVisibilityDom(index, true);
+        }
         delete extra.gagaDogHiddenBy;
         delete extra.gagaDogHadSystemField;
         delete extra.gagaDogOriginalSystem;
@@ -230,13 +335,13 @@ function restoreSnapshot(state, snapshot) {
     return next;
 }
 
-function invalidateIfNeeded(ctx, chatState) {
+async function invalidateIfNeeded(ctx, chatState) {
     const messages = getMessages(ctx);
     const checkpoints = Array.isArray(chatState.checkpoints) ? chatState.checkpoints : [];
     const brokenIndex = checkpoints.findIndex(checkpoint => checkpoint.range && !rangeStillMatches(messages, checkpoint.range));
     if (brokenIndex < 0) return { state: chatState, changed: false };
     const affected = checkpoints.slice(brokenIndex);
-    restoreOwnedMessages(ctx, affected.map(item => item.id));
+    await restoreOwnedMessages(ctx, affected.map(item => item.id));
     const previous = checkpoints[brokenIndex - 1];
     const next = restoreSnapshot(chatState, previous?.memorySnapshot);
     next.checkpoints = checkpoints.slice(0, brokenIndex);
@@ -461,7 +566,7 @@ async function summarizeRange(ctx, range, settings, reason = 'manual', resumeTas
         }
 
         if (settings.autoHide) {
-            const hidden = hideRange(ctx, range, checkpointId);
+            const hidden = await hideRange(ctx, range, checkpointId);
             draft.hiddenRanges.push({ checkpointId, range, hidden, createdAt: Date.now() });
             if (checkpoint) checkpoint.hiddenCount = hidden.length;
             setChatState(draft, ctx);
@@ -606,7 +711,7 @@ function stopSummary() {
 
 async function restoreAll() {
     const ctx = getContext();
-    const count = restoreOwnedMessages(ctx);
+    const count = await restoreOwnedMessages(ctx);
     const chatState = getChatState(ctx);
     chatState.hiddenRanges = [];
     setChatState(chatState, ctx);
@@ -619,7 +724,7 @@ async function restoreAll() {
 async function rebuildFromStart() {
     const ctx = getContext();
     const old = getChatState(ctx);
-    restoreOwnedMessages(ctx);
+    await restoreOwnedMessages(ctx);
     const fresh = normalizeChatState({ enabled: old.enabled, autoSummarize: old.autoSummarize, autoHide: old.autoHide });
     setChatState(fresh, ctx);
     await saveChat(ctx, { includeMessages: true });
@@ -632,7 +737,7 @@ async function reconcileAndRefresh() {
     try {
         const ctx = getContext();
         const current = getChatState(ctx);
-        const result = invalidateIfNeeded(ctx, current);
+        const result = await invalidateIfNeeded(ctx, current);
         if (result.changed) {
             await saveChat(ctx);
             await applyInjection(ctx, result.state, getSettings(ctx));
@@ -801,6 +906,7 @@ function createUi() {
                     <label>前情目标字数 <input type="number" min="80" step="20" data-gds-words></label>
                     <label>注入模式 <select data-gds-mode><option value="safe">安全：只发事实</option><option value="balanced">平衡：事实与前情</option></select></label>
                 </div>
+                <p class="gds-help">酒馆消息索引从 0 开始；自动隐藏使用 /hide，点击恢复隐藏使用 /unhide。设置的保留条数只保护最新消息，不会参与本批总结。</p>
             </details>
             <details class="gds-details"><summary>检查点</summary><div data-gds-checkpoints></div></details>
             <footer class="gds-footer"><span>v${VERSION} · 提示词 ${PROMPT_VERSION}</span><span>原消息可恢复，不会自动删除</span></footer>

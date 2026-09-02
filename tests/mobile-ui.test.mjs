@@ -48,6 +48,15 @@ test('uses a 60000 Token default and labels it as a per-batch target', () => {
     assert.match(js, /targetTokens:\s*settings\.triggerTokens/);
 });
 
+test('uses SillyTavern hide and unhide paths for committed ranges', () => {
+    assert.match(js, /visibilityCommand\(start, end, hidden\)/);
+    assert.match(js, /\/\$\{hidden \? 'hide' : 'unhide'\}/);
+    assert.match(js, /await executeSlashCommands\(command\)/);
+    assert.match(js, /import\('\/scripts\/chats\.js'\)/);
+    assert.match(js, /const hidden = await hideRange\(ctx, range, checkpointId\)/);
+    assert.match(js, /const count = await restoreOwnedMessages\(ctx\)/);
+});
+
 test('settings entry uses a standard drawer and cannot become vertical text', () => {
     assert.match(js, /extension_container gds-settings-entry/);
     assert.match(js, /inline-drawer-toggle inline-drawer-header/);
