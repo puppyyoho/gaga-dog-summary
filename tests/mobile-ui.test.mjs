@@ -23,13 +23,15 @@ test('mobile header remains reachable and fields cannot overflow horizontally', 
 
 test('settings use theme-resistant pink toggle switches', () => {
     assert.match(css, /\.gds-settings-grid input\[type="checkbox"\]\s*\{[\s\S]*?appearance:\s*none\s*!important/);
-    assert.match(css, /width:\s*36px\s*!important/);
-    assert.match(css, /background-image:\s*radial-gradient\(circle at 9px 50%/);
+    assert.match(css, /width:\s*32px\s*!important/);
+    assert.match(css, /background-image:\s*radial-gradient\(circle at 8px 50%/);
     assert.match(css, /\.gds-settings-grid input\[type="checkbox"\]:checked\s*\{[\s\S]*?background-color:\s*var\(--gds-pink-deep\)\s*!important/);
-    assert.match(css, /background-image:\s*radial-gradient\(circle at 27px 50%/);
+    assert.match(css, /background-image:\s*radial-gradient\(circle at 24px 50%/);
     assert.match(css, /\.gds-settings-grid \.gds-toggle-row\s*\{[^}]*justify-content:\s*flex-start/);
-    assert.match(css, /column-gap:\s*clamp\(34px, 5vw, 72px\)/);
-    assert.match(js, /class="gds-toggle-row"><span>自动总结<\/span><input type="checkbox" data-gds-auto>/);
+    assert.match(css, /grid-template-columns:\s*repeat\(2, minmax\(260px, 360px\)\)/);
+    assert.match(css, /column-gap:\s*clamp\(70px, 9vw, 110px\)/);
+    assert.match(css, /max-width:\s*820px/);
+    assert.match(js, /class="gds-toggle-row"><input type="checkbox" data-gds-auto><span>自动总结<\/span>/);
 });
 
 test('opening the panel locks background scrolling and resets panel scroll', () => {
@@ -66,10 +68,27 @@ test('uses the supplied dog image instead of emoji branding', () => {
     assert.match(css, /\.gds-floating-image\s*\{[^}]*border-radius:\s*0/);
 });
 
-test('uses a 60000 Token default and labels it as a per-batch target', () => {
+test('uses 60000 Token only as the automatic trigger and chains manual batches', () => {
     assert.match(js, /triggerTokens:\s*60000/);
-    assert.match(js, /每批总结约 Token/);
-    assert.match(js, /targetTokens:\s*settings\.triggerTokens/);
+    assert.match(js, /INTERNAL_BATCH_TOKENS = 60000/);
+    assert.match(js, /自动总结触发约 Token/);
+    assert.match(js, /function planEligibleRange\(ctx\)[\s\S]*?targetTokens:\s*0/);
+    assert.match(js, /function planBatchRanges\(ctx,[\s\S]*?targetTokens:\s*INTERNAL_BATCH_TOKENS/);
+    assert.match(js, /async function runSummaryWorkflow\(ctx,[\s\S]*?while \(true\)[\s\S]*?await summarizeRange\(/);
+    assert.match(js, /pending\.workflow = clone\(workflowInfo\)/);
+    assert.doesNotMatch(js, /manualKeepMessages/);
+    assert.match(js, /内容再长也会在后台自动分批衔接，无需手动点击继续/);
+});
+
+test('floating dog can be dragged without accidentally opening the panel', () => {
+    assert.match(js, /floatingPosition:\s*null/);
+    assert.match(js, /addEventListener\('pointerdown'/);
+    assert.match(js, /addEventListener\('pointermove'/);
+    assert.match(js, /setPointerCapture/);
+    assert.match(js, /persistFloatingPosition\(completed\.position\)/);
+    assert.match(js, /if \(suppressClick\)/);
+    assert.match(css, /\.gds-floating\s*\{[\s\S]*?touch-action:\s*none/);
+    assert.match(css, /\.gds-floating\.gds-dragging/);
 });
 
 test('uses SillyTavern hide and unhide paths for committed ranges', () => {

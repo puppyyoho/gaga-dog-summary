@@ -365,18 +365,21 @@ export function selectHideEnd(messages, state, options = {}) {
     return keepIndex - 1;
 }
 
-export function rangeForNewSummary(messages, state, options = {}) {
+export function rangesForSummaryBacklog(messages, state, options = {}) {
     const normalized = normalizeMessages(messages);
-    if (!normalized.length) return null;
+    if (!normalized.length) return [];
     const start = Math.max(0, Number(state?.lastProcessedIndex ?? -1) + 1);
     const availableEnd = selectHideEnd(messages, state, options);
-    if (availableEnd < start) return null;
+    if (availableEnd < start) return [];
     const targetTokens = Math.max(0, Number(options.targetTokens || 0));
-    let end = availableEnd;
-    if (targetTokens > 0) {
+    if (targetTokens <= 0) return [makeSourceRange(messages, start, availableEnd)];
+
+    const ranges = [];
+    let cursor = start;
+    while (cursor <= availableEnd) {
         let accumulated = 0;
-        end = start;
-        for (let index = start; index <= availableEnd; index += 1) {
+        let end = cursor;
+        for (let index = cursor; index <= availableEnd; index += 1) {
             const item = normalized[index];
             const raw = messages[index];
             const fullContent = compactText(raw?.mes ?? raw?.content ?? '', 300000);
@@ -384,8 +387,14 @@ export function rangeForNewSummary(messages, state, options = {}) {
             end = index;
             if (accumulated >= targetTokens) break;
         }
+        ranges.push(makeSourceRange(messages, cursor, end));
+        cursor = end + 1;
     }
-    return makeSourceRange(messages, start, end);
+    return ranges;
+}
+
+export function rangeForNewSummary(messages, state, options = {}) {
+    return rangesForSummaryBacklog(messages, state, options)[0] || null;
 }
 
 export function selectStyleAnchors(messages, max = 3, options = {}) {

@@ -10,6 +10,7 @@ import {
     normalizeMessages,
     parseModelPacket,
     rangeForNewSummary,
+    rangesForSummaryBacklog,
     rangeStillMatches,
     selectStyleAnchors,
     simpleHash,
@@ -33,17 +34,18 @@ const SETTINGS_KEY = 'gagaDogSummary';
 const INJECTION_ID = `${EXTENSION_NAME}:memory`;
 const PANEL_LOGO_URL = new URL('./assets/gaga-dog-logo.png', import.meta.url).href;
 const FLOATING_LOGO_URL = new URL('./assets/gaga-dog-floating.png', import.meta.url).href;
-const VERSION = '0.1.15';
-const SETTINGS_VERSION = 2;
+const VERSION = '0.1.16';
+const SETTINGS_VERSION = 3;
+const INTERNAL_BATCH_TOKENS = 60000;
 
 const DEFAULT_SETTINGS = {
     showFloatingButton: true,
+    floatingPosition: null,
     autoSummarize: true,
     autoHide: true,
     collapseHidden: true,
     triggerTokens: 60000,
     keepMessages: 10,
-    manualKeepMessages: 4,
     injectionMaxTokens: 1400,
     recallLimit: 3,
     targetWords: 520,
@@ -66,6 +68,8 @@ const runtime = {
     streamText: '',
     streamMeta: null,
     activeStage: '',
+    workflowActive: false,
+    workflow: null,
     generating: false,
     lastChatSignature: '',
     lastError: '',
@@ -104,10 +108,16 @@ function getSettings(ctx = getContext()) {
     if (migratedDefault) result.triggerTokens = DEFAULT_SETTINGS.triggerTokens;
     result.settingsVersion = SETTINGS_VERSION;
     result.prompts = { ...DEFAULT_PROMPTS, ...(current?.prompts && typeof current.prompts === 'object' ? current.prompts : {}) };
-    for (const key of ['triggerTokens', 'keepMessages', 'manualKeepMessages', 'injectionMaxTokens', 'recallLimit', 'targetWords']) {
+    for (const key of ['triggerTokens', 'keepMessages', 'injectionMaxTokens', 'recallLimit', 'targetWords']) {
         const value = Number(result[key]);
         result[key] = Number.isFinite(value) ? Math.max(1, Math.round(value)) : DEFAULT_SETTINGS[key];
     }
+    const floatingPosition = result.floatingPosition;
+    result.floatingPosition = floatingPosition
+        && Number.isFinite(Number(floatingPosition.x))
+        && Number.isFinite(Number(floatingPosition.y))
+        ? { x: Math.round(Number(floatingPosition.x)), y: Math.round(Number(floatingPosition.y)) }
+        : null;
     ctx.extensionSettings[SETTINGS_KEY] = result;
     if (migratedDefault) {
         try { ctx.saveSettingsDebounced?.(); } catch (error) { console.warn(`[${DISPLAY_NAME}] 默认批次迁移保存失败`, error); }
@@ -393,7 +403,8 @@ function updateStreamPreview(text, meta = {}) {
     }
     const source = meta.source ? ` · ${meta.source}` : '';
     const chunks = meta.updates > 1 ? ` · ${meta.updates} 个有效分片` : '';
-    setStatus(`正在生成${stageName(runtime.activeStage)}${source}${chunks} · ${runtime.streamText.length} 字符`);
+    const batch = runtime.workflow ? `第 ${runtime.workflow.batchIndex + 1}/${runtime.workflow.totalBatches} 批 · ` : '';
+    setStatus(`${batch}正在生成${stageName(runtime.activeStage)}${source}${chunks} · ${runtime.streamText.length} 字符`);
 }
 
 function requestForResume(request, pending) {
@@ -433,13 +444,16 @@ async function runGenerationStage(ctx, request, settings, pending, controller) {
         onStatus: meta => {
             if (runtime.abortController !== controller) return;
             runtime.streamMeta = meta;
-            if (meta.phase === 'connecting') setStatus(`正在连接${meta.source || '当前酒馆模型'}，准备生成${stageName(pending.stage)}……`);
+            if (meta.phase === 'connecting') {
+                const batch = runtime.workflow ? `第 ${runtime.workflow.batchIndex + 1}/${runtime.workflow.totalBatches} 批 · ` : '';
+                setStatus(`${batch}正在连接${meta.source || '当前酒馆模型'}，准备生成${stageName(pending.stage)}……`);
+            }
             if (meta.phase === 'fallback') setStatus(`直接流式通道未完成，正在尝试兼容通道：${meta.reason}`);
         },
     });
 }
 
-async function summarizeRange(ctx, range, settings, reason = 'manual', resumeTask = null) {
+async function summarizeRange(ctx, range, settings, reason = 'manual', resumeTask = null, workflowInfo = null) {
     if (runtime.busy) throw new Error('已有总结任务正在运行。');
     const messages = getMessages(ctx);
     if (!rangeStillMatches(messages, range)) throw new Error('待总结消息已发生变化，请重新开始总结。');
@@ -464,11 +478,13 @@ async function summarizeRange(ctx, range, settings, reason = 'manual', resumeTas
         factRaw: '',
         packet: null,
         proseDraft: '',
+        workflow: clone(workflowInfo),
         createdAt: Date.now(),
     };
     pending.range = clone(range);
     pending.checkpointId = checkpointId;
     pending.reason ||= reason;
+    if (workflowInfo) pending.workflow = clone(workflowInfo);
     try {
         await savePending(ctx, pending);
         const sourceText = formatMessages(messages, range.start, range.end);
@@ -575,8 +591,10 @@ async function summarizeRange(ctx, range, settings, reason = 'manual', resumeTas
             await saveChat(ctx, { includeMessages: true });
         }
         runtime.lastError = '';
-        runtime.lastSuccess = `已保存检查点 · 消息 ${range.start}–${range.end}`;
-        notify('success', `已总结消息 ${range.start}–${range.end}${settings.autoHide ? '，旧正文已退出上下文' : ''}。`);
+        runtime.lastSuccess = workflowInfo
+            ? `已保存第 ${workflowInfo.batchIndex + 1}/${workflowInfo.totalBatches} 批 · 消息 ${range.start}–${range.end}`
+            : `已保存检查点 · 消息 ${range.start}–${range.end}`;
+        if (!workflowInfo) notify('success', `已总结消息 ${range.start}–${range.end}${settings.autoHide ? '，旧正文已退出上下文' : ''}。`);
         return draft;
     } catch (error) {
         pending.partialText = runtime.streamText || pending.partialText || '';
@@ -602,7 +620,7 @@ async function summarizeRange(ctx, range, settings, reason = 'manual', resumeTas
         runtime.busy = false;
         runtime.activeStage = '';
         refreshUi();
-        if (!runtime.lastError && !getChatState(ctx).pending) scheduleAutoSummary(1200);
+        if (!runtime.workflowActive && !runtime.lastError && !getChatState(ctx).pending) scheduleAutoSummary(1200);
     }
 }
 
@@ -628,21 +646,32 @@ async function applyInjection(ctx = getContext(), chatState = getChatState(ctx),
     return injection;
 }
 
-function planRange(ctx, manual = false) {
+function planEligibleRange(ctx) {
     const settings = getSettings(ctx);
     const chatState = getChatState(ctx);
-    const options = {
-        keepMessages: manual ? settings.manualKeepMessages : settings.keepMessages,
-        targetTokens: settings.triggerTokens,
-    };
-    return rangeForNewSummary(getMessages(ctx), chatState, options);
+    return rangeForNewSummary(getMessages(ctx), chatState, {
+        keepMessages: settings.keepMessages,
+        targetTokens: 0,
+    });
+}
+
+function planBatchRanges(ctx, goalEnd = Number.POSITIVE_INFINITY) {
+    const settings = getSettings(ctx);
+    const chatState = getChatState(ctx);
+    const messages = getMessages(ctx);
+    return rangesForSummaryBacklog(messages, chatState, {
+        keepMessages: settings.keepMessages,
+        targetTokens: INTERNAL_BATCH_TOKENS,
+    }).filter(range => range.start <= goalEnd).map(range => (
+        range.end > goalEnd ? makeSourceRange(messages, range.start, goalEnd) : range
+    ));
 }
 
 function shouldAutoSummarize(ctx) {
     const settings = getSettings(ctx);
     const chatState = getChatState(ctx);
-    if (!settings.autoSummarize || !chatState.enabled || chatState.pending || runtime.busy || runtime.generating) return false;
-    const range = planRange(ctx, false);
+    if (!settings.autoSummarize || !chatState.enabled || chatState.pending || runtime.busy || runtime.workflowActive || runtime.generating) return false;
+    const range = planEligibleRange(ctx);
     if (!range) return false;
     const messages = getMessages(ctx);
     const text = formatMessages(messages, range.start, range.end);
@@ -668,20 +697,92 @@ async function startSummary(manual = true) {
     const ctx = getContext();
     const settings = getSettings(ctx);
     const chatState = getChatState(ctx);
+    if (runtime.busy || runtime.workflowActive) {
+        if (manual) notify('info', '已有总结任务正在运行。');
+        return;
+    }
     if (chatState.pending) {
         if (manual) notify('info', '已有未完成的总结，请点击“继续”恢复，或点击“恢复并重建”放弃它。');
         return;
     }
-    const range = planRange(ctx, manual);
+    const range = planEligibleRange(ctx);
     if (!range) {
         notify('info', manual ? '目前没有足够的旧正文可总结；请保留一些近期消息后再试。' : '尚未达到自动总结阈值。');
         return;
     }
-    await summarizeRange(ctx, range, settings, manual ? 'manual' : 'auto');
+    if (!manual) {
+        const sourceTokens = tokenEstimate(formatMessages(getMessages(ctx), range.start, range.end));
+        if (sourceTokens < settings.triggerTokens) return;
+    }
+    await runSummaryWorkflow(ctx, {
+        reason: manual ? 'manual' : 'auto',
+        goalRange: range,
+    });
+}
+
+async function runSummaryWorkflow(ctx, options = {}) {
+    const settings = getSettings(ctx);
+    const resumeTask = options.resumeTask || null;
+    const savedWorkflow = resumeTask?.workflow && typeof resumeTask.workflow === 'object' ? resumeTask.workflow : {};
+    const goalStart = Number(savedWorkflow.goalStart ?? options.goalRange?.start ?? resumeTask?.range?.start);
+    const goalEnd = Number(savedWorkflow.goalEnd ?? options.goalRange?.end ?? resumeTask?.range?.end);
+    if (!Number.isInteger(goalStart) || !Number.isInteger(goalEnd) || goalEnd < goalStart) {
+        throw new Error('无法确定本次总结的完整消息范围。');
+    }
+
+    const reason = String(resumeTask?.reason || options.reason || 'manual');
+    const workflowId = String(savedWorkflow.id || `workflow_${Date.now()}_${simpleHash(`${goalStart}:${goalEnd}`)}`);
+    let batchIndex = Math.max(0, Number(savedWorkflow.batchIndex || 0));
+    const initialRanges = planBatchRanges(ctx, goalEnd);
+    let totalBatches = Math.max(batchIndex + 1, Number(savedWorkflow.totalBatches || 0), batchIndex + initialRanges.length);
+    let pending = resumeTask;
+    let lastEnd = Number(getChatState(ctx).lastProcessedIndex ?? goalStart - 1);
+
+    runtime.workflowActive = true;
+    try {
+        while (true) {
+            const planned = planBatchRanges(ctx, goalEnd);
+            let range = pending?.range || planned[0] || null;
+            if (!range || range.start > goalEnd) break;
+            if (range.end > goalEnd) range = makeSourceRange(getMessages(ctx), range.start, goalEnd);
+            totalBatches = Math.max(totalBatches, batchIndex + Math.max(1, planned.length));
+            const workflowInfo = {
+                id: workflowId,
+                goalStart,
+                goalEnd,
+                batchIndex,
+                totalBatches,
+            };
+            runtime.workflow = workflowInfo;
+            setStatus(`正在自动处理第 ${batchIndex + 1}/${totalBatches} 批 · 消息 ${range.start}–${range.end} · 总目标 ${goalStart}–${goalEnd}`);
+            refreshUi();
+            const result = await summarizeRange(ctx, range, settings, reason, pending, workflowInfo);
+            if (!result) return null;
+            lastEnd = range.end;
+            batchIndex += 1;
+            pending = null;
+            if (lastEnd >= goalEnd) break;
+        }
+
+        if (lastEnd < goalEnd) {
+            runtime.lastError = `总结在消息 ${lastEnd} 后停止，尚未到达目标 ${goalEnd}`;
+            notify('warning', runtime.lastError);
+            return null;
+        }
+        runtime.lastError = '';
+        runtime.lastSuccess = `${reason === 'manual' ? '手动全量总结' : '自动总结'}完成 · 消息 ${goalStart}–${goalEnd} · 自动处理 ${batchIndex} 批`;
+        notify('success', `${reason === 'manual' ? '手动总结' : '自动总结'}已一次完成消息 ${goalStart}–${goalEnd}，插件在后台自动衔接了 ${batchIndex} 批${settings.autoHide ? '，旧正文已退出上下文' : ''}。`);
+        return getChatState(ctx);
+    } finally {
+        runtime.workflowActive = false;
+        runtime.workflow = null;
+        refreshUi();
+        if (!runtime.lastError && !getChatState(ctx).pending) scheduleAutoSummary(1200);
+    }
 }
 
 async function continueSummary() {
-    if (runtime.busy) return;
+    if (runtime.busy || runtime.workflowActive) return;
     const ctx = getContext();
     const pending = getChatState(ctx).pending;
     if (!pending?.range) {
@@ -697,7 +798,16 @@ async function continueSummary() {
         notify('warning', '原消息已发生变化，旧的中断任务不能继续，请重新总结。');
         return;
     }
-    await summarizeRange(ctx, pending.range, getSettings(ctx), pending.reason || 'continued', pending);
+    const workflow = pending.workflow && typeof pending.workflow === 'object' ? pending.workflow : {};
+    const eligible = planEligibleRange(ctx);
+    await runSummaryWorkflow(ctx, {
+        reason: pending.reason || 'continued',
+        goalRange: {
+            start: Number(workflow.goalStart ?? pending.range.start),
+            end: Number(workflow.goalEnd ?? eligible?.end ?? pending.range.end),
+        },
+        resumeTask: pending,
+    });
 }
 
 function stopSummary() {
@@ -810,7 +920,7 @@ function refreshUi() {
         <span>检查点 ${chatState.checkpoints.length}</span>
         <span>注入约 ${chatState.lastInjectionTokens || tokenEstimate(chatState.lastInjection || '')} Token</span>`;
     const status = runtime.overlay.querySelector('[data-gds-status]');
-    if (status && !runtime.busy) {
+    if (status && !runtime.busy && !runtime.workflowActive) {
         const hasCheckpoint = chatState.checkpoints.some(item => item.status === 'committed');
         const recapMissing = hasCheckpoint && !recap;
         const orphanOutput = Boolean(runtime.streamText.trim() && !hasCheckpoint && !chatState.pending);
@@ -826,14 +936,15 @@ function refreshUi() {
     const stop = runtime.overlay.querySelector('[data-gds-stop]');
     const rebuild = runtime.overlay.querySelector('[data-gds-rebuild]');
     const restore = runtime.overlay.querySelector('[data-gds-restore]');
-    if (summarize) summarize.disabled = runtime.busy || Boolean(chatState.pending);
+    const taskActive = runtime.busy || runtime.workflowActive;
+    if (summarize) summarize.disabled = taskActive || Boolean(chatState.pending);
     if (resume) {
-        resume.hidden = runtime.busy || !chatState.pending;
-        resume.disabled = runtime.busy;
+        resume.hidden = taskActive || !chatState.pending;
+        resume.disabled = taskActive;
     }
     if (stop) stop.hidden = !runtime.busy || !runtime.abortController;
-    if (rebuild) rebuild.disabled = runtime.busy;
-    if (restore) restore.disabled = runtime.busy;
+    if (rebuild) rebuild.disabled = taskActive;
+    if (restore) restore.disabled = taskActive;
     const list = runtime.overlay.querySelector('[data-gds-checkpoints]');
     if (list) list.innerHTML = renderCheckpointList(chatState);
     const auto = runtime.overlay.querySelector('[data-gds-auto]');
@@ -871,6 +982,104 @@ function applyCollapsedView() {
     }
 }
 
+function clampFloatingPosition(node, x, y) {
+    const viewportWidth = Math.max(1, Number(globalThis.innerWidth || document.documentElement?.clientWidth || 1));
+    const viewportHeight = Math.max(1, Number(globalThis.innerHeight || document.documentElement?.clientHeight || 1));
+    const width = Math.max(1, Number(node?.offsetWidth || node?.getBoundingClientRect?.().width || 62));
+    const height = Math.max(1, Number(node?.offsetHeight || node?.getBoundingClientRect?.().height || 62));
+    const margin = 6;
+    return {
+        x: Math.round(Math.min(Math.max(margin, Number(x) || margin), Math.max(margin, viewportWidth - width - margin))),
+        y: Math.round(Math.min(Math.max(margin, Number(y) || margin), Math.max(margin, viewportHeight - height - margin))),
+    };
+}
+
+function placeFloating(node = runtime.floating, position = null) {
+    if (!node) return null;
+    if (!position || !Number.isFinite(Number(position.x)) || !Number.isFinite(Number(position.y))) {
+        for (const property of ['left', 'top', 'right', 'bottom']) node.style.removeProperty(property);
+        return null;
+    }
+    const next = clampFloatingPosition(node, position.x, position.y);
+    node.style.left = `${next.x}px`;
+    node.style.top = `${next.y}px`;
+    node.style.right = 'auto';
+    node.style.bottom = 'auto';
+    return next;
+}
+
+function applyFloatingPosition() {
+    if (!runtime.floating || runtime.floating.classList.contains('gds-dragging')) return;
+    placeFloating(runtime.floating, getSettings().floatingPosition);
+}
+
+function persistFloatingPosition(position) {
+    const ctx = getContext();
+    const settings = getSettings(ctx);
+    settings.floatingPosition = position ? { x: position.x, y: position.y } : null;
+    ctx.extensionSettings[SETTINGS_KEY] = settings;
+    saveSettings(ctx);
+}
+
+function bindFloatingDrag(node) {
+    let drag = null;
+    let suppressClick = false;
+    let suppressTimer = null;
+
+    node.addEventListener('pointerdown', event => {
+        if (event.button !== undefined && event.button !== 0) return;
+        node.classList.add('gds-dragging');
+        const rect = node.getBoundingClientRect();
+        drag = {
+            pointerId: event.pointerId,
+            offsetX: event.clientX - rect.left,
+            offsetY: event.clientY - rect.top,
+            startX: event.clientX,
+            startY: event.clientY,
+            moved: false,
+            position: { x: rect.left, y: rect.top },
+        };
+        try { node.setPointerCapture?.(event.pointerId); } catch { /* Older WebViews may not support capture. */ }
+    });
+
+    node.addEventListener('pointermove', event => {
+        if (!drag || event.pointerId !== drag.pointerId) return;
+        if (Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY) >= 4) drag.moved = true;
+        drag.position = placeFloating(node, {
+            x: event.clientX - drag.offsetX,
+            y: event.clientY - drag.offsetY,
+        }) || drag.position;
+        event.preventDefault();
+    });
+
+    const finishDrag = (event, cancelled = false) => {
+        if (!drag || event.pointerId !== drag.pointerId) return;
+        const completed = drag;
+        drag = null;
+        node.classList.remove('gds-dragging');
+        try { node.releasePointerCapture?.(event.pointerId); } catch { /* Capture may already be released. */ }
+        if (completed.moved && !cancelled) {
+            persistFloatingPosition(completed.position);
+            suppressClick = true;
+            clearTimeout(suppressTimer);
+            suppressTimer = setTimeout(() => { suppressClick = false; }, 350);
+        }
+        if (cancelled) applyFloatingPosition();
+        if (completed.moved) event.preventDefault();
+    };
+    node.addEventListener('pointerup', event => finishDrag(event, false));
+    node.addEventListener('pointercancel', event => finishDrag(event, true));
+    node.addEventListener('click', event => {
+        if (suppressClick) {
+            suppressClick = false;
+            event.preventDefault();
+            event.stopPropagation();
+            return;
+        }
+        togglePanel(true);
+    });
+}
+
 function createUi() {
     if (runtime.overlay) return;
     const overlay = document.createElement('section');
@@ -892,23 +1101,23 @@ function createUi() {
                 <button data-gds-restore>恢复隐藏</button>
             </div>
             <div class="gds-grid">
-                <label class="gds-field gds-wide gds-stream-field"><span>当前阶段原始返回（事实 → 草稿 → 润色，不代表已保存）</span><textarea rows="6" readonly data-gds-stream-preview placeholder="每个阶段会重新显示；只有出现已保存检查点才算完成，中断后可点击继续"></textarea></label>
+                <label class="gds-field gds-wide gds-stream-field"><span>当前阶段原始返回（事实 → 草稿 → 润色，不代表已保存）</span><textarea rows="6" readonly data-gds-stream-preview placeholder="每个阶段会重新显示；正常批次会自动衔接，只有中断或失败后才需要点击继续"></textarea></label>
                 <label class="gds-field gds-wide"><span>文学版前情（可编辑）</span><textarea rows="8" data-gds-summary placeholder="总结后会在这里显示有文笔的前情回顾"></textarea><button data-gds-save-summary>保存前情修改</button></label>
                 <label class="gds-field gds-wide"><span>模型实际收到的记忆注入</span><textarea rows="10" readonly data-gds-preview></textarea></label>
             </div>
             <details class="gds-details" open><summary>自动总结与上下文</summary>
                 <div class="gds-settings-grid">
-                    <label class="gds-toggle-row"><span>自动总结</span><input type="checkbox" data-gds-auto></label>
-                    <label class="gds-toggle-row"><span>总结成功后自动隐藏旧正文</span><input type="checkbox" data-gds-hide></label>
-                    <label class="gds-toggle-row"><span>在界面折叠已隐藏范围</span><input type="checkbox" data-gds-collapse></label>
-                    <label class="gds-toggle-row"><span>流式生成与实时显示</span><input type="checkbox" data-gds-stream></label>
-                    <label>每批总结约 Token <input type="number" min="5000" step="5000" data-gds-trigger></label>
+                    <label class="gds-toggle-row"><input type="checkbox" data-gds-auto><span>自动总结</span></label>
+                    <label class="gds-toggle-row"><input type="checkbox" data-gds-hide><span>总结成功后自动隐藏旧正文</span></label>
+                    <label class="gds-toggle-row"><input type="checkbox" data-gds-collapse><span>在界面折叠已隐藏范围</span></label>
+                    <label class="gds-toggle-row"><input type="checkbox" data-gds-stream><span>流式生成与实时显示</span></label>
+                    <label>自动总结触发约 Token <input type="number" min="5000" step="5000" data-gds-trigger></label>
                     <label>保留近期消息 <input type="number" min="4" step="1" data-gds-keep></label>
                     <label>注入上限 Token <input type="number" min="160" step="100" data-gds-injection></label>
                     <label>前情目标字数 <input type="number" min="80" step="20" data-gds-words></label>
                     <label>注入模式 <select data-gds-mode><option value="safe">安全：只发事实</option><option value="balanced">平衡：事实与前情</option></select></label>
                 </div>
-                <p class="gds-help">酒馆消息索引从 0 开始；自动隐藏使用 /hide，点击恢复隐藏使用 /unhide。设置的保留条数只保护最新消息，不会参与本批总结。</p>
+                <p class="gds-help">Token 数值只控制自动总结何时启动。手动点击“立即总结”会一次处理除“保留近期消息”外的全部旧正文；内容再长也会在后台自动分批衔接，无需手动点击继续。只有主动中断或生成失败时才会出现“继续”。自动隐藏使用 /hide，恢复隐藏使用 /unhide。</p>
             </details>
             <details class="gds-details"><summary>检查点</summary><div data-gds-checkpoints></div></details>
             <footer class="gds-footer"><span>v${VERSION} · 提示词 ${PROMPT_VERSION}</span><span>原消息可恢复，不会自动删除</span></footer>
@@ -919,10 +1128,11 @@ function createUi() {
     const floating = document.createElement('button');
     floating.className = 'gds-floating';
     floating.title = DISPLAY_NAME;
-    floating.innerHTML = `<img class="gds-floating-image" src="${escapeHtml(FLOATING_LOGO_URL)}" alt="" aria-hidden="true">`;
+    floating.innerHTML = `<img class="gds-floating-image" src="${escapeHtml(FLOATING_LOGO_URL)}" alt="" aria-hidden="true" draggable="false">`;
     document.body.appendChild(floating);
     runtime.floating = floating;
-    floating.addEventListener('click', () => togglePanel(true));
+    applyFloatingPosition();
+    bindFloatingDrag(floating);
 
     overlay.addEventListener('click', async event => {
         const target = event.target.closest('[data-gds-close],[data-gds-summarize],[data-gds-continue],[data-gds-stop],[data-gds-rebuild],[data-gds-restore],[data-gds-save-summary]');
@@ -1010,6 +1220,11 @@ function syncMobileViewport() {
     if (height > 0) document.documentElement.style.setProperty('--gds-viewport-height', `${height}px`);
 }
 
+function handleViewportChange() {
+    syncMobileViewport();
+    applyFloatingPosition();
+}
+
 function bindContextEvents() {
     const ctx = getContext();
     const source = ctx.eventSource;
@@ -1047,9 +1262,10 @@ export async function init() {
         createUi();
         createSettingsEntry();
         bindContextEvents();
-        syncMobileViewport();
-        globalThis.visualViewport?.addEventListener?.('resize', syncMobileViewport);
-        globalThis.addEventListener?.('orientationchange', syncMobileViewport);
+        handleViewportChange();
+        globalThis.visualViewport?.addEventListener?.('resize', handleViewportChange);
+        globalThis.addEventListener?.('resize', handleViewportChange);
+        globalThis.addEventListener?.('orientationchange', handleViewportChange);
         await reconcileAndRefresh();
         const settings = getSettings(ctx);
         if (runtime.floating) runtime.floating.hidden = !settings.showFloatingButton;

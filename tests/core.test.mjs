@@ -8,6 +8,7 @@ import {
     normalizeChatState,
     parseModelPacket,
     rangeForNewSummary,
+    rangesForSummaryBacklog,
     rangeStillMatches,
     selectHideEnd,
     selectRelevantCapsules,
@@ -92,6 +93,43 @@ test('splits a large backlog into approximately token-sized summary batches', ()
     const range = rangeForNewSummary(longMessages, state, { keepMessages: 4, targetTokens: 18000 });
     assert.equal(range.start, 0);
     assert.equal(range.end, 1);
+});
+
+test('plans every internal batch needed for a one-click manual summary', () => {
+    const longMessages = Array.from({ length: 10 }, (_, index) => ({
+        name: index % 2 ? 'Char' : 'User',
+        is_user: index % 2 === 0,
+        mes: '长'.repeat(10000),
+        send_date: String(index),
+    }));
+    const state = normalizeChatState({ lastProcessedIndex: -1 });
+    const ranges = rangesForSummaryBacklog(longMessages, state, { keepMessages: 4, targetTokens: 18000 });
+    assert.deepEqual(ranges.map(range => [range.start, range.end]), [[0, 1], [2, 3], [4, 5]]);
+    assert.equal(ranges[0].start, 0);
+    assert.equal(ranges.at(-1).end, 5);
+    for (let index = 1; index < ranges.length; index += 1) {
+        assert.equal(ranges[index].start, ranges[index - 1].end + 1);
+    }
+});
+
+test('summarizes floors 1 through 140 when 150 messages keep the newest 10', () => {
+    const oneHundredFifty = Array.from({ length: 150 }, (_, index) => ({
+        name: index % 2 ? 'Char' : 'User',
+        is_user: index % 2 === 0,
+        mes: `第${index + 1}楼` + '剧情'.repeat(1000),
+        send_date: String(index),
+    }));
+    const ranges = rangesForSummaryBacklog(oneHundredFifty, normalizeChatState(), {
+        keepMessages: 10,
+        targetTokens: 60000,
+    });
+    assert.ok(ranges.length > 1);
+    assert.equal(ranges[0].start, 0);
+    assert.equal(ranges.at(-1).end, 139);
+    assert.equal(ranges.reduce((count, range) => count + range.end - range.start + 1, 0), 140);
+    for (let index = 1; index < ranges.length; index += 1) {
+        assert.equal(ranges[index].start, ranges[index - 1].end + 1);
+    }
 });
 
 test('injection modes and recall remain bounded', () => {
