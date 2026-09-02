@@ -116,6 +116,8 @@ test('director exposes a guarded clear-all action and releases stale generation 
     assert.match(js, /function reconcileGeneratingFlag/);
     assert.match(js, /const onMessageReceived/);
     assert.match(js, /MESSAGE_RECEIVED: onMessageReceived/);
+    assert.match(js, /function hostGenerationActive/);
+    assert.match(js, /hostStopControlVisible/);
     assert.match(css, /\.gds-director-task-actions \.gds-danger/);
 });
 

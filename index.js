@@ -81,7 +81,7 @@ const INJECTION_ID = `${EXTENSION_NAME}:memory`;
 const DIRECTOR_INJECTION_ID = `${EXTENSION_NAME}:director`;
 const PANEL_LOGO_URL = new URL('./assets/gaga-dog-logo.png', import.meta.url).href;
 const FLOATING_LOGO_URL = new URL('./assets/gaga-dog-floating.png', import.meta.url).href;
-const VERSION = '0.3.3';
+const VERSION = '0.3.4';
 const SETTINGS_VERSION = 5;
 
 const DEFAULT_SETTINGS = {
@@ -155,6 +155,26 @@ function hostGenerationState(ctx = null) {
         if (typeof candidate === 'boolean') return candidate;
     }
     return null;
+}
+
+function hostStopControlVisible() {
+    const selectors = ['#mes_stop', '#stop_generation', '#stop_but', '[data-generation-stop]'];
+    return selectors.some(selector => [...(globalThis.document?.querySelectorAll?.(selector) || [])].some(node => {
+        if (!node || node.hidden || node.disabled) return false;
+        const style = globalThis.getComputedStyle?.(node);
+        return style?.display !== 'none' && style?.visibility !== 'hidden' && (node.offsetParent !== null || style?.position === 'fixed');
+    }));
+}
+
+function hostGenerationActive(ctx = null) {
+    const explicit = hostGenerationState(ctx);
+    if (explicit !== null) {
+        if (!explicit) runtime.generating = false;
+        return explicit;
+    }
+    // Older Tavern builds may not expose a boolean state. In that case only
+    // trust the runtime flag while the native stop control is actually shown.
+    return Boolean(runtime.generating && hostStopControlVisible());
 }
 
 function reconcileGeneratingFlag(ctx = null) {
@@ -853,7 +873,7 @@ async function persistDirectorTaskState(ctx, task, status, partial = '') {
 
 async function runDirectorTask(ctx, task, options = {}) {
     reconcileGeneratingFlag(ctx);
-    if (runtime.directorBusy || runtime.busy || runtime.workflowActive || runtime.generating) {
+    if (runtime.directorBusy || runtime.busy || runtime.workflowActive || hostGenerationActive(ctx)) {
         notify('info', '当前还有生成任务进行中，请稍后再使用情节导演。');
         return null;
     }
@@ -1052,7 +1072,7 @@ async function prepareDirectorForGeneration(ctx, type, options, dryRun) {
 
 async function runReplyTask(ctx) {
     reconcileGeneratingFlag(ctx);
-    if (runtime.replyBusy || runtime.busy || runtime.workflowActive || runtime.generating) {
+    if (runtime.replyBusy || runtime.busy || runtime.workflowActive || hostGenerationActive(ctx)) {
         notify('info', '当前还有生成任务进行中，请稍后再生成待写回复。');
         return null;
     }
@@ -1198,7 +1218,7 @@ function shouldAutoSummarize(ctx) {
     reconcileGeneratingFlag(ctx);
     const settings = getSettings(ctx);
     const chatState = getChatState(ctx);
-    if (!settings.autoSummarize || !chatState.enabled || chatState.pending || runtime.busy || runtime.workflowActive || runtime.generating || runtime.directorBusy || runtime.replyBusy) return false;
+    if (!settings.autoSummarize || !chatState.enabled || chatState.pending || runtime.busy || runtime.workflowActive || hostGenerationActive(ctx) || runtime.directorBusy || runtime.replyBusy) return false;
     const range = planEligibleRange(ctx);
     if (!range) return false;
     const messages = getMessages(ctx);
