@@ -49,6 +49,14 @@ test('summary UI exposes streaming, stop, and resumable pending tasks', () => {
     assert.match(js, /status === 'committed' && String\(item\.recap/);
 });
 
+test('uses the supplied dog image instead of emoji branding', () => {
+    assert.match(js, /new URL\('\.\/assets\/gaga-dog-logo\.png', import\.meta\.url\)/);
+    assert.match(js, /class="gds-puppy" src="\$\{escapeHtml\(LOGO_URL\)\}"/);
+    assert.match(js, /class="gds-floating-image" src="\$\{escapeHtml\(LOGO_URL\)\}"/);
+    assert.match(js, /class="gds-entry-puppy" src="\$\{escapeHtml\(LOGO_URL\)\}"/);
+    assert.doesNotMatch(js, /textContent\s*=\s*['"]🐶['"]/);
+});
+
 test('uses a 60000 Token default and labels it as a per-batch target', () => {
     assert.match(js, /triggerTokens:\s*60000/);
     assert.match(js, /每批总结约 Token/);

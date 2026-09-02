@@ -31,7 +31,8 @@ const EXTENSION_NAME = 'gaga-dog-summary';
 const DISPLAY_NAME = '嘎嘎小狗总结';
 const SETTINGS_KEY = 'gagaDogSummary';
 const INJECTION_ID = `${EXTENSION_NAME}:memory`;
-const VERSION = '0.1.10';
+const LOGO_URL = new URL('./assets/gaga-dog-logo.png', import.meta.url).href;
+const VERSION = '0.1.11';
 const SETTINGS_VERSION = 2;
 
 const DEFAULT_SETTINGS = {
@@ -877,7 +878,7 @@ function createUi() {
     overlay.innerHTML = `
         <div class="gds-window">
             <header class="gds-header">
-                <div><span class="gds-puppy">🐶</span><div><h2>嘎嘎小狗总结</h2><small>剧情记忆 · 文风继承 · 自动隐藏</small></div></div>
+                <div><img class="gds-puppy" src="${escapeHtml(LOGO_URL)}" alt="" aria-hidden="true"><div><h2>嘎嘎小狗总结</h2><small>剧情记忆 · 文风继承 · 自动隐藏</small></div></div>
                 <button class="gds-icon-button" data-gds-close title="关闭">×</button>
             </header>
             <div class="gds-status" data-gds-status>尚未建立记忆，点击“立即总结”</div>
@@ -917,7 +918,7 @@ function createUi() {
     const floating = document.createElement('button');
     floating.className = 'gds-floating';
     floating.title = DISPLAY_NAME;
-    floating.textContent = '🐶';
+    floating.innerHTML = `<img class="gds-floating-image" src="${escapeHtml(LOGO_URL)}" alt="" aria-hidden="true">`;
     document.body.appendChild(floating);
     runtime.floating = floating;
     floating.addEventListener('click', () => togglePanel(true));
@@ -979,7 +980,7 @@ function createSettingsEntry() {
             </div>
             <div class="inline-drawer-content">
                 <p>自动压缩前情、保留剧情记忆，并在总结完成后让旧正文退出模型上下文。</p>
-                <button class="menu_button gds-open-settings" type="button" data-gds-open-settings><span aria-hidden="true">🐶</span><span>打开${DISPLAY_NAME}</span></button>
+                <button class="menu_button gds-open-settings" type="button" data-gds-open-settings><img class="gds-entry-puppy" src="${escapeHtml(LOGO_URL)}" alt="" aria-hidden="true"><span>打开${DISPLAY_NAME}</span></button>
             </div>
         </div>`;
     host.appendChild(entry);

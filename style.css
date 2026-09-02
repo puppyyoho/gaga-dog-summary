@@ -22,7 +22,18 @@
     cursor: pointer;
     font-size: 25px;
     line-height: 1;
+    padding: 3px;
+    overflow: hidden;
     transition: transform .18s ease, filter .18s ease;
+}
+
+.gds-floating-image {
+    display: block;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    border-radius: 50%;
+    mix-blend-mode: multiply;
 }
 
 .gds-floating:hover { transform: translateY(-2px) scale(1.05); filter: saturate(1.12); }
@@ -68,7 +79,15 @@ body.gds-panel-open { overflow: hidden !important; }
 }
 
 .gds-header > div { display: flex; align-items: center; gap: 12px; min-width: 0; }
-.gds-puppy { font-size: 32px; }
+.gds-puppy {
+    display: block;
+    width: 46px;
+    height: 46px;
+    flex: 0 0 46px;
+    object-fit: cover;
+    border-radius: 14px;
+    mix-blend-mode: multiply;
+}
 .gds-header h2 { margin: 0; color: var(--gds-pink-deep); font-size: 20px; }
 .gds-header small, .gds-footer, .gds-checkpoint small { color: var(--gds-muted); }
 .gds-header small { display: block; margin-top: 3px; }
@@ -227,6 +246,15 @@ body.gds-panel-open { overflow: hidden !important; }
     text-overflow: ellipsis;
     white-space: nowrap;
 }
+.gds-entry-puppy {
+    display: block;
+    width: 25px;
+    height: 25px;
+    flex: 0 0 25px;
+    object-fit: cover;
+    border-radius: 8px;
+    mix-blend-mode: multiply;
+}
 
 @media (max-width: 900px) {
     .gds-overlay {
@@ -268,7 +296,7 @@ body.gds-panel-open { overflow: hidden !important; }
     }
     .gds-header h2 { font-size: 18px; }
     .gds-header small { font-size: 11px; white-space: normal; }
-    .gds-puppy { font-size: 27px; }
+    .gds-puppy { width: 40px; height: 40px; flex-basis: 40px; border-radius: 12px; }
     .gds-icon-button { flex: 0 0 38px; width: 38px; height: 38px; }
     .gds-status { margin: 12px 14px 7px; }
     .gds-metrics { padding: 0 14px 12px; }
