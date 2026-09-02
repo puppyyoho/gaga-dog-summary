@@ -208,6 +208,8 @@ body.gds-panel-open { overflow: hidden !important; }
 .gds-director-actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 2px 0 14px; }
 .gds-director-task-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
 .gds-director-task-actions button { min-width: 58px; }
+.gds-director-task-actions .gds-danger { border-color: #c75466; color: #b33f52; }
+.gds-director-task-actions .gds-danger:hover { border-color: #b33f52; background: #fff0f2; color: #9b3043; }
 .gds-director-actions .gds-primary,
 .gds-reply-card .gds-primary { border-color: var(--gds-pink-deep); background: var(--gds-pink-deep); color: white; }
 .gds-director-block { margin: 16px 0 0; border-top: 1px solid var(--gds-line); padding-top: 12px; }

@@ -109,6 +109,16 @@ test('director exposes stop, continue and restart controls', () => {
     assert.match(css, /\.gds-director-task-actions/);
 });
 
+test('director exposes a guarded clear-all action and releases stale generation guards', () => {
+    assert.match(js, /data-gds-director-clear/);
+    assert.match(js, /async function clearDirectorAll/);
+    assert.match(js, /主线、分支、伏笔、推进记录、日历事件和未完成草稿都会被删除/);
+    assert.match(js, /function reconcileGeneratingFlag/);
+    assert.match(js, /const onMessageReceived/);
+    assert.match(js, /MESSAGE_RECEIVED: onMessageReceived/);
+    assert.match(css, /\.gds-director-task-actions \.gds-danger/);
+});
+
 test('keeps switched pages in a dedicated scrolling viewport and resists theme hidden overrides', () => {
     assert.match(css, /\.gds-page-host/);
     assert.match(css, /\.gds-window \[data-gds-tab-panel\]\[hidden\]\s*\{\s*display:\s*none !important/);

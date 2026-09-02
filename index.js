@@ -81,7 +81,7 @@ const INJECTION_ID = `${EXTENSION_NAME}:memory`;
 const DIRECTOR_INJECTION_ID = `${EXTENSION_NAME}:director`;
 const PANEL_LOGO_URL = new URL('./assets/gaga-dog-logo.png', import.meta.url).href;
 const FLOATING_LOGO_URL = new URL('./assets/gaga-dog-floating.png', import.meta.url).href;
-const VERSION = '0.3.2';
+const VERSION = '0.3.3';
 const SETTINGS_VERSION = 5;
 
 const DEFAULT_SETTINGS = {
@@ -139,6 +139,32 @@ function getContext() {
 function notify(type, message) {
     if (globalThis.toastr?.[type]) globalThis.toastr[type](message, DISPLAY_NAME);
     else console[type === 'error' ? 'error' : 'log'](`[${DISPLAY_NAME}] ${message}`);
+}
+
+function hostGenerationState(ctx = null) {
+    const candidates = [
+        ctx?.isGenerating,
+        ctx?.is_generation_running,
+        globalThis.isGenerating,
+        globalThis.is_generation_running,
+    ];
+    for (const candidate of candidates) {
+        if (typeof candidate === 'function') {
+            try { return Boolean(candidate()); } catch { /* Try the next host signal. */ }
+        }
+        if (typeof candidate === 'boolean') return candidate;
+    }
+    return null;
+}
+
+function reconcileGeneratingFlag(ctx = null) {
+    if (!runtime.generating) return false;
+    const active = hostGenerationState(ctx);
+    if (active === false) {
+        runtime.generating = false;
+        return true;
+    }
+    return false;
 }
 
 function escapeHtml(value) {
@@ -826,6 +852,7 @@ async function persistDirectorTaskState(ctx, task, status, partial = '') {
 }
 
 async function runDirectorTask(ctx, task, options = {}) {
+    reconcileGeneratingFlag(ctx);
     if (runtime.directorBusy || runtime.busy || runtime.workflowActive || runtime.generating) {
         notify('info', '当前还有生成任务进行中，请稍后再使用情节导演。');
         return null;
@@ -931,6 +958,23 @@ async function restartDirectorTask(ctx) {
     return runDirectorTask(ctx, task, { restart: true });
 }
 
+async function clearDirectorAll(ctx) {
+    if (runtime.directorBusy) {
+        notify('info', '请先停止当前导演生成，再清空导演内容。');
+        return null;
+    }
+    const confirmed = !globalThis.confirm || globalThis.confirm('确定清空导演的全部内容吗？主线、分支、伏笔、推进记录、日历事件和未完成草稿都会被删除。模型连接不会删除。');
+    if (!confirmed) return null;
+    runtime.directorText = '';
+    runtime.lastError = '';
+    runtime.lastSuccess = '';
+    const next = createEmptyDirectorState();
+    await saveChatStateAndRefresh(ctx, { ...getChatState(ctx), director: next });
+    await updateDirectorInjection(ctx);
+    notify('success', '导演内容已全部清空。');
+    return next;
+}
+
 async function updateDirectorInjection(ctx = getContext()) {
     const state = getChatState(ctx);
     const director = normalizeDirectorState(state.director || createEmptyDirectorState());
@@ -1007,6 +1051,7 @@ async function prepareDirectorForGeneration(ctx, type, options, dryRun) {
 }
 
 async function runReplyTask(ctx) {
+    reconcileGeneratingFlag(ctx);
     if (runtime.replyBusy || runtime.busy || runtime.workflowActive || runtime.generating) {
         notify('info', '当前还有生成任务进行中，请稍后再生成待写回复。');
         return null;
@@ -1150,6 +1195,7 @@ async function buildWorkflowBatchPlan(ctx, goalRange, reason) {
 }
 
 function shouldAutoSummarize(ctx) {
+    reconcileGeneratingFlag(ctx);
     const settings = getSettings(ctx);
     const chatState = getChatState(ctx);
     if (!settings.autoSummarize || !chatState.enabled || chatState.pending || runtime.busy || runtime.workflowActive || runtime.generating || runtime.directorBusy || runtime.replyBusy) return false;
@@ -1177,6 +1223,7 @@ function scheduleAutoSummary(delay = 1100) {
 
 async function startSummary(manual = true) {
     const ctx = getContext();
+    reconcileGeneratingFlag(ctx);
     const settings = getSettings(ctx);
     const chatState = getChatState(ctx);
     if (runtime.busy || runtime.workflowActive) {
@@ -1647,6 +1694,7 @@ function savedRecap(chatState) {
 function refreshUi() {
     if (!runtime.overlay) return;
     const ctx = getContext();
+    reconcileGeneratingFlag(ctx);
     const settings = getSettings(ctx);
     populateProviderSelectors(runtime.overlay, ctx);
     const chatState = getChatState(ctx);
@@ -1693,6 +1741,7 @@ function refreshUi() {
     const directorStop = runtime.overlay.querySelector('[data-gds-director-stop]');
     const directorContinue = runtime.overlay.querySelector('[data-gds-director-continue]');
     const directorRestart = runtime.overlay.querySelector('[data-gds-director-restart]');
+    const directorClear = runtime.overlay.querySelector('[data-gds-director-clear]');
     const replyStop = runtime.overlay.querySelector('[data-gds-reply-stop]');
     const rebuild = runtime.overlay.querySelector('[data-gds-rebuild]');
     const restore = runtime.overlay.querySelector('[data-gds-restore]');
@@ -1710,6 +1759,7 @@ function refreshUi() {
         directorContinue.title = director.taskState?.partial ? '从上次停止的草稿继续' : '从当前导演状态继续规划';
     }
     if (directorRestart) directorRestart.disabled = taskActive;
+    if (directorClear) directorClear.disabled = taskActive;
     if (replyStop) replyStop.hidden = !(runtime.replyBusy && runtime.replyAbortController);
     if (rebuild) rebuild.disabled = taskActive;
     if (restore) restore.disabled = taskActive;
@@ -2063,7 +2113,7 @@ function createUi() {
             </details>
             <details class="gds-details" data-gds-tab-panel="memory"><summary>检查点</summary><div data-gds-checkpoints></div></details>
             <section class="gds-tab-content" data-gds-tab-panel="director" hidden>
-                <div class="gds-section-title"><div><h3>情节导演</h3><p>规划未来剧情，不会把计划自动写入已发生记忆。</p></div><div class="gds-director-task-actions"><button data-gds-director-stop hidden>停止</button><button data-gds-director-continue disabled>续写</button><button data-gds-director-restart>重新开始</button></div></div>
+                <div class="gds-section-title"><div><h3>情节导演</h3><p>规划未来剧情，不会把计划自动写入已发生记忆。</p></div><div class="gds-director-task-actions"><button data-gds-director-stop hidden>停止</button><button data-gds-director-continue disabled>续写</button><button data-gds-director-restart>重新开始</button><button class="gds-danger" data-gds-director-clear>清空全部</button></div></div>
                 <div class="gds-settings-grid gds-director-settings">
                     <label class="gds-toggle-row"><input type="checkbox" data-gds-director-enabled><span>启用导演执行卡</span></label>
                     <label>规划风格 <select data-gds-director-preset></select></label>
@@ -2132,7 +2182,7 @@ function createUi() {
     bindFloatingDrag(floating);
 
     overlay.addEventListener('click', async event => {
-        const target = event.target.closest('[data-gds-tab],[data-gds-close],[data-gds-summarize],[data-gds-continue],[data-gds-stop],[data-gds-rebuild],[data-gds-restore],[data-gds-save-summary],[data-gds-api-save],[data-gds-api-test],[data-gds-director-longline],[data-gds-director-branch],[data-gds-director-foreshadow],[data-gds-director-save],[data-gds-director-lock],[data-gds-director-select-branch],[data-gds-director-stop],[data-gds-director-continue],[data-gds-director-restart],[data-gds-calendar-add],[data-gds-calendar-remove],[data-gds-calendar-sync],[data-gds-reply-generate],[data-gds-reply-copy],[data-gds-reply-insert],[data-gds-reply-stop]');
+        const target = event.target.closest('[data-gds-tab],[data-gds-close],[data-gds-summarize],[data-gds-continue],[data-gds-stop],[data-gds-rebuild],[data-gds-restore],[data-gds-save-summary],[data-gds-api-save],[data-gds-api-test],[data-gds-director-longline],[data-gds-director-branch],[data-gds-director-foreshadow],[data-gds-director-save],[data-gds-director-lock],[data-gds-director-select-branch],[data-gds-director-stop],[data-gds-director-continue],[data-gds-director-restart],[data-gds-director-clear],[data-gds-calendar-add],[data-gds-calendar-remove],[data-gds-calendar-sync],[data-gds-reply-generate],[data-gds-reply-copy],[data-gds-reply-insert],[data-gds-reply-stop]');
         if (!target) return;
         try {
             if (target.matches('[data-gds-tab]')) {
@@ -2193,6 +2243,7 @@ function createUi() {
             if (target.matches('[data-gds-director-stop]')) stopDirectorTask();
             if (target.matches('[data-gds-director-continue]')) await continueDirectorTask(getContext());
             if (target.matches('[data-gds-director-restart]')) await restartDirectorTask(getContext());
+            if (target.matches('[data-gds-director-clear]')) await clearDirectorAll(getContext());
             if (target.matches('[data-gds-calendar-add]')) {
                 const ctx = getContext();
                 updateDirectorFromUi(ctx);
@@ -2351,9 +2402,16 @@ function bindContextEvents() {
     const onMessage = () => {
         reconcileAndRefresh().catch(console.error);
     };
+    const onMessageReceived = () => {
+        // In some Tavern builds a failed/aborted generation does not emit
+        // GENERATION_ENDED. Receiving a new assistant message is still a
+        // reliable completion boundary, so release the compatibility guard.
+        runtime.generating = false;
+        reconcileAndRefresh().catch(console.error);
+    };
     const bindings = {
         CHAT_CHANGED: onChat,
-        MESSAGE_RECEIVED: onMessage,
+        MESSAGE_RECEIVED: onMessageReceived,
         MESSAGE_SENT: onMessage,
         MESSAGE_EDITED: onMessage,
         MESSAGE_SWIPED: onMessage,
@@ -2361,10 +2419,11 @@ function bindContextEvents() {
         GENERATION_AFTER_COMMANDS: (type, options, dryRun) => prepareDirectorForGeneration(ctx, type, options, dryRun),
         GENERATION_ENDED: () => {
             runtime.generating = false;
+            refreshUi();
             trackDirectorProgress(ctx).catch(error => console.warn(`[${DISPLAY_NAME}] 导演进度跟踪失败`, error));
             scheduleAutoSummary(1800);
         },
-        GENERATION_STOPPED: () => { runtime.generating = false; },
+        GENERATION_STOPPED: () => { runtime.generating = false; refreshUi(); },
         GENERATION_STARTED: () => { runtime.generating = true; },
     };
     for (const [name, handler] of Object.entries(bindings)) if (types[name]) source.on(types[name], handler);
