@@ -26,3 +26,12 @@ test('opening the panel locks background scrolling and resets panel scroll', () 
     assert.match(js, /windowNode\.scrollTop = 0/);
     assert.match(js, /visualViewport\?\.height/);
 });
+
+test('summary UI exposes streaming, stop, and resumable pending tasks', () => {
+    assert.match(js, /data-gds-stream-preview/);
+    assert.match(js, /data-gds-stop/);
+    assert.match(js, /data-gds-continue/);
+    assert.match(js, /new AbortController\(\)/);
+    assert.match(js, /state\.pending = clone\(pending\)/);
+    assert.match(js, /rangeStillMatches\(getMessages\(ctx\), pending\.range\)/);
+});

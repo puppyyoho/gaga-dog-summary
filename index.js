@@ -21,13 +21,13 @@ import {
     PROMPT_VERSION,
     renderFactsForProse,
 } from './prompts.js';
-import { generateCompatible as runCompatibleGeneration } from './generation-client.js';
+import { generateWithFallback, readableGenerationError } from './generation-client.js';
 
 const EXTENSION_NAME = 'gaga-dog-summary';
 const DISPLAY_NAME = '嘎嘎小狗总结';
 const SETTINGS_KEY = 'gagaDogSummary';
 const INJECTION_ID = `${EXTENSION_NAME}:memory`;
-const VERSION = '0.1.2';
+const VERSION = '0.1.3';
 
 const DEFAULT_SETTINGS = {
     showFloatingButton: true,
@@ -41,6 +41,7 @@ const DEFAULT_SETTINGS = {
     recallLimit: 3,
     targetWords: 520,
     injectionMode: 'balanced',
+    streamOutput: true,
     autoAudit: false,
     prompts: {},
 };
@@ -54,6 +55,10 @@ const runtime = {
     scheduled: false,
     timer: null,
     taskSerial: 0,
+    abortController: null,
+    streamText: '',
+    streamMeta: null,
+    activeStage: '',
     generating: false,
     lastChatSignature: '',
     lastError: '',
@@ -232,16 +237,6 @@ function invalidateIfNeeded(ctx, chatState) {
     return { state: next, changed: true, affected: affected.length };
 }
 
-async function generateCompatible(ctx, request) {
-    return runCompatibleGeneration(ctx, request, quietError => {
-        console.warn(`[${DISPLAY_NAME}] Quiet 生成不可用，尝试 Raw 兼容通道`, quietError);
-    });
-}
-
-async function generateQuiet(ctx, request) {
-    return generateCompatible(ctx, request);
-}
-
 function cleanProse(value) {
     return String(value || '')
         .replace(/<think>[\s\S]*?<\/think>/gi, '')
@@ -250,15 +245,110 @@ function cleanProse(value) {
         .trim();
 }
 
-async function summarizeRange(ctx, range, settings, reason = 'manual') {
+function stageName(stage) {
+    return stage === 'prose' ? '文学前情' : '事实记忆';
+}
+
+function isInterrupted(error, controller) {
+    return Boolean(controller?.signal?.aborted || error?.name === 'AbortError');
+}
+
+function updatePendingInMemory(ctx, pending) {
+    const state = getChatState(ctx);
+    state.pending = clone(pending);
+    setChatState(state, ctx);
+}
+
+async function savePending(ctx, pending) {
+    updatePendingInMemory(ctx, pending);
+    await saveChat(ctx);
+}
+
+function updateStreamPreview(text, meta = {}) {
+    runtime.streamText = String(text || '');
+    runtime.streamMeta = meta;
+    const output = runtime.overlay?.querySelector('[data-gds-stream-preview]');
+    if (output) {
+        output.value = runtime.streamText;
+        output.scrollTop = output.scrollHeight;
+    }
+    const source = meta.source ? ` · ${meta.source}` : '';
+    const chunks = meta.updates > 1 ? ` · ${meta.updates} 个有效分片` : '';
+    setStatus(`正在生成${stageName(runtime.activeStage)}${source}${chunks} · ${runtime.streamText.length} 字符`);
+}
+
+function requestForResume(request, pending) {
+    const partial = String(pending.partialText || '').trim();
+    if (!partial) return request;
+    if (pending.stage === 'prose') {
+        return {
+            ...request,
+            prompt: `${request.prompt}\n\n<interrupted_draft>\n${partial}\n</interrupted_draft>\n\n上一次生成在途中被中断。请以这份未完成草稿为基础，输出一份从头到尾完整、连贯的最终前情；保留其中正确细节并续完，不要解释中断。`,
+        };
+    }
+    return {
+        ...request,
+        prompt: `${request.prompt}\n\n<interrupted_json>\n${partial}\n</interrupted_json>\n\n上一次 JSON 生成在途中被中断。请依据原始材料和已有片段，重新输出一个从头到尾完整、合法的 JSON 对象；不要只输出尾部，不要使用 Markdown。`,
+    };
+}
+
+async function runGenerationStage(ctx, request, settings, pending, controller) {
+    runtime.activeStage = pending.stage;
+    runtime.streamText = '';
+    runtime.streamMeta = null;
+    updateStreamPreview('', { phase: 'preparing' });
+    const resumableRequest = requestForResume(request, pending);
+    pending.partialText = '';
+    updatePendingInMemory(ctx, pending);
+    return generateWithFallback(ctx, {
+        ...resumableRequest,
+        preferStream: settings.streamOutput !== false,
+        signal: controller.signal,
+        onText: (text, meta) => {
+            if (runtime.abortController !== controller) return;
+            pending.partialText = text;
+            updatePendingInMemory(ctx, pending);
+            updateStreamPreview(text, meta);
+        },
+        onStatus: meta => {
+            if (runtime.abortController !== controller) return;
+            runtime.streamMeta = meta;
+            if (meta.phase === 'connecting') setStatus(`正在连接${meta.source || '当前酒馆模型'}，准备生成${stageName(pending.stage)}……`);
+            if (meta.phase === 'fallback') setStatus(`直接流式通道未完成，正在尝试兼容通道：${meta.reason}`);
+        },
+    });
+}
+
+async function summarizeRange(ctx, range, settings, reason = 'manual', resumeTask = null) {
     if (runtime.busy) throw new Error('已有总结任务正在运行。');
+    const messages = getMessages(ctx);
+    if (!rangeStillMatches(messages, range)) throw new Error('待总结消息已发生变化，请重新开始总结。');
     runtime.busy = true;
+    runtime.lastError = '';
     runtime.taskSerial += 1;
     const serial = runtime.taskSerial;
-    const messages = getMessages(ctx);
-    const before = getChatState(ctx);
-    const checkpointId = `cp_${Date.now()}_${simpleHash(`${range.start}:${range.end}:${range.rangeHash}`)}`;
+    const controller = new AbortController();
+    runtime.abortController = controller;
+    const current = getChatState(ctx);
+    const before = normalizeChatState(current);
+    before.pending = null;
+    const checkpointId = resumeTask?.checkpointId || `cp_${Date.now()}_${simpleHash(`${range.start}:${range.end}:${range.rangeHash}`)}`;
+    const pending = resumeTask ? clone(resumeTask) : {
+        id: `pending_${Date.now()}`,
+        checkpointId,
+        range: clone(range),
+        reason,
+        stage: 'facts',
+        partialText: '',
+        factRaw: '',
+        packet: null,
+        createdAt: Date.now(),
+    };
+    pending.range = clone(range);
+    pending.checkpointId = checkpointId;
+    pending.reason ||= reason;
     try {
+        await savePending(ctx, pending);
         const sourceText = formatMessages(messages, range.start, range.end);
         if (!sourceText.trim()) throw new Error('待总结范围没有可用正文。');
         const factPrompt = buildFactPrompt({
@@ -267,20 +357,33 @@ async function summarizeRange(ctx, range, settings, reason = 'manual') {
             openThreads: formatThreads(before),
             customPrompts: settings.prompts,
         });
-        setStatus('正在提取事实与状态……');
-        const factRequest = { ...factPrompt };
-        let rawPacket = await generateCompatible(ctx, factRequest);
-        if (serial !== runtime.taskSerial) throw new Error('总结任务已取消。');
-        let packet;
-        try {
-            packet = parseModelPacket(rawPacket);
-        } catch (error) {
-            console.warn(`[${DISPLAY_NAME}] 首次记忆结构无法解析，要求模型重新输出纯 JSON`, error);
-            rawPacket = await generateCompatible(ctx, {
-                ...factRequest,
-                prompt: `${factRequest.prompt}\n\n上一次回答无法解析。请重新完成任务，并且只输出一个完整、合法的 JSON 对象；不要输出 Markdown 代码块、解释或思考过程。`,
-            });
-            packet = parseModelPacket(rawPacket);
+
+        let packet = pending.packet;
+        if (pending.stage === 'prose' && !packet && pending.factRaw) {
+            try { packet = parseModelPacket(pending.factRaw); } catch { pending.stage = 'facts'; }
+        }
+        if (pending.stage !== 'prose' || !packet) {
+            pending.stage = 'facts';
+            const factResult = await runGenerationStage(ctx, factPrompt, settings, pending, controller);
+            if (serial !== runtime.taskSerial || controller.signal.aborted) throw controller.signal.reason || new DOMException('已中断生成', 'AbortError');
+            let rawPacket = factResult.text;
+            try {
+                packet = parseModelPacket(rawPacket);
+            } catch (error) {
+                console.warn(`[${DISPLAY_NAME}] 首次记忆结构无法解析，要求模型重新输出纯 JSON`, error);
+                pending.partialText = rawPacket;
+                const repairResult = await runGenerationStage(ctx, {
+                    ...factPrompt,
+                    prompt: `${factPrompt.prompt}\n\n上一次回答无法解析。请重新完成任务，并且只输出一个完整、合法的 JSON 对象；不要输出 Markdown 代码块、解释或思考过程。`,
+                }, settings, pending, controller);
+                rawPacket = repairResult.text;
+                packet = parseModelPacket(rawPacket);
+            }
+            pending.factRaw = rawPacket;
+            pending.packet = clone(packet);
+            pending.stage = 'prose';
+            pending.partialText = '';
+            await savePending(ctx, pending);
         }
 
         const draft = mergeMemoryPacket(before, packet, range, checkpointId);
@@ -293,19 +396,19 @@ async function summarizeRange(ctx, range, settings, reason = 'manual') {
             targetWords: settings.targetWords,
             customPrompts: settings.prompts,
         });
-        setStatus('正在按原正文文风编写前情……');
-        let prose = '';
-        try { prose = cleanProse(await generateQuiet(ctx, prosePrompt)); } catch (error) {
-            console.warn(`[${DISPLAY_NAME}] 文学前情生成失败，将使用事实回顾`, error);
-        }
-        if (serial !== runtime.taskSerial) throw new Error('总结任务已取消。');
+        const proseResult = await runGenerationStage(ctx, prosePrompt, settings, pending, controller);
+        if (serial !== runtime.taskSerial || controller.signal.aborted) throw controller.signal.reason || new DOMException('已中断生成', 'AbortError');
+        if (runtime.abortController === controller) runtime.abortController = null;
+        setStatus('生成完成，正在校验并保存记忆……');
+        refreshUi();
+        const prose = cleanProse(proseResult.text);
         draft.recap = prose || cleanProse(packet.recap) || before.recap;
         draft.styleAnchors = styleAnchors;
         const checkpoint = draft.checkpoints.find(item => item.id === checkpointId);
         if (checkpoint) {
             checkpoint.recap = draft.recap;
             checkpoint.promptVersion = PROMPT_VERSION;
-            checkpoint.reason = reason;
+            checkpoint.reason = pending.reason || reason;
             checkpoint.memorySnapshot = snapshotMemory(draft);
             checkpoint.beforeSnapshot = snapshotMemory(before);
         }
@@ -321,15 +424,27 @@ async function summarizeRange(ctx, range, settings, reason = 'manual') {
             setChatState(draft, ctx);
             await saveChat(ctx);
         }
+        runtime.lastError = '';
         notify('success', `已总结消息 ${range.start}–${range.end}${settings.autoHide ? '，旧正文已退出上下文' : ''}。`);
         return draft;
     } catch (error) {
-        runtime.lastError = String(error?.message || error);
-        notify('error', runtime.lastError);
-        throw error;
+        pending.partialText = runtime.streamText || pending.partialText || '';
+        pending.lastError = readableGenerationError(error);
+        pending.interruptedAt = Date.now();
+        await savePending(ctx, pending);
+        if (isInterrupted(error, controller)) {
+            runtime.lastError = `已中断${stageName(pending.stage)}，可以继续`;
+            notify('info', runtime.lastError);
+        } else {
+            runtime.lastError = `${stageName(pending.stage)}生成中断：${pending.lastError}`;
+            console.error(`[${DISPLAY_NAME}] 总结生成失败`, error);
+            notify('error', runtime.lastError);
+        }
+        return null;
     } finally {
+        if (runtime.abortController === controller) runtime.abortController = null;
         runtime.busy = false;
-        setStatus('');
+        runtime.activeStage = '';
         refreshUi();
     }
 }
@@ -366,7 +481,7 @@ function planRange(ctx, manual = false) {
 function shouldAutoSummarize(ctx) {
     const settings = getSettings(ctx);
     const chatState = getChatState(ctx);
-    if (!settings.autoSummarize || !chatState.enabled || runtime.busy || runtime.generating) return false;
+    if (!settings.autoSummarize || !chatState.enabled || chatState.pending || runtime.busy || runtime.generating) return false;
     const range = planRange(ctx, false);
     if (!range) return false;
     const messages = getMessages(ctx);
@@ -392,12 +507,48 @@ function scheduleAutoSummary(delay = 1100) {
 async function startSummary(manual = true) {
     const ctx = getContext();
     const settings = getSettings(ctx);
+    const chatState = getChatState(ctx);
+    if (chatState.pending) {
+        if (manual) notify('info', '已有未完成的总结，请点击“继续”恢复，或点击“恢复并重建”放弃它。');
+        return;
+    }
     const range = planRange(ctx, manual);
     if (!range) {
         notify('info', manual ? '目前没有足够的旧正文可总结；请保留一些近期消息后再试。' : '尚未达到自动总结阈值。');
         return;
     }
     await summarizeRange(ctx, range, settings, manual ? 'manual' : 'auto');
+}
+
+async function continueSummary() {
+    if (runtime.busy) return;
+    const ctx = getContext();
+    const pending = getChatState(ctx).pending;
+    if (!pending?.range) {
+        notify('info', '没有可以继续的总结任务。');
+        return;
+    }
+    if (!rangeStillMatches(getMessages(ctx), pending.range)) {
+        const state = getChatState(ctx);
+        state.pending = null;
+        setChatState(state, ctx);
+        await saveChat(ctx);
+        refreshUi();
+        notify('warning', '原消息已发生变化，旧的中断任务不能继续，请重新总结。');
+        return;
+    }
+    await summarizeRange(ctx, pending.range, getSettings(ctx), pending.reason || 'continued', pending);
+}
+
+function stopSummary() {
+    const controller = runtime.abortController;
+    if (!controller) return;
+    runtime.taskSerial += 1;
+    controller.abort(new DOMException('用户中断总结', 'AbortError'));
+    setStatus(`正在中断${stageName(runtime.activeStage)}并保存进度……`);
+    try { getContext().stopGeneration?.(); } catch (error) {
+        console.warn(`[${DISPLAY_NAME}] 酒馆停止接口调用失败`, error);
+    }
 }
 
 async function restoreAll() {
@@ -465,7 +616,11 @@ function refreshUi() {
     const messages = getMessages(ctx);
     const summary = runtime.overlay.querySelector('[data-gds-summary]');
     const preview = runtime.overlay.querySelector('[data-gds-preview]');
+    const streamPreview = runtime.overlay.querySelector('[data-gds-stream-preview]');
     if (summary && document.activeElement !== summary) summary.value = chatState.recap || '';
+    if (streamPreview && document.activeElement !== streamPreview) {
+        streamPreview.value = runtime.streamText || chatState.pending?.partialText || '';
+    }
     if (preview) preview.value = compileInjection(chatState, {
         query: recentQuery(messages),
         maxTokens: settings.injectionMaxTokens,
@@ -481,15 +636,30 @@ function refreshUi() {
         <span>注入约 ${chatState.lastInjectionTokens || tokenEstimate(chatState.lastInjection || '')} Token</span>`;
     const status = runtime.overlay.querySelector('[data-gds-status]');
     if (status && !runtime.busy) status.textContent = runtime.lastError ? `上次任务：${runtime.lastError}` : '已就绪';
+    const summarize = runtime.overlay.querySelector('[data-gds-summarize]');
+    const resume = runtime.overlay.querySelector('[data-gds-continue]');
+    const stop = runtime.overlay.querySelector('[data-gds-stop]');
+    const rebuild = runtime.overlay.querySelector('[data-gds-rebuild]');
+    const restore = runtime.overlay.querySelector('[data-gds-restore]');
+    if (summarize) summarize.disabled = runtime.busy || Boolean(chatState.pending);
+    if (resume) {
+        resume.hidden = runtime.busy || !chatState.pending;
+        resume.disabled = runtime.busy;
+    }
+    if (stop) stop.hidden = !runtime.busy || !runtime.abortController;
+    if (rebuild) rebuild.disabled = runtime.busy;
+    if (restore) restore.disabled = runtime.busy;
     const list = runtime.overlay.querySelector('[data-gds-checkpoints]');
     if (list) list.innerHTML = renderCheckpointList(chatState);
     const auto = runtime.overlay.querySelector('[data-gds-auto]');
     const hide = runtime.overlay.querySelector('[data-gds-hide]');
     const collapse = runtime.overlay.querySelector('[data-gds-collapse]');
+    const stream = runtime.overlay.querySelector('[data-gds-stream]');
     const mode = runtime.overlay.querySelector('[data-gds-mode]');
     if (auto) auto.checked = Boolean(settings.autoSummarize);
     if (hide) hide.checked = Boolean(settings.autoHide);
     if (collapse) collapse.checked = Boolean(settings.collapseHidden);
+    if (stream) stream.checked = settings.streamOutput !== false;
     if (mode) mode.value = settings.injectionMode;
     for (const [selector, value] of [
         ['[data-gds-trigger]', settings.triggerTokens],
@@ -531,10 +701,13 @@ function createUi() {
             <div class="gds-metrics" data-gds-metrics></div>
             <div class="gds-actions">
                 <button class="gds-primary" data-gds-summarize>立即总结</button>
+                <button class="gds-primary" data-gds-continue hidden>继续</button>
+                <button class="gds-danger" data-gds-stop hidden>中断</button>
                 <button data-gds-rebuild>恢复并重建</button>
                 <button data-gds-restore>恢复隐藏</button>
             </div>
             <div class="gds-grid">
+                <label class="gds-field gds-wide gds-stream-field"><span>生成进度（流式接收）</span><textarea rows="6" readonly data-gds-stream-preview placeholder="生成时会在这里实时显示；中断后会保留当前阶段，可点击继续"></textarea></label>
                 <label class="gds-field gds-wide"><span>文学版前情（可编辑）</span><textarea rows="8" data-gds-summary placeholder="总结后会在这里显示有文笔的前情回顾"></textarea><button data-gds-save-summary>保存前情修改</button></label>
                 <label class="gds-field gds-wide"><span>模型实际收到的记忆注入</span><textarea rows="10" readonly data-gds-preview></textarea></label>
             </div>
@@ -543,6 +716,7 @@ function createUi() {
                     <label><input type="checkbox" data-gds-auto> 自动总结</label>
                     <label><input type="checkbox" data-gds-hide> 总结成功后自动隐藏旧正文</label>
                     <label><input type="checkbox" data-gds-collapse> 在界面折叠已隐藏范围</label>
+                    <label><input type="checkbox" data-gds-stream> 流式生成与实时显示</label>
                     <label>触发 Token <input type="number" min="200" step="100" data-gds-trigger></label>
                     <label>保留近期消息 <input type="number" min="4" step="1" data-gds-keep></label>
                     <label>注入上限 Token <input type="number" min="160" step="100" data-gds-injection></label>
@@ -565,11 +739,13 @@ function createUi() {
     floating.addEventListener('click', () => togglePanel(true));
 
     overlay.addEventListener('click', async event => {
-        const target = event.target.closest('[data-gds-close],[data-gds-summarize],[data-gds-rebuild],[data-gds-restore],[data-gds-save-summary]');
+        const target = event.target.closest('[data-gds-close],[data-gds-summarize],[data-gds-continue],[data-gds-stop],[data-gds-rebuild],[data-gds-restore],[data-gds-save-summary]');
         if (!target) return;
         try {
             if (target.matches('[data-gds-close]')) togglePanel(false);
             if (target.matches('[data-gds-summarize]')) await startSummary(true);
+            if (target.matches('[data-gds-continue]')) await continueSummary();
+            if (target.matches('[data-gds-stop]')) stopSummary();
             if (target.matches('[data-gds-rebuild]')) await rebuildFromStart();
             if (target.matches('[data-gds-restore]')) await restoreAll();
             if (target.matches('[data-gds-save-summary]')) {
@@ -585,13 +761,14 @@ function createUi() {
         refreshUi();
     });
 
-    for (const input of overlay.querySelectorAll('input[data-gds-auto],input[data-gds-hide],input[data-gds-collapse],input[data-gds-trigger],input[data-gds-keep],input[data-gds-injection],input[data-gds-words],select[data-gds-mode]')) {
+    for (const input of overlay.querySelectorAll('input[data-gds-auto],input[data-gds-hide],input[data-gds-collapse],input[data-gds-stream],input[data-gds-trigger],input[data-gds-keep],input[data-gds-injection],input[data-gds-words],select[data-gds-mode]')) {
         input.addEventListener('change', () => {
             const ctx = getContext();
             const settings = getSettings(ctx);
             if (input.matches('[data-gds-auto]')) settings.autoSummarize = input.checked;
             if (input.matches('[data-gds-hide]')) settings.autoHide = input.checked;
             if (input.matches('[data-gds-collapse]')) settings.collapseHidden = input.checked;
+            if (input.matches('[data-gds-stream]')) settings.streamOutput = input.checked;
             if (input.matches('[data-gds-trigger]')) settings.triggerTokens = Math.max(200, Number(input.value) || DEFAULT_SETTINGS.triggerTokens);
             if (input.matches('[data-gds-keep]')) settings.keepMessages = Math.max(4, Number(input.value) || DEFAULT_SETTINGS.keepMessages);
             if (input.matches('[data-gds-injection]')) settings.injectionMaxTokens = Math.max(160, Number(input.value) || DEFAULT_SETTINGS.injectionMaxTokens);

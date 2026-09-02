@@ -1,6 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { extractGeneratedText, generateCompatible, generateQuietOnly } from '../generation-client.js';
+import {
+    extractGeneratedText,
+    generateWithFallback,
+    mergeStreamText,
+} from '../generation-client.js';
 
 test('reads common Tavern and OpenAI-compatible generation results', () => {
     assert.equal(extractGeneratedText('直接文本'), '直接文本');
@@ -8,7 +12,48 @@ test('reads common Tavern and OpenAI-compatible generation results', () => {
     assert.equal(extractGeneratedText({ choices: [{ message: { content: '兼容端文本' } }] }), '兼容端文本');
 });
 
-test('uses Tavern quiet generation first with one combined prompt', async () => {
+test('merges cumulative and delta stream chunks without duplication', () => {
+    assert.equal(mergeStreamText('前半', '前半后半'), '前半后半');
+    assert.equal(mergeStreamText('前半', '后半'), '前半后半');
+    assert.equal(mergeStreamText('完整', '完整'), '完整');
+});
+
+test('uses the live Text Completion service for real streaming', async () => {
+    const payloads = [];
+    const updates = [];
+    const ctx = {
+        mainApi: 'textgenerationwebui',
+        textCompletionSettings: { preset: '当前预设' },
+        getPresetManager: () => ({ getCompletionPresetByName: () => ({ temperature: 0.8 }) }),
+        TextCompletionService: {
+            presetToGeneratePayload: (_settings, _params, override) => ({ ...override, model: 'live-model' }),
+            sendRequest: async payload => {
+                payloads.push(payload);
+                return (async function* stream() {
+                    yield '{"scene"';
+                    yield '{"scene":{},"facts":[],';
+                    yield '{"scene":{},"facts":[],"stateUpdates":[],"threads":[],"recap":"完成"}';
+                }());
+            },
+        },
+        generateQuietPrompt: async () => { throw new Error('不应进入 Quiet'); },
+        generateRaw: async () => { throw new Error('不应进入 Raw'); },
+    };
+    const result = await generateWithFallback(ctx, {
+        systemPrompt: '系统',
+        prompt: '材料',
+        preferStream: true,
+        onText: text => updates.push(text),
+    });
+    assert.equal(payloads.length, 1);
+    assert.equal(payloads[0].stream, true);
+    assert.equal(result.streamed, true);
+    assert.equal(result.updates, 3);
+    assert.equal(result.text.endsWith('"完成"}'), true);
+    assert.equal(updates.length, 3);
+});
+
+test('falls back to Tavern quiet generation only when no direct service exists', async () => {
     const calls = [];
     const ctx = {
         generateQuietPrompt: async options => {
@@ -20,45 +65,56 @@ test('uses Tavern quiet generation first with one combined prompt', async () => 
             return 'raw-ok';
         },
     };
-    const result = await generateCompatible(ctx, {
+    const result = await generateWithFallback(ctx, {
         systemPrompt: '系统说明',
         prompt: '总结材料',
-        responseLength: 1200,
+        preferStream: true,
     });
-    assert.equal(result, 'quiet-ok');
+    assert.equal(result.text, 'quiet-ok');
     assert.equal(calls.length, 1);
     assert.equal(calls[0][0], 'quiet');
-    assert.deepEqual(calls[0][1], {
-        quietPrompt: '系统说明\n\n总结材料',
-        skipWIAN: true,
-        responseLength: 1200,
-    });
+    assert.equal(calls[0][1].quietPrompt, '系统说明\n\n总结材料');
 });
 
-test('falls back to raw only when quiet generation is unavailable', async () => {
-    const calls = [];
-    const failure = new Error('quiet unavailable');
+test('an abort signal stops a live stream before applying later chunks', async () => {
+    const controller = new AbortController();
     const ctx = {
-        generateQuietPrompt: async () => {
-            calls.push('quiet');
-            throw failure;
-        },
-        generateRaw: async request => {
-            calls.push(['raw', request]);
-            return { content: 'raw-ok' };
+        mainApi: 'textgenerationwebui',
+        textCompletionSettings: {},
+        TextCompletionService: {
+            presetToGeneratePayload: (_settings, _params, override) => override,
+            sendRequest: async () => (async function* stream() {
+                yield '第一段';
+                yield '第二段';
+            }()),
         },
     };
-    let fallbackError;
-    const request = { systemPrompt: '系统', prompt: '材料' };
-    const result = await generateCompatible(ctx, request, error => { fallbackError = error; });
-    assert.equal(result, 'raw-ok');
-    assert.deepEqual(calls, ['quiet', ['raw', request]]);
-    assert.equal(fallbackError, failure);
+    await assert.rejects(
+        generateWithFallback(ctx, {
+            systemPrompt: '系统',
+            prompt: '材料',
+            preferStream: true,
+            signal: controller.signal,
+            onText: () => controller.abort(new DOMException('测试中断', 'AbortError')),
+        }),
+        error => error?.name === 'AbortError',
+    );
 });
 
-test('rejects an empty quiet response instead of saving an empty summary', async () => {
+test('reports both the live service and compatibility errors', async () => {
+    const gateway = Object.assign(new Error('Bad Gateway'), { status: 502 });
+    const ctx = {
+        mainApi: 'textgenerationwebui',
+        textCompletionSettings: {},
+        TextCompletionService: {
+            presetToGeneratePayload: (_settings, _params, override) => override,
+            sendRequest: async () => { throw gateway; },
+        },
+        generateQuietPrompt: async () => { throw gateway; },
+        generateRaw: async () => { throw gateway; },
+    };
     await assert.rejects(
-        generateQuietOnly({ generateQuietPrompt: async () => ({ text: '   ' }) }, { prompt: '总结' }),
-        /模型返回了空内容/,
+        generateWithFallback(ctx, { systemPrompt: '系统', prompt: '材料', preferStream: true }),
+        /直接流式：.*502.*兼容通道：/,
     );
 });
