@@ -81,7 +81,7 @@ const INJECTION_ID = `${EXTENSION_NAME}:memory`;
 const DIRECTOR_INJECTION_ID = `${EXTENSION_NAME}:director`;
 const PANEL_LOGO_URL = new URL('./assets/gaga-dog-logo.png', import.meta.url).href;
 const FLOATING_LOGO_URL = new URL('./assets/gaga-dog-floating.png', import.meta.url).href;
-const VERSION = '0.3.1';
+const VERSION = '0.3.2';
 const SETTINGS_VERSION = 5;
 
 const DEFAULT_SETTINGS = {
@@ -2005,7 +2005,7 @@ function createUi() {
             <nav class="gds-tabs" aria-label="故事工作台功能"><button data-gds-tab="home">功能首页</button><button data-gds-tab="memory">剧情记忆</button><button data-gds-tab="director">情节导演</button><button data-gds-tab="reply">待写回复</button><button data-gds-tab="connections">模型连接</button></nav>
             <main class="gds-page-host">
                 <section class="gds-home" data-gds-tab-panel="home">
-                    <div class="gds-home-intro"><h3>选择要使用的功能</h3><p>三个模块各自独立，切换后只显示当前页面。</p></div>
+                    <div class="gds-home-intro"><h3>选择要使用的功能</h3></div>
                     <div class="gds-home-grid">
                         <button class="gds-home-card" data-gds-tab="memory"><strong>剧情记忆</strong><span>总结前情、保留文风、隐藏旧正文</span></button>
                         <button class="gds-home-card" data-gds-tab="director"><strong>情节导演</strong><span>长线规划、分支、伏笔与故事日历</span></button>
