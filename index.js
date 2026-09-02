@@ -75,17 +75,19 @@ import {
 } from './provider-profiles.js';
 
 const EXTENSION_NAME = 'gaga-dog-summary';
-const DISPLAY_NAME = '嘎嘎小狗总结';
+const DISPLAY_NAME = '嘎嘎小狗工坊';
 const SETTINGS_KEY = 'gagaDogSummary';
 const INJECTION_ID = `${EXTENSION_NAME}:memory`;
 const DIRECTOR_INJECTION_ID = `${EXTENSION_NAME}:director`;
 const PANEL_LOGO_URL = new URL('./assets/gaga-dog-logo.png', import.meta.url).href;
 const FLOATING_LOGO_URL = new URL('./assets/gaga-dog-floating.png', import.meta.url).href;
-const VERSION = '0.3.5';
+const VERSION = '0.3.6';
 const SETTINGS_VERSION = 5;
 
 const DEFAULT_SETTINGS = {
     showFloatingButton: true,
+    floatingIconSize: 62,
+    floatingIconData: '',
     floatingPosition: null,
     panelPosition: null,
     autoSummarize: true,
@@ -196,6 +198,11 @@ function escapeHtml(value) {
         .replaceAll("'", '&#039;');
 }
 
+function normalizeFloatingIconData(value) {
+    const data = String(value || '').trim();
+    return /^data:image\/(?:png|jpe?g|gif|webp);base64,[a-z0-9+/=]+$/i.test(data) ? data : '';
+}
+
 function getMessages(ctx = getContext()) {
     return Array.isArray(ctx.chat) ? ctx.chat : Array.isArray(globalThis.chat) ? globalThis.chat : [];
 }
@@ -209,6 +216,8 @@ function getSettings(ctx = getContext()) {
     result.settingsVersion = SETTINGS_VERSION;
     result.prompts = { ...DEFAULT_PROMPTS, ...(current?.prompts && typeof current.prompts === 'object' ? current.prompts : {}) };
     result.summaryMode = ['novel', 'structured', 'mixed'].includes(result.summaryMode) ? result.summaryMode : DEFAULT_SETTINGS.summaryMode;
+    result.floatingIconSize = Math.min(120, Math.max(32, Math.round(Number(result.floatingIconSize) || DEFAULT_SETTINGS.floatingIconSize)));
+    result.floatingIconData = normalizeFloatingIconData(result.floatingIconData);
     result.apiProfiles = normalizeProviderProfiles(result.apiProfiles);
     result.moduleConnections = {
         ...DEFAULT_SETTINGS.moduleConnections,
@@ -1595,7 +1604,7 @@ function setActiveTab(tab = 'home') {
     if (pageHost) pageHost.scrollTop = 0;
     const title = windowNode.querySelector('[data-gds-page-title]');
     const subtitles = {
-        home: ['嘎嘎小狗故事工作台', '选择一个功能开始'],
+        home: ['嘎嘎小狗工坊', '选择一个功能开始'],
         memory: ['剧情记忆', '精简前情 · 保留细节 · 自动隐藏'],
         director: ['情节导演', '规划主线 · 分支 · 伏笔 · 日历'],
         reply: ['代写回复', '生成候选 · 复制或放入编辑栏'],
@@ -1858,6 +1867,8 @@ function refreshUi() {
     if (replyOutput && document.activeElement !== replyOutput) replyOutput.value = runtime.replyText || '';
     const replyList = runtime.overlay.querySelector('[data-gds-reply-list]');
     if (replyList) replyList.innerHTML = renderReplyCandidates(reply.lastCandidates);
+    refreshSettingsEntry();
+    applyFloatingAppearance();
     applyCollapsedView();
 }
 
@@ -1903,6 +1914,66 @@ function placeFloating(node = runtime.floating, position = null) {
 function applyFloatingPosition() {
     if (!runtime.floating || runtime.floating.classList.contains('gds-dragging')) return;
     placeFloating(runtime.floating, getSettings().floatingPosition);
+}
+
+function applyFloatingAppearance() {
+    if (!runtime.floating) return;
+    const settings = getSettings();
+    const size = settings.floatingIconSize;
+    runtime.floating.style.width = `${size}px`;
+    runtime.floating.style.height = `${size}px`;
+    const image = runtime.floating.querySelector('.gds-floating-image');
+    if (image) image.src = settings.floatingIconData || FLOATING_LOGO_URL;
+    applyFloatingPosition();
+}
+
+function persistFloatingAppearance(mutator) {
+    const ctx = getContext();
+    const settings = getSettings(ctx);
+    mutator(settings);
+    ctx.extensionSettings[SETTINGS_KEY] = settings;
+    saveSettings(ctx);
+    applyFloatingAppearance();
+    refreshUi();
+}
+
+function readImageAsDataUrl(file) {
+    return new Promise((resolve, reject) => {
+        if (!file || typeof FileReader !== 'function') {
+            reject(new Error('当前环境不支持读取图片文件。'));
+            return;
+        }
+        const reader = new FileReader();
+        reader.onerror = () => reject(new Error('图片读取失败，请换一张图片重试。'));
+        reader.onload = () => resolve(normalizeFloatingIconData(reader.result));
+        reader.readAsDataURL(file);
+    });
+}
+
+async function handleFloatingIconUpload(event) {
+    const input = event.currentTarget;
+    const file = input?.files?.[0];
+    if (!file) return;
+    if (!String(file.type || '').match(/^image\/(?:png|jpe?g|gif|webp)$/i)) {
+        input.value = '';
+        notify('error', '请上传 PNG、JPG、GIF 或 WebP 图片。');
+        return;
+    }
+    if (Number(file.size || 0) > 2 * 1024 * 1024) {
+        input.value = '';
+        notify('error', '图片不能超过 2 MB。');
+        return;
+    }
+    try {
+        const data = await readImageAsDataUrl(file);
+        if (!data) throw new Error('图片格式无法识别，请换一张图片重试。');
+        persistFloatingAppearance(settings => { settings.floatingIconData = data; });
+        notify('success', '悬浮窗图标已更新。');
+    } catch (error) {
+        notify('error', error.message || '图片读取失败。');
+    } finally {
+        input.value = '';
+    }
 }
 
 function persistFloatingPosition(position) {
@@ -2069,7 +2140,7 @@ function createUi() {
     overlay.innerHTML = `
         <div class="gds-window">
             <header class="gds-header" title="桌面端可按住标题栏拖动">
-                <div><img class="gds-puppy" src="${escapeHtml(PANEL_LOGO_URL)}" alt="" aria-hidden="true"><div><h2 data-gds-page-title>嘎嘎小狗故事工作台</h2><small data-gds-page-subtitle>选择一个功能开始</small></div></div>
+                <div><img class="gds-puppy" src="${escapeHtml(PANEL_LOGO_URL)}" alt="" aria-hidden="true"><div><h2 data-gds-page-title>嘎嘎小狗工坊</h2><small data-gds-page-subtitle>选择一个功能开始</small></div></div>
                 <button class="gds-icon-button" data-gds-close title="关闭">×</button>
             </header>
             <nav class="gds-tabs" aria-label="故事工作台功能"><button data-gds-tab="home">功能首页</button><button data-gds-tab="memory">剧情记忆</button><button data-gds-tab="director">情节导演</button><button data-gds-tab="reply">代写回复</button><button data-gds-tab="connections">模型连接</button></nav>
@@ -2198,7 +2269,7 @@ function createUi() {
     floating.innerHTML = `<img class="gds-floating-image" src="${escapeHtml(FLOATING_LOGO_URL)}" alt="" aria-hidden="true" draggable="false">`;
     document.body.appendChild(floating);
     runtime.floating = floating;
-    applyFloatingPosition();
+    applyFloatingAppearance();
     bindFloatingDrag(floating);
 
     overlay.addEventListener('click', async event => {
@@ -2367,11 +2438,44 @@ function createSettingsEntry() {
             <div class="inline-drawer-content">
                 <p>自动压缩前情、保留剧情记忆，并在总结完成后让旧正文退出模型上下文。</p>
                 <button class="menu_button gds-open-settings" type="button" data-gds-open-settings><img class="gds-entry-puppy" src="${escapeHtml(PANEL_LOGO_URL)}" alt="" aria-hidden="true"><span>打开${DISPLAY_NAME}</span></button>
+                <div class="gds-floating-settings">
+                    <label class="gds-floating-size"><span>悬浮窗图标大小 <output data-gds-floating-size-value>62 px</output></span><input type="range" min="32" max="120" step="1" value="62" data-gds-floating-size></label>
+                    <label class="gds-floating-upload"><span>自定义悬浮窗图标</span><input type="file" accept="image/png,image/jpeg,image/gif,image/webp" data-gds-floating-upload></label>
+                    <div class="gds-floating-settings-actions"><button type="button" class="menu_button" data-gds-floating-reset>恢复默认图标</button><small>支持 PNG、JPG、GIF、WebP，单张不超过 2 MB；图片仅保存在本地酒馆设置中。</small></div>
+                </div>
             </div>
         </div>`;
     host.appendChild(entry);
     entry.querySelector('[data-gds-open-settings]').addEventListener('click', () => togglePanel(true));
+    const sizeInput = entry.querySelector('[data-gds-floating-size]');
+    const sizeOutput = entry.querySelector('[data-gds-floating-size-value]');
+    sizeInput?.addEventListener('input', () => {
+        const value = Math.min(120, Math.max(32, Math.round(Number(sizeInput.value) || DEFAULT_SETTINGS.floatingIconSize)));
+        if (sizeOutput) sizeOutput.value = `${value} px`;
+        if (sizeOutput) sizeOutput.textContent = `${value} px`;
+        persistFloatingAppearance(settings => { settings.floatingIconSize = value; });
+    });
+    entry.querySelector('[data-gds-floating-upload]')?.addEventListener('change', handleFloatingIconUpload);
+    entry.querySelector('[data-gds-floating-reset]')?.addEventListener('click', () => {
+        persistFloatingAppearance(settings => { settings.floatingIconData = ''; });
+        notify('success', '已恢复默认悬浮窗图标。');
+    });
     runtime.settingsEntry = entry;
+    refreshSettingsEntry();
+}
+
+function refreshSettingsEntry() {
+    const entry = runtime.settingsEntry;
+    if (!entry) return;
+    let settings;
+    try { settings = getSettings(); } catch { return; }
+    const sizeInput = entry.querySelector('[data-gds-floating-size]');
+    const sizeOutput = entry.querySelector('[data-gds-floating-size-value]');
+    if (sizeInput && document.activeElement !== sizeInput) sizeInput.value = String(settings.floatingIconSize);
+    if (sizeOutput) {
+        sizeOutput.value = `${settings.floatingIconSize} px`;
+        sizeOutput.textContent = `${settings.floatingIconSize} px`;
+    }
 }
 
 function togglePanel(open) {

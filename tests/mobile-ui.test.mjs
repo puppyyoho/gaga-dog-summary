@@ -152,6 +152,21 @@ test('uses the supplied dog image instead of emoji branding', () => {
     assert.match(css, /\.gds-floating-image\s*\{[^}]*border-radius:\s*0/);
 });
 
+test('brands the extension as the workshop and exposes local floating icon controls', () => {
+    assert.match(js, /const DISPLAY_NAME = '嘎嘎小狗工坊'/);
+    assert.match(js, /"?floatingIconSize"?:\s*62/);
+    assert.match(js, /floatingIconData:\s*['"]['"]/);
+    assert.match(js, /data-gds-floating-size/);
+    assert.match(js, /data-gds-floating-upload/);
+    assert.match(js, /async function handleFloatingIconUpload/);
+    assert.match(js, /function applyFloatingAppearance/);
+    assert.match(js, /恢复默认图标/);
+    assert.match(css, /\.gds-floating-settings\s*\{/);
+    assert.match(css, /\.gds-floating-size input\[type="range"\]/);
+    assert.match(css, /\.gds-floating-upload input\[type="file"\]/);
+    assert.match(css, /@media \(max-width: 900px\)[\s\S]*?\.gds-floating-upload/);
+});
+
 test('uses 60000 Token only as the automatic trigger and adapts manual batches', () => {
     assert.match(js, /triggerTokens:\s*60000/);
     assert.match(js, /FALLBACK_BATCH_TOKENS/);

@@ -418,6 +418,74 @@ body.gds-panel-open { overflow: hidden !important; }
     border-radius: 0;
     mix-blend-mode: normal;
 }
+.gds-floating-settings {
+    box-sizing: border-box;
+    width: 100%;
+    min-width: 0;
+    margin-top: 12px;
+    padding-top: 12px;
+    border-top: 1px solid var(--gds-line);
+}
+.gds-floating-size {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    width: 100%;
+    color: var(--gds-muted);
+    font-size: 12px;
+}
+.gds-floating-size > span {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+}
+.gds-floating-size output {
+    color: var(--gds-pink-deep);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+}
+.gds-floating-size input[type="range"] {
+    width: 100%;
+    min-width: 0;
+    accent-color: var(--gds-pink-deep);
+}
+.gds-floating-upload {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    width: 100%;
+    margin-top: 11px;
+    color: var(--gds-muted);
+    font-size: 12px;
+}
+.gds-floating-upload > span { flex: 0 0 auto; }
+.gds-floating-upload input[type="file"] {
+    box-sizing: border-box;
+    min-width: 0;
+    max-width: 230px;
+    color: var(--gds-ink);
+    font: inherit;
+}
+.gds-floating-settings-actions {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    width: 100%;
+    margin-top: 9px;
+}
+.gds-floating-settings-actions button {
+    flex: 0 0 auto;
+    min-height: 32px;
+    padding: 5px 10px;
+    font-size: 12px;
+}
+.gds-floating-settings-actions small {
+    min-width: 0;
+    color: var(--gds-muted);
+    line-height: 1.45;
+}
 
 @media (max-width: 900px) {
     .gds-overlay {
@@ -518,6 +586,9 @@ body.gds-panel-open { overflow: hidden !important; }
     .gds-checkpoint { grid-template-columns: 1fr; gap: 4px; }
     .gds-footer { flex-direction: column; padding: 16px 14px max(18px, env(safe-area-inset-bottom, 0px)); }
     .gds-floating { right: 14px; bottom: 14px; }
+    .gds-floating-upload { align-items: flex-start; flex-direction: column; gap: 6px; }
+    .gds-floating-upload input[type="file"] { width: 100%; max-width: none; }
+    .gds-floating-settings-actions { align-items: flex-start; flex-direction: column; gap: 6px; }
 }
 
 @supports (height: 100dvh) {
