@@ -55,6 +55,8 @@ test('uses the supplied dog image instead of emoji branding', () => {
     assert.match(js, /class="gds-floating-image" src="\$\{escapeHtml\(LOGO_URL\)\}"/);
     assert.match(js, /class="gds-entry-puppy" src="\$\{escapeHtml\(LOGO_URL\)\}"/);
     assert.doesNotMatch(js, /textContent\s*=\s*['"]🐶['"]/);
+    assert.match(css, /\.gds-puppy\s*\{[\s\S]*?object-fit:\s*cover/);
+    assert.doesNotMatch(css, /\.gds-puppy\s*\{[\s\S]*?mix-blend-mode/);
 });
 
 test('uses a 60000 Token default and labels it as a per-batch target', () => {

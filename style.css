@@ -33,7 +33,6 @@
     height: 100%;
     object-fit: cover;
     border-radius: 50%;
-    mix-blend-mode: multiply;
 }
 
 .gds-floating:hover { transform: translateY(-2px) scale(1.05); filter: saturate(1.12); }
@@ -86,7 +85,6 @@ body.gds-panel-open { overflow: hidden !important; }
     flex: 0 0 46px;
     object-fit: cover;
     border-radius: 14px;
-    mix-blend-mode: multiply;
 }
 .gds-header h2 { margin: 0; color: var(--gds-pink-deep); font-size: 20px; }
 .gds-header small, .gds-footer, .gds-checkpoint small { color: var(--gds-muted); }
@@ -253,7 +251,6 @@ body.gds-panel-open { overflow: hidden !important; }
     flex: 0 0 25px;
     object-fit: cover;
     border-radius: 8px;
-    mix-blend-mode: multiply;
 }
 
 @media (max-width: 900px) {

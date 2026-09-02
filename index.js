@@ -32,7 +32,7 @@ const DISPLAY_NAME = '嘎嘎小狗总结';
 const SETTINGS_KEY = 'gagaDogSummary';
 const INJECTION_ID = `${EXTENSION_NAME}:memory`;
 const LOGO_URL = new URL('./assets/gaga-dog-logo.png', import.meta.url).href;
-const VERSION = '0.1.11';
+const VERSION = '0.1.12';
 const SETTINGS_VERSION = 2;
 
 const DEFAULT_SETTINGS = {
