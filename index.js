@@ -27,7 +27,7 @@ const EXTENSION_NAME = 'gaga-dog-summary';
 const DISPLAY_NAME = '嘎嘎小狗总结';
 const SETTINGS_KEY = 'gagaDogSummary';
 const INJECTION_ID = `${EXTENSION_NAME}:memory`;
-const VERSION = '0.1.3';
+const VERSION = '0.1.4';
 
 const DEFAULT_SETTINGS = {
     showFloatingButton: true,
@@ -786,8 +786,18 @@ function createSettingsEntry() {
     const host = document.querySelector('#extensions_settings2') || document.querySelector('#extensions_settings');
     if (!host) return;
     const entry = document.createElement('div');
-    entry.className = 'gds-settings-entry';
-    entry.innerHTML = `<button class="menu_button" data-gds-open-settings>🐶 打开嘎嘎小狗总结</button><small>自动压缩前情、保留记忆并退出旧正文上下文</small>`;
+    entry.className = 'extension_container gds-settings-entry';
+    entry.innerHTML = `
+        <div class="inline-drawer">
+            <div class="inline-drawer-toggle inline-drawer-header">
+                <b>${DISPLAY_NAME}</b>
+                <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
+            </div>
+            <div class="inline-drawer-content">
+                <p>自动压缩前情、保留剧情记忆，并在总结完成后让旧正文退出模型上下文。</p>
+                <button class="menu_button gds-open-settings" type="button" data-gds-open-settings><span aria-hidden="true">🐶</span><span>打开${DISPLAY_NAME}</span></button>
+            </div>
+        </div>`;
     host.appendChild(entry);
     entry.querySelector('[data-gds-open-settings]').addEventListener('click', () => togglePanel(true));
     runtime.settingsEntry = entry;

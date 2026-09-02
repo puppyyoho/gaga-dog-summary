@@ -156,8 +156,37 @@ body.gds-panel-open { overflow: hidden !important; }
 .gds-dot.dirty { background: #e59a41; }
 .gds-empty { padding: 12px 0; color: var(--gds-muted); font-size: 13px; }
 .gds-footer { display: flex; justify-content: space-between; gap: 10px; padding: 18px 22px 20px; font-size: 11px; }
-.gds-settings-entry { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 8px 0; }
-.gds-settings-entry small { color: var(--gds-muted); }
+.gds-settings-entry { display: block; box-sizing: border-box; width: 100%; min-width: 0; padding: 0; }
+.gds-settings-entry .inline-drawer-content { min-width: 0; }
+.gds-settings-entry p { margin: 8px 0 10px; color: var(--gds-muted); line-height: 1.5; }
+.gds-settings-entry .gds-open-settings {
+    box-sizing: border-box;
+    display: inline-flex !important;
+    align-items: center;
+    justify-content: center;
+    gap: 7px;
+    width: 100% !important;
+    max-width: 100% !important;
+    min-width: 0 !important;
+    min-height: 44px;
+    padding: 9px 14px;
+    line-height: 1.25;
+    letter-spacing: 0;
+    text-align: center;
+    white-space: nowrap !important;
+    word-break: keep-all !important;
+    writing-mode: horizontal-tb !important;
+    text-orientation: mixed !important;
+    overflow: hidden;
+    cursor: pointer;
+    touch-action: manipulation;
+}
+.gds-settings-entry .gds-open-settings > span:last-child {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
 
 @media (max-width: 900px) {
     .gds-overlay {

@@ -35,3 +35,11 @@ test('summary UI exposes streaming, stop, and resumable pending tasks', () => {
     assert.match(js, /state\.pending = clone\(pending\)/);
     assert.match(js, /rangeStillMatches\(getMessages\(ctx\), pending\.range\)/);
 });
+
+test('settings entry uses a standard drawer and cannot become vertical text', () => {
+    assert.match(js, /extension_container gds-settings-entry/);
+    assert.match(js, /inline-drawer-toggle inline-drawer-header/);
+    assert.match(css, /\.gds-settings-entry \.gds-open-settings[\s\S]*?white-space:\s*nowrap\s*!important/);
+    assert.match(css, /writing-mode:\s*horizontal-tb\s*!important/);
+    assert.match(css, /word-break:\s*keep-all\s*!important/);
+});
