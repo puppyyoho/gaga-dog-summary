@@ -450,40 +450,42 @@ body.gds-panel-open { overflow: hidden !important; }
     min-width: 0;
     accent-color: var(--gds-pink-deep);
 }
-.gds-floating-upload {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 10px;
+.gds-floating-actions {
+    display: flex !important;
+    align-items: stretch;
+    flex-direction: row !important;
+    flex-wrap: nowrap;
+    gap: 8px;
     width: 100%;
+    min-width: 0;
     margin-top: 11px;
-    color: var(--gds-muted);
-    font-size: 12px;
 }
-.gds-floating-upload > span { flex: 0 0 auto; }
-.gds-floating-upload input[type="file"] {
+.gds-floating-actions button {
     box-sizing: border-box;
-    min-width: 0;
-    max-width: 230px;
-    color: var(--gds-ink);
-    font: inherit;
-}
-.gds-floating-settings-actions {
-    display: flex;
+    display: inline-flex !important;
     align-items: center;
-    gap: 9px;
-    width: 100%;
-    margin-top: 9px;
-}
-.gds-floating-settings-actions button {
-    flex: 0 0 auto;
-    min-height: 32px;
-    padding: 5px 10px;
+    justify-content: center;
+    flex: 1 1 0 !important;
+    width: auto !important;
+    max-width: none !important;
+    min-width: 0 !important;
+    min-height: 34px;
+    padding: 6px 8px;
+    overflow: hidden;
+    color: var(--gds-ink);
     font-size: 12px;
+    line-height: 1.2;
+    white-space: nowrap !important;
+    word-break: keep-all !important;
 }
-.gds-floating-settings-actions small {
+.gds-floating-actions button:hover { border-color: var(--gds-pink); }
+.gds-floating-file { display: none !important; }
+.gds-floating-help {
+    display: block;
+    margin-top: 7px;
     min-width: 0;
     color: var(--gds-muted);
+    font-size: 11px;
     line-height: 1.45;
 }
 
@@ -586,9 +588,8 @@ body.gds-panel-open { overflow: hidden !important; }
     .gds-checkpoint { grid-template-columns: 1fr; gap: 4px; }
     .gds-footer { flex-direction: column; padding: 16px 14px max(18px, env(safe-area-inset-bottom, 0px)); }
     .gds-floating { right: 14px; bottom: 14px; }
-    .gds-floating-upload { align-items: flex-start; flex-direction: column; gap: 6px; }
-    .gds-floating-upload input[type="file"] { width: 100%; max-width: none; }
-    .gds-floating-settings-actions { align-items: flex-start; flex-direction: column; gap: 6px; }
+    .gds-floating-actions { gap: 7px; }
+    .gds-floating-actions button { min-height: 36px; padding-inline: 5px; }
 }
 
 @supports (height: 100dvh) {

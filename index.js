@@ -2440,8 +2440,12 @@ function createSettingsEntry() {
                 <button class="menu_button gds-open-settings" type="button" data-gds-open-settings><img class="gds-entry-puppy" src="${escapeHtml(PANEL_LOGO_URL)}" alt="" aria-hidden="true"><span>打开${DISPLAY_NAME}</span></button>
                 <div class="gds-floating-settings">
                     <label class="gds-floating-size"><span>悬浮窗图标大小 <output data-gds-floating-size-value>62 px</output></span><input type="range" min="32" max="120" step="1" value="62" data-gds-floating-size></label>
-                    <label class="gds-floating-upload"><span>自定义悬浮窗图标</span><input type="file" accept="image/png,image/jpeg,image/gif,image/webp" data-gds-floating-upload></label>
-                    <div class="gds-floating-settings-actions"><button type="button" class="menu_button" data-gds-floating-reset>恢复默认图标</button><small>支持 PNG、JPG、GIF、WebP，单张不超过 2 MB；图片仅保存在本地酒馆设置中。</small></div>
+                    <div class="gds-floating-actions" role="group" aria-label="悬浮窗图标设置">
+                        <button type="button" class="menu_button" data-gds-floating-upload-button>上传图标</button>
+                        <button type="button" class="menu_button" data-gds-floating-reset>恢复默认图标</button>
+                        <input class="gds-floating-file" type="file" accept="image/png,image/jpeg,image/gif,image/webp" data-gds-floating-upload tabindex="-1" aria-hidden="true">
+                    </div>
+                    <small class="gds-floating-help">支持 PNG、JPG、GIF、WebP，单张不超过 2 MB；图片仅保存在本地酒馆设置中。</small>
                 </div>
             </div>
         </div>`;
@@ -2455,7 +2459,9 @@ function createSettingsEntry() {
         if (sizeOutput) sizeOutput.textContent = `${value} px`;
         persistFloatingAppearance(settings => { settings.floatingIconSize = value; });
     });
-    entry.querySelector('[data-gds-floating-upload]')?.addEventListener('change', handleFloatingIconUpload);
+    const uploadInput = entry.querySelector('[data-gds-floating-upload]');
+    entry.querySelector('[data-gds-floating-upload-button]')?.addEventListener('click', () => uploadInput?.click());
+    uploadInput?.addEventListener('change', handleFloatingIconUpload);
     entry.querySelector('[data-gds-floating-reset]')?.addEventListener('click', () => {
         persistFloatingAppearance(settings => { settings.floatingIconData = ''; });
         notify('success', '已恢复默认悬浮窗图标。');

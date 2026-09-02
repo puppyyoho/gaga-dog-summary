@@ -158,13 +158,16 @@ test('brands the extension as the workshop and exposes local floating icon contr
     assert.match(js, /floatingIconData:\s*['"]['"]/);
     assert.match(js, /data-gds-floating-size/);
     assert.match(js, /data-gds-floating-upload/);
+    assert.match(js, /data-gds-floating-upload-button/);
     assert.match(js, /async function handleFloatingIconUpload/);
     assert.match(js, /function applyFloatingAppearance/);
     assert.match(js, /恢复默认图标/);
     assert.match(css, /\.gds-floating-settings\s*\{/);
     assert.match(css, /\.gds-floating-size input\[type="range"\]/);
-    assert.match(css, /\.gds-floating-upload input\[type="file"\]/);
-    assert.match(css, /@media \(max-width: 900px\)[\s\S]*?\.gds-floating-upload/);
+    assert.match(css, /\.gds-floating-actions\s*\{[\s\S]*?flex-direction:\s*row/);
+    assert.match(css, /\.gds-floating-actions button\s*\{[\s\S]*?white-space:\s*nowrap/);
+    assert.match(css, /\.gds-floating-file\s*\{[\s\S]*?display:\s*none/);
+    assert.match(css, /@media \(max-width: 900px\)[\s\S]*?\.gds-floating-actions/);
 });
 
 test('uses 60000 Token only as the automatic trigger and adapts manual batches', () => {
