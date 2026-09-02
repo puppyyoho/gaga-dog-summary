@@ -81,6 +81,18 @@ test('director exposes pacing, branch, foreshadow and toggle controls', () => {
     assert.match(js, /buildExecutionCard/);
 });
 
+test('director exposes a story calendar with built-ins, custom events and date sync', () => {
+    assert.match(js, /data-gds-calendar-enabled/);
+    assert.match(js, /data-gds-calendar-builtins/);
+    assert.match(js, /data-gds-calendar-auto-advance/);
+    assert.match(js, /data-gds-calendar-title/);
+    assert.match(js, /data-gds-calendar-rule/);
+    assert.match(js, /data-gds-calendar-sync/);
+    assert.match(js, /buildCalendarContext/);
+    assert.match(js, /故事日期/);
+    assert.match(css, /\.gds-calendar-alert/);
+});
+
 test('reply candidates can be copied or inserted without auto-sending', () => {
     assert.match(js, /生成五个候选/);
     assert.match(js, /data-gds-reply-copy/);

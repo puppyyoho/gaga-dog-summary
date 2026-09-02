@@ -1,6 +1,7 @@
 import { compactText, extractKeywords, normalizeChatState, tokenEstimate } from './memory-core.js';
+import { createEmptyCalendarState, normalizeCalendarState } from './calendar-core.js';
 
-export const DIRECTOR_SCHEMA_VERSION = 1;
+export const DIRECTOR_SCHEMA_VERSION = 2;
 
 export const DIRECTOR_PRESETS = [
     {
@@ -94,6 +95,7 @@ export function createEmptyDirectorState() {
             sidePlots: true,
             autoTrack: false,
         },
+        calendar: createEmptyCalendarState(),
         mainPlan: null,
         branchCandidates: [],
         activeBranchId: '',
@@ -115,6 +117,7 @@ export function normalizeDirectorState(value) {
         ...defaults,
         ...input,
         toggles: { ...defaults.toggles, ...record(input.toggles) },
+        calendar: normalizeCalendarState(input.calendar),
         mainPlan: input.mainPlan && typeof input.mainPlan === 'object' ? input.mainPlan : null,
         branchCandidates: list(input.branchCandidates),
         foreshadows: list(input.foreshadows),
@@ -150,7 +153,7 @@ function stringifyState(memory) {
     ].filter(Boolean).join('\n\n');
 }
 
-export function buildDirectorPrompt({ task = 'longline', memory, recentText = '', state = {}, presetId, customBrief = '', pacingMode = 'dynamic', pacingCustom = '', toggles = {} }) {
+export function buildDirectorPrompt({ task = 'longline', memory, recentText = '', characterCard = '', calendarContext = null, state = {}, presetId, customBrief = '', pacingMode = 'dynamic', pacingCustom = '', toggles = {} }) {
     const preset = getDirectorPreset(presetId);
     const director = normalizeDirectorState({ ...state, presetId, customBrief, pacingMode, pacingCustom, toggles });
     const currentPlan = director.mainPlan ? JSON.stringify(director.mainPlan, null, 2) : '暂无已确认主线';
@@ -166,7 +169,7 @@ export function buildDirectorPrompt({ task = 'longline', memory, recentText = ''
                 : '请判断最近正文是否完成当前节拍，并只返回结构化的进度判断。';
     return {
         systemPrompt: `你是“嘎嘎小狗”的幕后情节导演。你只负责规划、检查和整理故事，不直接续写正文。\n\n已发生事实是不可修改的边界；未来计划、分支和伏笔都是“可能发生”，除非正文真正写出，否则不能称为已发生。人物只能依据自己已经知道的内容行动。\n\n输出必须是合法 JSON，不要输出 Markdown、解释或正文。`,
-        prompt: `<导演任务>\n${taskInstruction}\n\n<内置规划风格>\n名称：${preset.name}\n说明：${preset.description}\n规划规则：${preset.rules}\n节奏曲线：${preset.paceCurve}\n</内置规划风格>\n\n<用户自定义要求>\n${compactText(customBrief, 30000) || '无'}\n</用户自定义要求>\n\n<推进设置>\n模式：${pacingMode}\n自定义节奏：${compactText(pacingCustom, 10000) || '无'}\n主线：${director.toggles.mainline ? '启用' : '关闭'}\n分支：${director.toggles.branch ? '启用' : '关闭'}\n推进速度：${director.toggles.pacing ? '启用' : '关闭'}\n伏笔：${director.toggles.foreshadow ? '启用' : '关闭'}\n新角色：${director.toggles.newCharacters ? '允许' : '禁止'}\n额外支线：${director.toggles.sidePlots ? '允许' : '禁止'}\n</推进设置>\n\n<已发生记忆>\n${stringifyState(memory) || '无'}\n</已发生记忆>\n\n<最近正文>\n${compactText(recentText, 30000) || '无'}\n</最近正文>\n\n<当前主线>\n${currentPlan}\n</当前主线>\n\n<当前分支>\n${branch}\n</当前分支>\n\n<输出字段>\nlongline：{title, premise, ending, arcs:[{id,title,goal,conflict,pacing,estimatedTurns,beats:[{id,goal,allowed,forbidden,completion,pace}]}], characterArcs, constraints}\nbranches：[{id,title,summary,reason,consequences,risks,estimatedTurns}]\nforeshadows：[{id,name,surface,meaning,signals,knowers,earliestReveal,targetArc,status}]\nprogress：{beatCompleted,completedGoals,remainingGoals,triggeredForeshadows,recommendedPace,confidence,nextBeatId}\n</输出字段>`,
+        prompt: `<导演任务>\n${taskInstruction}\n\n<内置规划风格>\n名称：${preset.name}\n说明：${preset.description}\n规划规则：${preset.rules}\n节奏曲线：${preset.paceCurve}\n</内置规划风格>\n\n<用户自定义要求>\n${compactText(customBrief, 30000) || '无'}\n</用户自定义要求>\n\n<推进设置>\n模式：${pacingMode}\n自定义节奏：${compactText(pacingCustom, 10000) || '无'}\n主线：${director.toggles.mainline ? '启用' : '关闭'}\n分支：${director.toggles.branch ? '启用' : '关闭'}\n推进速度：${director.toggles.pacing ? '启用' : '关闭'}\n伏笔：${director.toggles.foreshadow ? '启用' : '关闭'}\n新角色：${director.toggles.newCharacters ? '允许' : '禁止'}\n额外支线：${director.toggles.sidePlots ? '允许' : '禁止'}\n</推进设置>\n\n<故事日历>\n${calendarContext?.cardText || '未启用或暂无日历提醒。'}\n日历日期只是创作参考；如果与正文因果、人物认知或角色卡冲突，以正文为准。\n</故事日历>\n\n<角色卡背景>\n${compactText(characterCard, 16000) || '无'}\n</角色卡背景>\n\n<已发生记忆>\n${stringifyState(memory) || '无'}\n</已发生记忆>\n\n<最近正文>\n${compactText(recentText, 30000) || '无'}\n</最近正文>\n\n<当前主线>\n${currentPlan}\n</当前主线>\n\n<当前分支>\n${branch}\n</当前分支>\n\n<输出字段>\nlongline：{title, premise, ending, arcs:[{id,title,goal,conflict,pacing,estimatedTurns,beats:[{id,goal,allowed,forbidden,completion,pace}]}], characterArcs, constraints}\nbranches：[{id,title,summary,reason,consequences,risks,estimatedTurns}]\nforeshadows：[{id,name,surface,meaning,signals,knowers,earliestReveal,targetArc,status}]\nprogress：{beatCompleted,completedGoals,remainingGoals,triggeredForeshadows,recommendedPace,confidence,nextBeatId}\n</输出字段>`,
     };
 }
 
@@ -297,7 +300,7 @@ function pacingInstruction(director, arc, beat) {
     return `推进速度：${mode}`;
 }
 
-export function buildExecutionCard({ directorState, memoryState, recentText = '' }) {
+export function buildExecutionCard({ directorState, memoryState, recentText = '', calendarContext = null }) {
     const director = normalizeDirectorState(directorState);
     if (!director.enabled) return '';
     const { arc, beat } = activeBeat(director);
@@ -310,6 +313,7 @@ export function buildExecutionCard({ directorState, memoryState, recentText = ''
         director.toggles.pacing ? `【本轮推进】\n${pacingInstruction(director, arc, beat)}\n${beat ? `节拍目标：${beat.goal}\n允许：${beat.allowed.join('；') || '自然推进'}\n完成条件：${beat.completion.join('；') || '以正文实际发展为准'}\n禁止提前发生：${beat.forbidden.join('；') || '不要跨越未完成节拍'}` : '当前没有锁定节拍，请保持自然推进。'}` : '',
         director.toggles.branch && branch ? `【当前分支】\n${branch.title}\n${branch.summary}\n预期后果：${branch.consequences.join('；') || '以正文实际发展为准'}` : '',
         director.toggles.foreshadow ? `【本轮可使用的伏笔】\n${director.foreshadows.filter(item => ['planned', 'seeded', 'reinforced'].includes(item.status)).slice(0, 8).map(item => `- ${item.name}：${item.surface}${item.targetArc ? `（目标阶段：${item.targetArc}）` : ''}`).join('\n') || '无；不要凭空添加伏笔。'}` : '',
+        calendarContext?.cardText ? `${calendarContext.cardText}\n日历事件只是可选的剧情背景或提醒，不是已发生事实；若不合适就忽略，不得强行触发。` : '',
         !director.toggles.newCharacters ? '【限制】本轮不得引入新角色。' : '',
         !director.toggles.sidePlots ? '【限制】本轮不得开启额外支线。' : '',
         memoryState?.recap ? `【记忆锚点】\n${compactText(memoryState.recap, 4000)}` : '',

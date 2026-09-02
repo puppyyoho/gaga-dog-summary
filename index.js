@@ -53,6 +53,12 @@ import {
     selectBranch,
 } from './director-core.js';
 import {
+    buildCalendarContext,
+    createEmptyCalendarState,
+    normalizeCalendarEvent,
+    normalizeCalendarState,
+} from './calendar-core.js';
+import {
     buildReplyPrompt,
     createEmptyReplyState,
     normalizeReplyState,
@@ -75,7 +81,7 @@ const INJECTION_ID = `${EXTENSION_NAME}:memory`;
 const DIRECTOR_INJECTION_ID = `${EXTENSION_NAME}:director`;
 const PANEL_LOGO_URL = new URL('./assets/gaga-dog-logo.png', import.meta.url).href;
 const FLOATING_LOGO_URL = new URL('./assets/gaga-dog-floating.png', import.meta.url).href;
-const VERSION = '0.2.0';
+const VERSION = '0.2.1';
 const SETTINGS_VERSION = 5;
 
 const DEFAULT_SETTINGS = {
@@ -776,6 +782,28 @@ function userPersonaText(ctx) {
     return String(ctx?.persona || ctx?.userPersona || ctx?.name1 || '').trim();
 }
 
+function characterCardText(ctx) {
+    const character = ctx?.character || ctx?.char || ctx?.characters?.[ctx?.characterId] || null;
+    const data = character?.data || character;
+    return compactText([
+        data?.name || ctx?.name2 ? `角色名：${data?.name || ctx?.name2}` : '',
+        data?.description || data?.desc || ctx?.characterDescription || ctx?.description || '',
+        data?.personality ? `性格：${data.personality}` : '',
+        data?.scenario ? `场景：${data.scenario}` : '',
+        data?.first_mes ? `开场：${data.first_mes}` : '',
+    ].filter(Boolean).join('\n'), 24000);
+}
+
+function calendarContextFor(ctx, director = getDirectorState(ctx), recentCount = 12) {
+    const state = getChatState(ctx);
+    return buildCalendarContext({
+        calendarState: normalizeCalendarState(director?.calendar || createEmptyCalendarState()),
+        recentText: recentStoryText(ctx, recentCount),
+        memoryText: [savedRecap(state), ...state.facts.slice(-20).map(item => item.text)].filter(Boolean).join('\n'),
+        characterCard: characterCardText(ctx),
+    });
+}
+
 async function saveChatStateAndRefresh(ctx, state) {
     setChatState(state, ctx);
     await saveChat(ctx);
@@ -789,10 +817,13 @@ async function runDirectorTask(ctx, task) {
     }
     const settings = getSettings(ctx);
     const previous = getDirectorState(ctx);
+    const calendarContext = calendarContextFor(ctx, previous, task === 'longline' ? 18 : 10);
     const prompt = buildDirectorPrompt({
         task,
         memory: getChatState(ctx),
         recentText: recentStoryText(ctx, task === 'longline' ? 18 : 10),
+        characterCard: characterCardText(ctx),
+        calendarContext,
         state: previous,
         presetId: previous.presetId,
         customBrief: previous.customBrief,
@@ -851,10 +882,12 @@ function stopDirectorTask() {
 async function updateDirectorInjection(ctx = getContext()) {
     const state = getChatState(ctx);
     const director = normalizeDirectorState(state.director || createEmptyDirectorState());
+    const calendarContext = calendarContextFor(ctx, director, 8);
     const card = buildExecutionCard({
         directorState: director,
         memoryState: state,
         recentText: recentStoryText(ctx, 6),
+        calendarContext,
     });
     if (typeof ctx.setExtensionPrompt === 'function') {
         await ctx.setExtensionPrompt(DIRECTOR_INJECTION_ID, card, 1, 0, false, 0);
@@ -870,10 +903,13 @@ async function trackDirectorProgress(ctx = getContext()) {
     const settings = getSettings(ctx);
     const director = getDirectorState(ctx);
     if (!director.enabled || !director.toggles.autoTrack || !director.currentBeatId || runtime.directorBusy) return null;
+    const calendarContext = calendarContextFor(ctx, director, 6);
     const prompt = buildDirectorPrompt({
         task: 'progress',
         memory: getChatState(ctx),
         recentText: recentStoryText(ctx, 3),
+        characterCard: characterCardText(ctx),
+        calendarContext,
         state: director,
         presetId: director.presetId,
         customBrief: director.customBrief,
@@ -927,10 +963,11 @@ async function runReplyTask(ctx) {
     const state = getChatState(ctx);
     const reply = getReplyState(ctx);
     const director = getDirectorState(ctx);
+    const calendarContext = calendarContextFor(ctx, director, 8);
     const prompt = buildReplyPrompt({
         recentText: recentStoryText(ctx, 10),
         memory: state,
-        directorCard: reply.followDirector ? buildExecutionCard({ directorState: director, memoryState: state, recentText: recentStoryText(ctx, 4) }) : '',
+        directorCard: reply.followDirector ? buildExecutionCard({ directorState: director, memoryState: state, recentText: recentStoryText(ctx, 4), calendarContext }) : '',
         userPersona: userPersonaText(ctx),
         userName: String(ctx?.name1 || '用户'),
         characterName: String(ctx?.name2 || '角色'),
@@ -1316,6 +1353,18 @@ function renderDirectorForeshadows(director) {
     return items.map(item => `<article class="gds-foreshadow-card"><strong>${escapeHtml(item.name)}</strong><span>${escapeHtml(item.status)}</span><p>${escapeHtml(item.surface)}</p><small>真实含义：${escapeHtml(item.meaning || '待补充')}</small></article>`).join('');
 }
 
+function renderCalendarEvents(calendar, context) {
+    const alerts = context?.alerts || [];
+    const alertHtml = alerts.length
+        ? alerts.slice(0, 8).map(item => `<article class="gds-calendar-alert ${item.isToday ? 'today' : ''}"><strong>${escapeHtml(item.title)}</strong><span>${escapeHtml(item.date)} · ${escapeHtml(item.phase)} · ${item.isToday ? '今天' : item.daysUntil > 0 ? `${item.daysUntil}天后` : `${Math.abs(item.daysUntil)}天前`}</span><p>${escapeHtml(item.plotHook || item.note || '可作为剧情背景提醒，是否采用由正文因果决定。')}</p></article>`).join('')
+        : '<div class="gds-empty">当前日期附近没有日历提醒。</div>';
+    const custom = Array.isArray(calendar?.events) ? calendar.events : [];
+    const eventHtml = custom.length
+        ? custom.map(item => `<article class="gds-calendar-event"><div><strong>${escapeHtml(item.title)}</strong><span>${escapeHtml(item.kind)} · ${item.dateRule === 'cycle' ? `每 ${item.recurrence.cycleDays} 天，持续 ${item.recurrence.durationDays} 天` : escapeHtml(item.date || item.startDate || '未设日期')}</span></div><small>${escapeHtml(item.plotHook || item.note || '无剧情提示')}</small><button data-gds-calendar-remove="${escapeHtml(item.id)}" title="删除事件">删除</button></article>`).join('')
+        : '<div class="gds-empty">还没有自定义事件。可以添加纪念日、生日、周期事件或剧情期限。</div>';
+    return `<div class="gds-calendar-context"><strong>故事日期：${escapeHtml(context?.date || '未识别')}</strong><span>来源：${escapeHtml(context?.source || '自动')} · 置信度：${escapeHtml(context?.confidence || 'unknown')}</span>${context?.evidence ? `<small>依据：${escapeHtml(context.evidence)}</small>` : ''}</div><div class="gds-calendar-alerts"><h5>近期提醒</h5>${alertHtml}</div><div class="gds-calendar-events"><h5>自定义事件</h5>${eventHtml}</div>`;
+}
+
 function renderReplyCandidates(candidates) {
     if (!Array.isArray(candidates) || !candidates.length) return '<div class="gds-empty">还没有待写回复。点击“生成五个候选”。</div>';
     return candidates.map((item, index) => `<article class="gds-reply-card"><div class="gds-reply-card-head"><strong>${escapeHtml(item.title || `候选 ${index + 1}`)}</strong><small>${escapeHtml(item.intent || '')}</small></div><textarea readonly data-gds-reply-text="${escapeHtml(item.id)}">${escapeHtml(item.text)}</textarea><p>${escapeHtml(item.possibleEffect || '')}</p><div><button data-gds-reply-copy="${escapeHtml(item.id)}">复制</button><button class="gds-primary" data-gds-reply-insert="${escapeHtml(item.id)}">放入编辑栏</button></div></article>`).join('');
@@ -1426,6 +1475,7 @@ function setActiveTab(tab = 'memory') {
 function updateDirectorFromUi(ctx) {
     const current = getDirectorState(ctx);
     const overlay = runtime.overlay;
+    const currentCalendar = normalizeCalendarState(current.calendar || createEmptyCalendarState());
     const next = normalizeDirectorState({
         ...current,
         enabled: Boolean(overlay.querySelector('[data-gds-director-enabled]')?.checked),
@@ -1434,10 +1484,70 @@ function updateDirectorFromUi(ctx) {
         pacingCustom: overlay.querySelector('[data-gds-director-pacing-custom]')?.value || '',
         customBrief: overlay.querySelector('[data-gds-director-brief]')?.value || '',
         toggles: Object.fromEntries(Object.keys(current.toggles).map(key => [key, Boolean(overlay.querySelector(`[data-gds-director-toggle="${key}"]`)?.checked)])),
+        calendar: {
+            ...currentCalendar,
+            enabled: Boolean(overlay.querySelector('[data-gds-calendar-enabled]')?.checked),
+            builtinsEnabled: Boolean(overlay.querySelector('[data-gds-calendar-builtins]')?.checked),
+            autoAdvance: Boolean(overlay.querySelector('[data-gds-calendar-auto-advance]')?.checked),
+            reminderWindowDays: Math.max(0, Number(overlay.querySelector('[data-gds-calendar-window]')?.value || currentCalendar.reminderWindowDays) || 0),
+            worldDate: String(overlay.querySelector('[data-gds-calendar-world-date]')?.value || currentCalendar.worldDate || '').trim(),
+        },
     });
     saveDirectorState(ctx, next);
     saveSettings(ctx);
     return next;
+}
+
+function addCalendarEventFromUi(ctx) {
+    const overlay = runtime.overlay;
+    const calendar = normalizeCalendarState(getDirectorState(ctx).calendar);
+    const title = String(overlay.querySelector('[data-gds-calendar-title]')?.value || '').trim();
+    if (!title) throw new Error('请先填写日历事件名称。');
+    const kind = overlay.querySelector('[data-gds-calendar-kind]')?.value || 'custom';
+    const dateRule = overlay.querySelector('[data-gds-calendar-rule]')?.value || 'once';
+    const date = String(overlay.querySelector('[data-gds-calendar-date]')?.value || '').trim();
+    const cycleDays = Number(overlay.querySelector('[data-gds-calendar-cycle]')?.value || 28) || 28;
+    const durationDays = Number(overlay.querySelector('[data-gds-calendar-duration]')?.value || 5) || 5;
+    const plotHook = String(overlay.querySelector('[data-gds-calendar-hook]')?.value || '').trim();
+    const event = normalizeCalendarEvent({
+        id: `calendar_${Date.now()}`,
+        title,
+        kind,
+        dateRule,
+        date,
+        recurrence: { anchorDate: dateRule === 'cycle' ? date : '', cycleDays, durationDays },
+        plotHook,
+        source: 'user',
+        remindDays: calendar.reminderWindowDays,
+    });
+    if ((dateRule === 'once' || dateRule === 'annual' || dateRule === 'cycle') && !event.date && dateRule !== 'cycle') throw new Error('请填写有效日期。');
+    if (dateRule === 'cycle' && !event.recurrence.anchorDate) throw new Error('周期事件需要填写起始日期。');
+    const next = normalizeDirectorState({ ...getDirectorState(ctx), calendar: { ...calendar, events: [...calendar.events, event] } });
+    saveDirectorState(ctx, next);
+    for (const selector of ['[data-gds-calendar-title]', '[data-gds-calendar-date]', '[data-gds-calendar-hook]']) {
+        const node = overlay.querySelector(selector);
+        if (node) node.value = '';
+    }
+    return next;
+}
+
+async function removeCalendarEvent(ctx, eventId) {
+    const director = getDirectorState(ctx);
+    const calendar = normalizeCalendarState(director.calendar);
+    const next = normalizeDirectorState({ ...director, calendar: { ...calendar, events: calendar.events.filter(item => item.id !== String(eventId || '')) } });
+    await saveChatStateAndRefresh(ctx, { ...getChatState(ctx), director: next });
+    await updateDirectorInjection(ctx);
+}
+
+async function syncCalendarFromStory(ctx) {
+    const director = getDirectorState(ctx);
+    const state = getChatState(ctx);
+    const context = calendarContextFor(ctx, director, 14);
+    const next = normalizeDirectorState({ ...director, calendar: { ...normalizeCalendarState(director.calendar), dateSource: context.source, dateConfidence: context.confidence, dateEvidence: context.evidence, lastSyncedAt: Date.now() } });
+    await saveChatStateAndRefresh(ctx, { ...state, director: next });
+    await updateDirectorInjection(ctx);
+    notify('success', `已从角色卡与正文读取日期：${context.date}（${context.source}）。`);
+    return context;
 }
 
 function updateReplyFromUi(ctx) {
@@ -1479,6 +1589,8 @@ function refreshUi() {
     const recap = savedRecap(chatState);
     const director = getDirectorState(ctx);
     const reply = getReplyState(ctx);
+    const calendar = normalizeCalendarState(director.calendar || createEmptyCalendarState());
+    const calendarContext = calendarContextFor(ctx, director, 10);
     if (recap && !chatState.recap.trim()) {
         chatState.recap = recap;
         setChatState(chatState, ctx);
@@ -1571,6 +1683,18 @@ function refreshUi() {
     if (branchList) branchList.innerHTML = renderDirectorBranches(director);
     const foreshadowList = runtime.overlay.querySelector('[data-gds-director-foreshadows]');
     if (foreshadowList) foreshadowList.innerHTML = renderDirectorForeshadows(director);
+    const calendarEnabled = runtime.overlay.querySelector('[data-gds-calendar-enabled]');
+    const calendarBuiltins = runtime.overlay.querySelector('[data-gds-calendar-builtins]');
+    const calendarAutoAdvance = runtime.overlay.querySelector('[data-gds-calendar-auto-advance]');
+    const calendarWindow = runtime.overlay.querySelector('[data-gds-calendar-window]');
+    const calendarWorldDate = runtime.overlay.querySelector('[data-gds-calendar-world-date]');
+    if (calendarEnabled) calendarEnabled.checked = Boolean(calendar.enabled);
+    if (calendarBuiltins) calendarBuiltins.checked = Boolean(calendar.builtinsEnabled);
+    if (calendarAutoAdvance) calendarAutoAdvance.checked = Boolean(calendar.autoAdvance);
+    if (calendarWindow && document.activeElement !== calendarWindow) calendarWindow.value = calendar.reminderWindowDays;
+    if (calendarWorldDate && document.activeElement !== calendarWorldDate) calendarWorldDate.value = calendar.worldDate || '';
+    const calendarOutput = runtime.overlay.querySelector('[data-gds-calendar-output]');
+    if (calendarOutput) calendarOutput.innerHTML = renderCalendarEvents(calendar, calendarContext);
     const replyViewpoint = runtime.overlay.querySelector('[data-gds-reply-viewpoint]');
     const replyDetail = runtime.overlay.querySelector('[data-gds-reply-detail]');
     const replyLength = runtime.overlay.querySelector('[data-gds-reply-length]');
@@ -1874,6 +1998,17 @@ function createUi() {
                 <div class="gds-director-block"><h4>当前主线</h4><div data-gds-director-plan></div></div>
                 <div class="gds-director-block"><h4>分支候选</h4><div data-gds-director-branches></div></div>
                 <div class="gds-director-block"><h4>伏笔管理</h4><div data-gds-director-foreshadows></div></div>
+                <div class="gds-director-block gds-calendar-block"><div class="gds-section-title"><div><h4>故事日历</h4><p>按角色卡与正文识别故事日期；提醒只提供可选背景，不会擅自改写剧情。</p></div><button data-gds-calendar-sync>从角色卡与正文同步日期</button></div>
+                    <div class="gds-settings-grid gds-calendar-settings">
+                        <label class="gds-toggle-row"><input type="checkbox" data-gds-calendar-enabled><span>启用故事日历</span></label>
+                        <label class="gds-toggle-row"><input type="checkbox" data-gds-calendar-builtins><span>内置节日与节气</span></label>
+                        <label class="gds-toggle-row"><input type="checkbox" data-gds-calendar-auto-advance><span>临近时给导演推进建议</span></label>
+                        <label>提醒提前天数 <input type="number" min="0" max="30" data-gds-calendar-window></label>
+                        <label>故事当前日期（留空自动读取） <input type="date" data-gds-calendar-world-date></label>
+                    </div>
+                    <div class="gds-calendar-add"><strong>添加自定义事件</strong><div class="gds-settings-grid"><label>名称 <input type="text" data-gds-calendar-title placeholder="纪念日、生日、生理期……"></label><label>类型 <select data-gds-calendar-kind><option value="anniversary">纪念日</option><option value="period">生理期</option><option value="birthday">生日</option><option value="deadline">剧情期限</option><option value="custom">其他</option></select></label><label>规则 <select data-gds-calendar-rule><option value="once">一次性日期</option><option value="annual">每年同日</option><option value="cycle">周期事件</option></select></label><label>日期／起始日 <input type="date" data-gds-calendar-date></label><label>周期天数 <input type="number" min="1" max="366" value="28" data-gds-calendar-cycle></label><label>持续天数 <input type="number" min="1" max="60" value="5" data-gds-calendar-duration></label></div><label class="gds-field gds-wide">剧情提示（可留空）<input type="text" data-gds-calendar-hook placeholder="例如：只在关系自然合适时提醒一次，不要强行触发"></label><button data-gds-calendar-add>添加到日历</button></div>
+                    <div data-gds-calendar-output></div>
+                </div>
             </section>
             <section class="gds-tab-content" data-gds-tab-panel="reply" hidden>
                 <div class="gds-section-title"><div><h3>待写回复</h3><p>生成五种不同策略的用户回复，选择后放入酒馆编辑栏，不会自动发送。</p></div><button data-gds-reply-stop hidden>中断代写</button></div>
@@ -1911,7 +2046,7 @@ function createUi() {
     bindFloatingDrag(floating);
 
     overlay.addEventListener('click', async event => {
-        const target = event.target.closest('[data-gds-tab],[data-gds-close],[data-gds-summarize],[data-gds-continue],[data-gds-stop],[data-gds-rebuild],[data-gds-restore],[data-gds-save-summary],[data-gds-api-save],[data-gds-api-test],[data-gds-director-longline],[data-gds-director-branch],[data-gds-director-foreshadow],[data-gds-director-save],[data-gds-director-lock],[data-gds-director-select-branch],[data-gds-director-stop],[data-gds-reply-generate],[data-gds-reply-copy],[data-gds-reply-insert],[data-gds-reply-stop]');
+        const target = event.target.closest('[data-gds-tab],[data-gds-close],[data-gds-summarize],[data-gds-continue],[data-gds-stop],[data-gds-rebuild],[data-gds-restore],[data-gds-save-summary],[data-gds-api-save],[data-gds-api-test],[data-gds-director-longline],[data-gds-director-branch],[data-gds-director-foreshadow],[data-gds-director-save],[data-gds-director-lock],[data-gds-director-select-branch],[data-gds-director-stop],[data-gds-calendar-add],[data-gds-calendar-remove],[data-gds-calendar-sync],[data-gds-reply-generate],[data-gds-reply-copy],[data-gds-reply-insert],[data-gds-reply-stop]');
         if (!target) return;
         try {
             if (target.matches('[data-gds-tab]')) {
@@ -1970,6 +2105,15 @@ function createUi() {
                 notify('success', '当前分支已采用。');
             }
             if (target.matches('[data-gds-director-stop]')) stopDirectorTask();
+            if (target.matches('[data-gds-calendar-add]')) {
+                const ctx = getContext();
+                updateDirectorFromUi(ctx);
+                await saveChatStateAndRefresh(ctx, { ...getChatState(ctx), director: addCalendarEventFromUi(ctx) });
+                await updateDirectorInjection(ctx);
+                notify('success', '日历事件已添加。');
+            }
+            if (target.matches('[data-gds-calendar-remove]')) await removeCalendarEvent(getContext(), target.dataset.gdsCalendarRemove);
+            if (target.matches('[data-gds-calendar-sync]')) await syncCalendarFromStory(getContext());
             if (target.matches('[data-gds-reply-generate]')) {
                 updateReplyFromUi(getContext());
                 await runReplyTask(getContext());
@@ -1998,7 +2142,7 @@ function createUi() {
         refreshUi();
     });
 
-    for (const input of overlay.querySelectorAll('input[data-gds-auto],input[data-gds-hide],input[data-gds-collapse],input[data-gds-stream],input[data-gds-trigger],input[data-gds-keep],input[data-gds-injection],input[data-gds-words],select[data-gds-summary-mode],select[data-gds-provider],input[data-gds-director-enabled],select[data-gds-director-preset],select[data-gds-director-pacing],input[data-gds-director-pacing-custom],input[data-gds-director-toggle],input[data-gds-reply-follow],select[data-gds-reply-viewpoint],select[data-gds-reply-detail],select[data-gds-reply-length],select[data-gds-reply-initiative],input[data-gds-reply-tone]')) {
+    for (const input of overlay.querySelectorAll('input[data-gds-auto],input[data-gds-hide],input[data-gds-collapse],input[data-gds-stream],input[data-gds-trigger],input[data-gds-keep],input[data-gds-injection],input[data-gds-words],select[data-gds-summary-mode],select[data-gds-provider],input[data-gds-director-enabled],select[data-gds-director-preset],select[data-gds-director-pacing],input[data-gds-director-pacing-custom],input[data-gds-director-toggle],input[data-gds-calendar-enabled],input[data-gds-calendar-builtins],input[data-gds-calendar-auto-advance],input[data-gds-calendar-window],input[data-gds-calendar-world-date],input[data-gds-reply-follow],select[data-gds-reply-viewpoint],select[data-gds-reply-detail],select[data-gds-reply-length],select[data-gds-reply-initiative],input[data-gds-reply-tone]')) {
         input.addEventListener('change', () => {
             const ctx = getContext();
             const settings = getSettings(ctx);
@@ -2032,7 +2176,7 @@ function createUi() {
                     refreshUi();
                 }
             }
-            if (input.matches('[data-gds-director-enabled],[data-gds-director-preset],[data-gds-director-pacing],[data-gds-director-pacing-custom],input[data-gds-director-toggle]')) {
+            if (input.matches('[data-gds-director-enabled],[data-gds-director-preset],[data-gds-director-pacing],[data-gds-director-pacing-custom],input[data-gds-director-toggle],[data-gds-calendar-enabled],[data-gds-calendar-builtins],[data-gds-calendar-auto-advance],[data-gds-calendar-window],[data-gds-calendar-world-date]')) {
                 updateDirectorFromUi(ctx);
                 updateDirectorInjection(ctx).catch(console.error);
                 saveChat(ctx).catch(console.error);
@@ -2043,7 +2187,7 @@ function createUi() {
             }
             ctx.extensionSettings[SETTINGS_KEY] = settings;
             saveSettings(ctx);
-            if (!input.matches('[data-gds-director-enabled],[data-gds-director-preset],[data-gds-director-pacing],[data-gds-director-pacing-custom],input[data-gds-director-toggle],[data-gds-reply-follow],[data-gds-reply-viewpoint],[data-gds-reply-detail],[data-gds-reply-length],[data-gds-reply-initiative],[data-gds-reply-tone],[data-gds-provider]')) applyInjection(ctx, getChatState(ctx), settings).then(refreshUi).catch(console.error);
+            if (!input.matches('[data-gds-director-enabled],[data-gds-director-preset],[data-gds-director-pacing],[data-gds-director-pacing-custom],input[data-gds-director-toggle],[data-gds-calendar-enabled],[data-gds-calendar-builtins],[data-gds-calendar-auto-advance],[data-gds-calendar-window],[data-gds-calendar-world-date],[data-gds-reply-follow],[data-gds-reply-viewpoint],[data-gds-reply-detail],[data-gds-reply-length],[data-gds-reply-initiative],[data-gds-reply-tone],[data-gds-provider]')) applyInjection(ctx, getChatState(ctx), settings).then(refreshUi).catch(console.error);
             else refreshUi();
         });
     }

@@ -208,6 +208,27 @@ body.gds-panel-open { overflow: hidden !important; }
 .gds-reply-card textarea { box-sizing: border-box; width: 100%; min-height: 90px; margin: 8px 0; resize: vertical; border: 1px solid var(--gds-line); border-radius: 9px; padding: 9px; color: var(--gds-ink); background: #fffafd; font: inherit; line-height: 1.55; }
 .gds-reply-card p { margin: 0 0 8px; color: var(--gds-muted); font-size: 12px; }
 .gds-reply-card > div:last-child { display: flex; flex-wrap: wrap; gap: 7px; }
+.gds-calendar-block .gds-section-title { align-items: center; }
+.gds-calendar-block .gds-section-title h4 { margin: 0; }
+.gds-calendar-settings { max-width: none; padding: 9px 0 12px; }
+.gds-calendar-settings input[type="date"] { width: 150px; max-width: 48%; box-sizing: border-box; border: 1px solid var(--gds-line); border-radius: 7px; padding: 5px 7px; color: var(--gds-ink); background: #fff; }
+.gds-calendar-add { border: 1px dashed var(--gds-line); border-radius: 10px; padding: 10px 12px; margin: 4px 0 12px; }
+.gds-calendar-add > strong { color: var(--gds-pink-deep); font-size: 13px; }
+.gds-calendar-add .gds-settings-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); max-width: none; margin: 0; padding: 9px 0; gap: 9px; }
+.gds-calendar-add label { display: flex; flex-direction: column; align-items: stretch; gap: 4px; }
+.gds-calendar-add input, .gds-calendar-add select { box-sizing: border-box; width: 100%; min-width: 0; border: 1px solid var(--gds-line); border-radius: 7px; padding: 6px 7px; color: var(--gds-ink); background: #fff; font: inherit; }
+.gds-calendar-add .gds-field { margin: 0 0 8px; }
+.gds-calendar-context { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 12px; padding: 8px 10px; border-radius: 9px; background: rgba(255, 236, 246, .55); color: var(--gds-pink-deep); }
+.gds-calendar-context span, .gds-calendar-context small { color: var(--gds-muted); font-size: 11px; }
+.gds-calendar-context small { flex-basis: 100%; }
+.gds-calendar-alerts, .gds-calendar-events { margin-top: 10px; }
+.gds-calendar-alerts h5, .gds-calendar-events h5 { margin: 0 0 6px; color: var(--gds-muted); font-size: 12px; }
+.gds-calendar-alert, .gds-calendar-event { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 8px; align-items: baseline; padding: 8px 10px; border-bottom: 1px dashed var(--gds-line); }
+.gds-calendar-alert.today { background: rgba(255, 210, 230, .38); border-radius: 8px; }
+.gds-calendar-alert strong, .gds-calendar-event strong { color: var(--gds-ink); }
+.gds-calendar-alert span, .gds-calendar-event span { color: var(--gds-muted); font-size: 11px; }
+.gds-calendar-alert p, .gds-calendar-event small { grid-column: 1 / -1; margin: 2px 0 0; color: var(--gds-muted); font-size: 11px; line-height: 1.4; }
+.gds-calendar-event button { grid-row: 1 / span 2; grid-column: 2; border: 0; background: transparent; color: var(--gds-pink-deep); cursor: pointer; font: inherit; font-size: 11px; }
 .gds-provider-grid { max-width: none; grid-template-columns: repeat(3, minmax(0, 1fr)); column-gap: 10px; }
 .gds-provider-grid label { display: flex; flex-direction: column; align-items: stretch; gap: 5px; }
 .gds-provider-grid select, .gds-api-form input, .gds-api-form select, .gds-director-settings select, .gds-director-settings input[type="text"], .gds-reply-settings select, .gds-reply-settings input[type="text"] { box-sizing: border-box; min-width: 0; width: 100%; border: 1px solid var(--gds-line); border-radius: 8px; background: white; color: var(--gds-ink); padding: 7px 8px; font: inherit; }
@@ -448,6 +469,11 @@ body.gds-panel-open { overflow: hidden !important; }
     .gds-provider-grid select, .gds-api-form input, .gds-api-form select { max-width: none; }
     .gds-director-actions { display: grid; grid-template-columns: 1fr; }
     .gds-director-actions button, .gds-api-form button { width: 100%; min-height: 40px; }
+    .gds-calendar-block .gds-section-title { display: block; }
+    .gds-calendar-block .gds-section-title button { width: 100%; margin-top: 8px; min-height: 38px; }
+    .gds-calendar-add .gds-settings-grid { grid-template-columns: 1fr; }
+    .gds-calendar-add input, .gds-calendar-add select { width: 100%; max-width: none !important; }
+    .gds-calendar-settings input[type="date"] { max-width: 48%; }
     .gds-wide { grid-column: auto; }
     .gds-checkpoint { grid-template-columns: 1fr; gap: 4px; }
     .gds-footer { flex-direction: column; padding: 16px 14px max(18px, env(safe-area-inset-bottom, 0px)); }

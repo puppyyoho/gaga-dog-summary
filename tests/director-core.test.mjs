@@ -28,6 +28,7 @@ test('ships built-in director styles and embeds custom pacing requirements', () 
     assert.match(request.prompt, /破镜重圆/);
     assert.match(request.prompt, /前两阶段各 6 轮/);
     assert.match(request.prompt, /结局 HE/);
+    assert.match(request.prompt, /故事日历/);
 });
 
 test('keeps future plans separate from factual memory and builds a bounded execution card', () => {
@@ -46,6 +47,17 @@ test('keeps future plans separate from factual memory and builds a bounded execu
     assert.match(card, /不要跨越未完成的节拍/);
     assert.match(card, /旧钥匙/);
     assert.doesNotMatch(card, /未来计划是事实/);
+});
+
+test('keeps calendar reminders out of factual memory and marks them as optional', () => {
+    const state = createEmptyDirectorState();
+    state.enabled = true;
+    const card = buildExecutionCard({
+        directorState: state,
+        calendarContext: { cardText: '【故事日历】当前日期：2026-02-17\n临近事件：- 春节（今天）' },
+    });
+    assert.match(card, /春节/);
+    assert.match(card, /不是已发生事实/);
 });
 
 test('normalizes, locks, selects branches and advances beats without mutating facts', () => {
