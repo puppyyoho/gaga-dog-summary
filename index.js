@@ -81,7 +81,7 @@ const INJECTION_ID = `${EXTENSION_NAME}:memory`;
 const DIRECTOR_INJECTION_ID = `${EXTENSION_NAME}:director`;
 const PANEL_LOGO_URL = new URL('./assets/gaga-dog-logo.png', import.meta.url).href;
 const FLOATING_LOGO_URL = new URL('./assets/gaga-dog-floating.png', import.meta.url).href;
-const VERSION = '0.3.9';
+const VERSION = '0.3.10';
 const SETTINGS_VERSION = 5;
 
 const DEFAULT_SETTINGS = {
@@ -1627,13 +1627,36 @@ function syncApiFormFromSelectedProvider(ctx) {
     return syncApiFormFromProvider(ctx, preferred || 'director');
 }
 
+function selectedProviderForModule(ctx, moduleName) {
+    const overlay = runtime.overlay;
+    if (!overlay || !['memory', 'director', 'reply'].includes(moduleName)) return { choice: PROVIDER_CURRENT, profile: { kind: PROVIDER_CURRENT, name: '当前酒馆连接' } };
+    const select = overlay.querySelector(`[data-gds-provider="${moduleName}"]`);
+    const choice = String(select?.value || getSettings(ctx).moduleConnections?.[moduleName] || PROVIDER_CURRENT);
+    const settings = getSettings(ctx);
+    const profile = resolveModuleProvider({
+        ...settings,
+        moduleConnections: { ...settings.moduleConnections, [moduleName]: choice },
+    }, moduleName, ctx);
+    return { choice, profile };
+}
+
 async function saveApiProfileFromUi(ctx) {
     const overlay = runtime.overlay;
     const name = String(overlay.querySelector('[data-gds-api-name]')?.value || '').trim();
     const baseUrl = String(overlay.querySelector('[data-gds-api-url]')?.value || '').trim();
     const apiKey = String(overlay.querySelector('[data-gds-api-key]')?.value || '');
     const model = String(overlay.querySelector('[data-gds-api-model]')?.value || '').trim();
-    if (!baseUrl || !model) throw new Error('请先填写独立 API URL 和模型名。');
+    const moduleName = overlay.querySelector('[data-gds-api-module]')?.value || 'director';
+    const selected = selectedProviderForModule(ctx, moduleName);
+    if (selected.profile.kind === 'connection') {
+        const settings = getSettings(ctx);
+        settings.moduleConnections[moduleName] = selected.choice;
+        ctx.extensionSettings[SETTINGS_KEY] = settings;
+        saveSettings(ctx);
+        notify('success', `已直接绑定酒馆连接到${moduleName === 'memory' ? '剧情记忆' : moduleName === 'director' ? '情节导演' : '代写回复'}，不需要重复填写模型名。`);
+        return;
+    }
+    if (!baseUrl || !model) throw new Error('请先填写独立 API URL 和模型名，或先选择一个酒馆连接。');
     const id = `custom_${Date.now()}`;
     const profile = {
         id,
@@ -1648,7 +1671,6 @@ async function saveApiProfileFromUi(ctx) {
     };
     const settings = getSettings(ctx);
     settings.apiProfiles = [...normalizeProviderProfiles(settings.apiProfiles), profile];
-    const moduleName = overlay.querySelector('[data-gds-api-module]')?.value || 'director';
     settings.moduleConnections[moduleName] = id;
     ctx.extensionSettings[SETTINGS_KEY] = settings;
     saveSettings(ctx);
@@ -1659,6 +1681,16 @@ async function saveApiProfileFromUi(ctx) {
 
 async function testApiProfileFromUi(ctx) {
     const overlay = runtime.overlay;
+    const moduleName = runtime.apiFormModule || overlay.querySelector('[data-gds-api-module]')?.value || 'director';
+    const selected = selectedProviderForModule(ctx, moduleName);
+    if (selected.profile.kind === 'connection') {
+        syncApiFormFromProvider(ctx, moduleName, { force: true });
+        const connectionModel = String(overlay.querySelector('[data-gds-api-model]')?.value || '').trim();
+        if (connectionModel) {
+            notify('success', `已从酒馆连接“${selected.profile.name || selected.profile.profileId}”读取模型：${connectionModel}。`);
+            return;
+        }
+    }
     const profile = {
         kind: 'openai-compatible',
         name: String(overlay.querySelector('[data-gds-api-name]')?.value || '独立连接'),
@@ -2278,7 +2310,7 @@ function createUi() {
                     <label>代写回复使用 <select data-gds-provider="reply"></select></label>
                 </div>
                 <div class="gds-api-form">
-                    <p class="gds-help">默认跟随当前酒馆。需要单独模型时，可保存一个 OpenAI 兼容连接，再分别绑定到三个模块。</p>
+                    <p class="gds-help">选中已有酒馆连接后可直接绑定，不需要重复填写模型名；下面表单用于新增或另存一个独立 OpenAI 兼容连接。</p>
                     <p class="gds-api-source" data-gds-api-source>选择已有连接后，连接详情会自动带入下面的表单。</p>
                     <div class="gds-settings-grid">
                         <label>连接名称 <input type="text" data-gds-api-name placeholder="例如：导演创作模型"></label>
@@ -2492,6 +2524,9 @@ function createUi() {
                     settings.moduleConnections[moduleName] = input.value || PROVIDER_CURRENT;
                     ctx.extensionSettings[SETTINGS_KEY] = settings;
                     saveSettings(ctx);
+                    runtime.apiFormModule = moduleName;
+                    const apiModule = overlay.querySelector('[data-gds-api-module]');
+                    if (apiModule) apiModule.value = moduleName;
                     syncApiFormFromProvider(ctx, moduleName, { force: true });
                     if (moduleName === 'director') updateDirectorInjection(ctx).catch(console.error);
                     refreshUi();
