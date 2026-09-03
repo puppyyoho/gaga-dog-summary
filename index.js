@@ -81,7 +81,7 @@ const INJECTION_ID = `${EXTENSION_NAME}:memory`;
 const DIRECTOR_INJECTION_ID = `${EXTENSION_NAME}:director`;
 const PANEL_LOGO_URL = new URL('./assets/gaga-dog-logo.png', import.meta.url).href;
 const FLOATING_LOGO_URL = new URL('./assets/gaga-dog-floating.png', import.meta.url).href;
-const VERSION = '0.3.8';
+const VERSION = '0.3.9';
 const SETTINGS_VERSION = 5;
 
 const DEFAULT_SETTINGS = {
@@ -130,6 +130,9 @@ const runtime = {
     replyBusy: false,
     replyAbortController: null,
     replyText: '',
+    apiFormSource: '',
+    apiFormModule: '',
+    apiFormProfileSignature: '',
 };
 
 function getContext() {
@@ -1548,6 +1551,82 @@ function populateProviderSelectors(overlay, ctx) {
     }
 }
 
+function providerHasApiDetails(profile) {
+    return Boolean(profile && profile.kind !== PROVIDER_CURRENT && (
+        profile.baseUrl || profile.apiKey || profile.model || profile.contextTokens || profile.outputTokens
+    ));
+}
+
+function setApiFormValue(overlay, selector, value) {
+    const input = overlay.querySelector(selector);
+    if (input) input.value = value == null ? '' : String(value);
+}
+
+function syncApiFormFromProvider(ctx, moduleName = 'director', { force = false } = {}) {
+    const overlay = runtime.overlay;
+    if (!overlay || !['memory', 'director', 'reply'].includes(moduleName)) return false;
+    const select = overlay.querySelector(`[data-gds-provider="${moduleName}"]`);
+    const choice = String(select?.value || getSettings(ctx).moduleConnections?.[moduleName] || PROVIDER_CURRENT);
+    const settings = getSettings(ctx);
+    const providerSettings = {
+        ...settings,
+        moduleConnections: { ...settings.moduleConnections, [moduleName]: choice },
+    };
+    const profile = resolveModuleProvider(providerSettings, moduleName, ctx);
+    const source = `${moduleName}:${choice}`;
+    const profileSignature = JSON.stringify({
+        kind: profile.kind,
+        name: profile.name,
+        baseUrl: profile.baseUrl,
+        apiKey: profile.apiKey,
+        model: profile.model,
+        contextTokens: profile.contextTokens,
+        outputTokens: profile.outputTokens,
+        secretId: profile.secretId,
+    });
+    const changed = runtime.apiFormSource !== source || runtime.apiFormProfileSignature !== profileSignature;
+    if (!force && !changed) return providerHasApiDetails(profile);
+    runtime.apiFormSource = source;
+    runtime.apiFormModule = moduleName;
+    runtime.apiFormProfileSignature = profileSignature;
+    const sourceLabel = overlay.querySelector('[data-gds-api-source]');
+    if (providerHasApiDetails(profile)) {
+        setApiFormValue(overlay, '[data-gds-api-name]', profile.name || '');
+        setApiFormValue(overlay, '[data-gds-api-url]', profile.baseUrl || '');
+        setApiFormValue(overlay, '[data-gds-api-key]', profile.apiKey || '');
+        setApiFormValue(overlay, '[data-gds-api-model]', profile.model || '');
+        setApiFormValue(overlay, '[data-gds-api-context]', profile.contextTokens || '');
+        setApiFormValue(overlay, '[data-gds-api-output]', profile.outputTokens || 4096);
+        if (sourceLabel) sourceLabel.textContent = `已自动带入：${profile.kind === 'connection' ? '酒馆连接' : '独立连接'} · ${profile.name || profile.model || '当前选择'}。${profile.kind === 'connection' && profile.secretId && !profile.apiKey ? 'API Key 由酒馆 Secret Manager 托管，未复制到独立表单。' : '修改后点击“保存并绑定连接”即可另存为独立连接。'}`;
+        return true;
+    }
+    setApiFormValue(overlay, '[data-gds-api-name]', '');
+    setApiFormValue(overlay, '[data-gds-api-url]', '');
+    setApiFormValue(overlay, '[data-gds-api-key]', '');
+    setApiFormValue(overlay, '[data-gds-api-model]', '');
+    setApiFormValue(overlay, '[data-gds-api-context]', '');
+    setApiFormValue(overlay, '[data-gds-api-output]', 4096);
+    if (sourceLabel) sourceLabel.textContent = profile.kind === PROVIDER_CURRENT
+        ? '当前选择跟随酒馆连接，无需重复填写独立 API；若要单独保存，请在下方填写或选择带详情的连接。'
+        : '这个酒馆连接没有提供可读取的 URL／模型字段，请手动填写后保存。';
+    return false;
+}
+
+function syncApiFormFromSelectedProvider(ctx) {
+    const preferred = runtime.apiFormModule && ['memory', 'director', 'reply'].includes(runtime.apiFormModule)
+        ? runtime.apiFormModule
+        : '';
+    const order = [preferred, 'memory', 'director', 'reply'].filter((value, index, list) => value && list.indexOf(value) === index);
+    for (const moduleName of order) {
+        const select = runtime.overlay?.querySelector(`[data-gds-provider="${moduleName}"]`);
+        if (!select || select.value === PROVIDER_CURRENT) continue;
+        const settings = getSettings(ctx);
+        const profile = resolveModuleProvider({ ...settings, moduleConnections: { ...settings.moduleConnections, [moduleName]: select.value } }, moduleName, ctx);
+        if (providerHasApiDetails(profile)) return syncApiFormFromProvider(ctx, moduleName);
+    }
+    return syncApiFormFromProvider(ctx, preferred || 'director');
+}
+
 async function saveApiProfileFromUi(ctx) {
     const overlay = runtime.overlay;
     const name = String(overlay.querySelector('[data-gds-api-name]')?.value || '').trim();
@@ -1588,6 +1667,15 @@ async function testApiProfileFromUi(ctx) {
         model: String(overlay.querySelector('[data-gds-api-model]')?.value || '').trim(),
     };
     const models = await listDirectModels(profile);
+    if (models.length) {
+        const modelInput = overlay.querySelector('[data-gds-api-model]');
+        const currentModel = String(modelInput?.value || '').trim();
+        const selectedModel = currentModel && models.includes(currentModel) ? currentModel : models[0];
+        if (modelInput && selectedModel) {
+            modelInput.value = selectedModel;
+            modelInput.dispatchEvent?.(new Event('input', { bubbles: true }));
+        }
+    }
     notify('success', models.length ? `连接成功，模型：${models.slice(0, 8).join('、')}${models.length > 8 ? '……' : ''}` : '连接成功，但服务未返回模型列表。');
 }
 
@@ -1726,6 +1814,7 @@ function refreshUi() {
     reconcileGeneratingFlag(ctx);
     const settings = getSettings(ctx);
     populateProviderSelectors(runtime.overlay, ctx);
+    syncApiFormFromSelectedProvider(ctx);
     const chatState = getChatState(ctx);
     const summary = runtime.overlay.querySelector('[data-gds-summary]');
     const preview = runtime.overlay.querySelector('[data-gds-preview]');
@@ -2190,6 +2279,7 @@ function createUi() {
                 </div>
                 <div class="gds-api-form">
                     <p class="gds-help">默认跟随当前酒馆。需要单独模型时，可保存一个 OpenAI 兼容连接，再分别绑定到三个模块。</p>
+                    <p class="gds-api-source" data-gds-api-source>选择已有连接后，连接详情会自动带入下面的表单。</p>
                     <div class="gds-settings-grid">
                         <label>连接名称 <input type="text" data-gds-api-name placeholder="例如：导演创作模型"></label>
                         <label>API URL <input type="url" data-gds-api-url placeholder="https://example.com/v1"></label>
@@ -2402,6 +2492,7 @@ function createUi() {
                     settings.moduleConnections[moduleName] = input.value || PROVIDER_CURRENT;
                     ctx.extensionSettings[SETTINGS_KEY] = settings;
                     saveSettings(ctx);
+                    syncApiFormFromProvider(ctx, moduleName, { force: true });
                     if (moduleName === 'director') updateDirectorInjection(ctx).catch(console.error);
                     refreshUi();
                 }

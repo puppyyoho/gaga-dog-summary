@@ -12,9 +12,20 @@ test('normalizes independent OpenAI-compatible profiles and preserves module sep
 });
 
 test('resolves a selected Connection Manager profile when available', () => {
-    const ctx = { extensionSettings: { connectionManager: { profiles: [{ id: 'cm1', name: 'Claude' }] } } };
-    assert.deepEqual(getConnectionManagerProfiles(ctx), [{ id: 'cm1', name: 'Claude' }]);
+    const ctx = { extensionSettings: { connectionManager: { profiles: [{
+        id: 'cm1', name: 'Claude', api: 'openai', 'api-url': 'https://api.example/v1/', api_key: 'secret', 'secret-id': 'secret-1', model: 'claude-3', context_length: 200000, max_tokens: 8192,
+    }] } } };
+    const profiles = getConnectionManagerProfiles(ctx);
+    assert.equal(profiles[0].baseUrl, 'https://api.example/v1');
+    assert.equal(profiles[0].apiKey, 'secret');
+    assert.equal(profiles[0].model, 'claude-3');
+    assert.equal(profiles[0].contextTokens, 200000);
+    assert.equal(profiles[0].outputTokens, 8192);
+    assert.equal(profiles[0].apiType, 'openai');
+    assert.equal(profiles[0].secretId, 'secret-1');
     const provider = resolveModuleProvider({ moduleConnections: { director: 'connection:cm1' } }, 'director', ctx);
     assert.equal(provider.kind, 'connection');
     assert.equal(provider.profileId, 'cm1');
+    assert.equal(provider.baseUrl, 'https://api.example/v1');
+    assert.equal(provider.model, 'claude-3');
 });

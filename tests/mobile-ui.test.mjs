@@ -67,6 +67,9 @@ test('workbench exposes three independent modules and selected summary artifacts
     assert.match(js, /data-gds-provider="reply"/);
     assert.match(js, /data-gds-api-save/);
     assert.match(js, /data-gds-api-test/);
+    assert.match(js, /syncApiFormFromProvider/);
+    assert.match(js, /data-gds-api-source/);
+    assert.match(js, /modelInput\.value = selectedModel/);
     assert.match(js, /GENERATION_AFTER_COMMANDS/);
     assert.match(js, /setExtensionPrompt\(DIRECTOR_INJECTION_ID/);
     assert.match(js, /data-gds-tab-panel="home"/);
