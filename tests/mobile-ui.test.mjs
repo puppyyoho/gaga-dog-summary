@@ -73,6 +73,8 @@ test('workbench exposes three independent modules and selected summary artifacts
     assert.match(js, /listConnectionModels/);
     assert.match(js, /pullModelsForProvider/);
     assert.match(js, /data-gds-api-model-options/);
+    assert.match(js, /data-gds-api-model-select/);
+    assert.match(js, /已拉取模型/);
     assert.match(js, /选择酒馆连接后会自动拉取模型列表/);
     assert.match(js, /已直接绑定酒馆连接/);
     assert.match(js, /不需要重复填写模型名/);

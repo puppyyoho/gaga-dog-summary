@@ -81,7 +81,7 @@ const INJECTION_ID = `${EXTENSION_NAME}:memory`;
 const DIRECTOR_INJECTION_ID = `${EXTENSION_NAME}:director`;
 const PANEL_LOGO_URL = new URL('./assets/gaga-dog-logo.png', import.meta.url).href;
 const FLOATING_LOGO_URL = new URL('./assets/gaga-dog-floating.png', import.meta.url).href;
-const VERSION = '0.3.11';
+const VERSION = '0.3.12';
 const SETTINGS_VERSION = 5;
 
 const DEFAULT_SETTINGS = {
@@ -1670,9 +1670,24 @@ function populateModelOptions(overlay, models = []) {
     const list = [...new Set((Array.isArray(models) ? models : []).map(value => String(value || '').trim()).filter(Boolean))];
     const datalist = overlay?.querySelector('[data-gds-api-model-options]');
     if (datalist) datalist.innerHTML = list.map(model => `<option value="${escapeHtml(model)}"></option>`).join('');
+    const modelSelect = overlay?.querySelector('[data-gds-api-model-select]');
+    if (modelSelect) {
+        const previous = String(modelSelect.value || '').trim();
+        modelSelect.innerHTML = list.length
+            ? `<option value="">选择已拉取的模型（${list.length} 个）</option>${list.map(model => `<option value="${escapeHtml(model)}">${escapeHtml(model)}</option>`).join('')}`
+            : '<option value="">尚未拉取模型</option>';
+        if (previous && list.includes(previous)) modelSelect.value = previous;
+    }
     const status = overlay?.querySelector('[data-gds-api-model-status]');
     if (status && !list.length) status.textContent = '尚未拉取模型列表';
     return list;
+}
+
+function setModelSelectValue(overlay, model) {
+    const select = overlay?.querySelector('[data-gds-api-model-select]');
+    if (!select) return;
+    const value = String(model || '').trim();
+    select.value = value && [...select.options].some(option => option.value === value) ? value : '';
 }
 
 function applyPulledModelsToForm(overlay, models, profileModel = '') {
@@ -1685,6 +1700,7 @@ function applyPulledModelsToForm(overlay, models, profileModel = '') {
         modelInput.value = selectedModel;
         modelInput.dispatchEvent?.(new Event('input', { bubbles: true }));
     }
+    setModelSelectValue(overlay, selectedModel);
     return { options, selected: selectedModel };
 }
 
@@ -2403,7 +2419,8 @@ function createUi() {
                         <label>连接名称 <input type="text" data-gds-api-name placeholder="例如：导演创作模型"></label>
                         <label>API URL <input type="url" data-gds-api-url placeholder="https://example.com/v1"></label>
                         <label>API Key <input type="password" data-gds-api-key autocomplete="off"></label>
-                        <label>模型 <input type="text" data-gds-api-model list="gds-api-model-options" placeholder="选择或输入模型"></label>
+                        <label>已拉取模型 <select data-gds-api-model-select><option value="">尚未拉取模型</option></select></label>
+                        <label>模型名（可手动输入） <input type="text" data-gds-api-model list="gds-api-model-options" placeholder="选择或输入模型"></label>
                         <datalist id="gds-api-model-options" data-gds-api-model-options></datalist>
                         <label>上下文 Token <input type="number" min="0" step="1024" data-gds-api-context placeholder="不知道可留空"></label>
                         <label>最大输出 Token <input type="number" min="128" step="128" data-gds-api-output value="4096"></label>
@@ -2583,7 +2600,7 @@ function createUi() {
         refreshUi();
     });
 
-    for (const input of overlay.querySelectorAll('input[data-gds-auto],input[data-gds-hide],input[data-gds-collapse],input[data-gds-stream],input[data-gds-trigger],input[data-gds-keep],input[data-gds-injection],input[data-gds-words],select[data-gds-summary-mode],select[data-gds-provider],select[data-gds-api-module],input[data-gds-director-enabled],select[data-gds-director-preset],select[data-gds-director-pacing],input[data-gds-director-pacing-custom],input[data-gds-director-toggle],input[data-gds-calendar-enabled],input[data-gds-calendar-builtins],input[data-gds-calendar-auto-advance],input[data-gds-calendar-window],input[data-gds-calendar-world-date],input[data-gds-reply-follow],select[data-gds-reply-viewpoint],select[data-gds-reply-detail],select[data-gds-reply-length],select[data-gds-reply-initiative],input[data-gds-reply-tone]')) {
+    for (const input of overlay.querySelectorAll('input[data-gds-auto],input[data-gds-hide],input[data-gds-collapse],input[data-gds-stream],input[data-gds-trigger],input[data-gds-keep],input[data-gds-injection],input[data-gds-words],select[data-gds-summary-mode],select[data-gds-provider],select[data-gds-api-module],select[data-gds-api-model-select],input[data-gds-director-enabled],select[data-gds-director-preset],select[data-gds-director-pacing],input[data-gds-director-pacing-custom],input[data-gds-director-toggle],input[data-gds-calendar-enabled],input[data-gds-calendar-builtins],input[data-gds-calendar-auto-advance],input[data-gds-calendar-window],input[data-gds-calendar-world-date],input[data-gds-reply-follow],select[data-gds-reply-viewpoint],select[data-gds-reply-detail],select[data-gds-reply-length],select[data-gds-reply-initiative],input[data-gds-reply-tone]')) {
         input.addEventListener('change', () => {
             const ctx = getContext();
             const settings = getSettings(ctx);
@@ -2627,6 +2644,13 @@ function createUi() {
                 runtime.apiFormModule = moduleName;
                 syncApiFormFromProvider(ctx, moduleName, { force: true });
                 pullModelsForProvider(ctx, moduleName, { force: true }).catch(error => console.warn(`[${DISPLAY_NAME}] 模型列表拉取失败`, error));
+            }
+            if (input.matches('[data-gds-api-model-select]') && input.value) {
+                const modelInput = overlay.querySelector('[data-gds-api-model]');
+                if (modelInput) {
+                    modelInput.value = input.value;
+                    modelInput.dispatchEvent?.(new Event('input', { bubbles: true }));
+                }
             }
             if (input.matches('[data-gds-director-enabled],[data-gds-director-preset],[data-gds-director-pacing],[data-gds-director-pacing-custom],input[data-gds-director-toggle],[data-gds-calendar-enabled],[data-gds-calendar-builtins],[data-gds-calendar-auto-advance],[data-gds-calendar-window],[data-gds-calendar-world-date]')) {
                 updateDirectorFromUi(ctx);
