@@ -28,7 +28,7 @@ import {
     PROMPT_VERSION,
     renderFactsForProse,
 } from './prompts.js';
-import { generateDirectOnly, generateWithFallback, listDirectModels, readableGenerationError } from './generation-client.js';
+import { generateDirectOnly, generateWithFallback, listConnectionModels, listDirectModels, readableGenerationError } from './generation-client.js';
 import {
     chooseSummaryBatchPlan,
     FALLBACK_BATCH_TOKENS,
@@ -81,7 +81,7 @@ const INJECTION_ID = `${EXTENSION_NAME}:memory`;
 const DIRECTOR_INJECTION_ID = `${EXTENSION_NAME}:director`;
 const PANEL_LOGO_URL = new URL('./assets/gaga-dog-logo.png', import.meta.url).href;
 const FLOATING_LOGO_URL = new URL('./assets/gaga-dog-floating.png', import.meta.url).href;
-const VERSION = '0.3.10';
+const VERSION = '0.3.11';
 const SETTINGS_VERSION = 5;
 
 const DEFAULT_SETTINGS = {
@@ -133,6 +133,10 @@ const runtime = {
     apiFormSource: '',
     apiFormModule: '',
     apiFormProfileSignature: '',
+    modelPullSignature: '',
+    modelPullController: null,
+    modelPullBusy: false,
+    modelOptions: [],
 };
 
 function getContext() {
@@ -1577,6 +1581,7 @@ function syncApiFormFromProvider(ctx, moduleName = 'director', { force = false }
     const profileSignature = JSON.stringify({
         kind: profile.kind,
         name: profile.name,
+        apiType: profile.apiType,
         baseUrl: profile.baseUrl,
         apiKey: profile.apiKey,
         model: profile.model,
@@ -1597,6 +1602,9 @@ function syncApiFormFromProvider(ctx, moduleName = 'director', { force = false }
         setApiFormValue(overlay, '[data-gds-api-model]', profile.model || '');
         setApiFormValue(overlay, '[data-gds-api-context]', profile.contextTokens || '');
         setApiFormValue(overlay, '[data-gds-api-output]', profile.outputTokens || 4096);
+        runtime.modelOptions = populateModelOptions(overlay, profile.model ? [profile.model] : []);
+        const modelStatus = overlay.querySelector('[data-gds-api-model-status]');
+        if (modelStatus) modelStatus.textContent = profile.kind === 'connection' ? '已读取连接档案，正在准备拉取模型列表…' : '已读取独立连接，可拉取模型列表';
         if (sourceLabel) sourceLabel.textContent = `已自动带入：${profile.kind === 'connection' ? '酒馆连接' : '独立连接'} · ${profile.name || profile.model || '当前选择'}。${profile.kind === 'connection' && profile.secretId && !profile.apiKey ? 'API Key 由酒馆 Secret Manager 托管，未复制到独立表单。' : '修改后点击“保存并绑定连接”即可另存为独立连接。'}`;
         return true;
     }
@@ -1606,6 +1614,10 @@ function syncApiFormFromProvider(ctx, moduleName = 'director', { force = false }
     setApiFormValue(overlay, '[data-gds-api-model]', '');
     setApiFormValue(overlay, '[data-gds-api-context]', '');
     setApiFormValue(overlay, '[data-gds-api-output]', 4096);
+    runtime.modelOptions = populateModelOptions(overlay, []);
+    runtime.modelPullSignature = '';
+    const modelStatus = overlay.querySelector('[data-gds-api-model-status]');
+    if (modelStatus) modelStatus.textContent = '选择酒馆连接后会自动拉取模型列表';
     if (sourceLabel) sourceLabel.textContent = profile.kind === PROVIDER_CURRENT
         ? '当前选择跟随酒馆连接，无需重复填写独立 API；若要单独保存，请在下方填写或选择带详情的连接。'
         : '这个酒馆连接没有提供可读取的 URL／模型字段，请手动填写后保存。';
@@ -1638,6 +1650,86 @@ function selectedProviderForModule(ctx, moduleName) {
         moduleConnections: { ...settings.moduleConnections, [moduleName]: choice },
     }, moduleName, ctx);
     return { choice, profile };
+}
+
+function modelPullKey(choice, profile) {
+    return JSON.stringify({
+        choice,
+        kind: profile?.kind,
+        profileId: profile?.profileId || profile?.id || '',
+        apiType: profile?.apiType || '',
+        baseUrl: profile?.baseUrl || '',
+        secretId: profile?.secretId || '',
+        apiKey: profile?.apiKey || '',
+        model: profile?.model || '',
+        customIncludeHeaders: profile?.customIncludeHeaders || '',
+    });
+}
+
+function populateModelOptions(overlay, models = []) {
+    const list = [...new Set((Array.isArray(models) ? models : []).map(value => String(value || '').trim()).filter(Boolean))];
+    const datalist = overlay?.querySelector('[data-gds-api-model-options]');
+    if (datalist) datalist.innerHTML = list.map(model => `<option value="${escapeHtml(model)}"></option>`).join('');
+    const status = overlay?.querySelector('[data-gds-api-model-status]');
+    if (status && !list.length) status.textContent = '尚未拉取模型列表';
+    return list;
+}
+
+function applyPulledModelsToForm(overlay, models, profileModel = '') {
+    const modelInput = overlay?.querySelector('[data-gds-api-model]');
+    const current = String(modelInput?.value || '').trim();
+    const preferred = String(profileModel || '').trim();
+    const options = populateModelOptions(overlay, [preferred, current, ...(models || [])]);
+    const selectedModel = preferred || (current && options.includes(current) ? current : options[0] || current);
+    if (modelInput && selectedModel && modelInput.value !== selectedModel) {
+        modelInput.value = selectedModel;
+        modelInput.dispatchEvent?.(new Event('input', { bubbles: true }));
+    }
+    return { options, selected: selectedModel };
+}
+
+async function pullModelsForProvider(ctx, moduleName, { force = false, notifyUser = false } = {}) {
+    const overlay = runtime.overlay;
+    if (!overlay || !['memory', 'director', 'reply'].includes(moduleName)) return [];
+    const selected = selectedProviderForModule(ctx, moduleName);
+    const key = modelPullKey(selected.choice, selected.profile);
+    if (!force && runtime.modelPullSignature === key) return runtime.modelOptions || [];
+    runtime.modelPullController?.abort?.();
+    const controller = new AbortController();
+    runtime.modelPullController = controller;
+    runtime.modelPullSignature = key;
+    runtime.modelPullBusy = true;
+    const status = overlay.querySelector('[data-gds-api-model-status]');
+    if (status) status.textContent = selected.profile.kind === 'connection' ? '正在通过酒馆连接拉取模型列表…' : '正在拉取模型列表…';
+    try {
+        let models = [];
+        if (selected.profile.kind === 'connection') {
+            models = await listConnectionModels(ctx, selected.profile, controller.signal);
+        } else if (selected.profile.kind === 'openai-compatible') {
+            models = await listDirectModels(selected.profile, controller.signal);
+        } else {
+            throw new Error('请先选择一个酒馆连接，或填写独立连接 URL 与 Key');
+        }
+        const applied = applyPulledModelsToForm(overlay, models, selected.profile.model);
+        runtime.modelOptions = applied.options;
+        if (status) status.textContent = `已拉取 ${models.length} 个模型${applied.selected ? `，当前使用：${applied.selected}` : ''}`;
+        if (notifyUser) notify('success', models.length ? `已从“${selected.profile.name || selected.profile.profileId}”拉取 ${models.length} 个模型。` : '连接成功，但服务未返回模型列表。');
+        return models;
+    } catch (error) {
+        if (controller.signal.aborted || error?.name === 'AbortError') return [];
+        const detail = readableGenerationError(error);
+        const fallback = String(selected.profile.model || '').trim();
+        runtime.modelOptions = applyPulledModelsToForm(overlay, fallback ? [fallback] : [], fallback).options;
+        if (status) status.textContent = fallback ? `模型列表拉取失败，已保留连接档案模型：${fallback}` : `模型列表拉取失败：${detail}`;
+        if (notifyUser) throw error;
+        console.warn(`[${DISPLAY_NAME}] 模型列表拉取失败`, error);
+        return [];
+    } finally {
+        if (runtime.modelPullController === controller) {
+            runtime.modelPullController = null;
+            runtime.modelPullBusy = false;
+        }
+    }
 }
 
 async function saveApiProfileFromUi(ctx) {
@@ -1685,11 +1777,8 @@ async function testApiProfileFromUi(ctx) {
     const selected = selectedProviderForModule(ctx, moduleName);
     if (selected.profile.kind === 'connection') {
         syncApiFormFromProvider(ctx, moduleName, { force: true });
-        const connectionModel = String(overlay.querySelector('[data-gds-api-model]')?.value || '').trim();
-        if (connectionModel) {
-            notify('success', `已从酒馆连接“${selected.profile.name || selected.profile.profileId}”读取模型：${connectionModel}。`);
-            return;
-        }
+        await pullModelsForProvider(ctx, moduleName, { force: true, notifyUser: true });
+        return;
     }
     const profile = {
         kind: 'openai-compatible',
@@ -1699,15 +1788,8 @@ async function testApiProfileFromUi(ctx) {
         model: String(overlay.querySelector('[data-gds-api-model]')?.value || '').trim(),
     };
     const models = await listDirectModels(profile);
-    if (models.length) {
-        const modelInput = overlay.querySelector('[data-gds-api-model]');
-        const currentModel = String(modelInput?.value || '').trim();
-        const selectedModel = currentModel && models.includes(currentModel) ? currentModel : models[0];
-        if (modelInput && selectedModel) {
-            modelInput.value = selectedModel;
-            modelInput.dispatchEvent?.(new Event('input', { bubbles: true }));
-        }
-    }
+    const applied = applyPulledModelsToForm(overlay, models, '');
+    runtime.modelOptions = applied.options;
     notify('success', models.length ? `连接成功，模型：${models.slice(0, 8).join('、')}${models.length > 8 ? '……' : ''}` : '连接成功，但服务未返回模型列表。');
 }
 
@@ -1847,6 +1929,11 @@ function refreshUi() {
     const settings = getSettings(ctx);
     populateProviderSelectors(runtime.overlay, ctx);
     syncApiFormFromSelectedProvider(ctx);
+    const activeApiModule = runtime.apiFormModule || 'director';
+    const activeProvider = selectedProviderForModule(ctx, activeApiModule).profile;
+    if (activeProvider.kind === 'connection' || activeProvider.kind === 'openai-compatible') {
+        pullModelsForProvider(ctx, activeApiModule).catch(error => console.warn(`[${DISPLAY_NAME}] 自动拉取模型失败`, error));
+    }
     const chatState = getChatState(ctx);
     const summary = runtime.overlay.querySelector('[data-gds-summary]');
     const preview = runtime.overlay.querySelector('[data-gds-preview]');
@@ -2316,12 +2403,14 @@ function createUi() {
                         <label>连接名称 <input type="text" data-gds-api-name placeholder="例如：导演创作模型"></label>
                         <label>API URL <input type="url" data-gds-api-url placeholder="https://example.com/v1"></label>
                         <label>API Key <input type="password" data-gds-api-key autocomplete="off"></label>
-                        <label>模型 <input type="text" data-gds-api-model placeholder="例如：gpt-4o-mini"></label>
+                        <label>模型 <input type="text" data-gds-api-model list="gds-api-model-options" placeholder="选择或输入模型"></label>
+                        <datalist id="gds-api-model-options" data-gds-api-model-options></datalist>
                         <label>上下文 Token <input type="number" min="0" step="1024" data-gds-api-context placeholder="不知道可留空"></label>
                         <label>最大输出 Token <input type="number" min="128" step="128" data-gds-api-output value="4096"></label>
                         <label>绑定模块 <select data-gds-api-module><option value="memory">剧情记忆</option><option value="director">情节导演</option><option value="reply">代写回复</option></select></label>
                     </div>
-                    <button data-gds-api-save>保存并绑定连接</button><button data-gds-api-test>测试模型列表</button>
+                    <button data-gds-api-save>保存并绑定连接</button><button data-gds-api-test>重新拉取模型</button>
+                    <p class="gds-api-model-status" data-gds-api-model-status>选择酒馆连接后会自动拉取模型列表</p>
                 </div>
             </details>
             <details class="gds-details" data-gds-tab-panel="memory"><summary>检查点</summary><div data-gds-checkpoints></div></details>
@@ -2494,7 +2583,7 @@ function createUi() {
         refreshUi();
     });
 
-    for (const input of overlay.querySelectorAll('input[data-gds-auto],input[data-gds-hide],input[data-gds-collapse],input[data-gds-stream],input[data-gds-trigger],input[data-gds-keep],input[data-gds-injection],input[data-gds-words],select[data-gds-summary-mode],select[data-gds-provider],input[data-gds-director-enabled],select[data-gds-director-preset],select[data-gds-director-pacing],input[data-gds-director-pacing-custom],input[data-gds-director-toggle],input[data-gds-calendar-enabled],input[data-gds-calendar-builtins],input[data-gds-calendar-auto-advance],input[data-gds-calendar-window],input[data-gds-calendar-world-date],input[data-gds-reply-follow],select[data-gds-reply-viewpoint],select[data-gds-reply-detail],select[data-gds-reply-length],select[data-gds-reply-initiative],input[data-gds-reply-tone]')) {
+    for (const input of overlay.querySelectorAll('input[data-gds-auto],input[data-gds-hide],input[data-gds-collapse],input[data-gds-stream],input[data-gds-trigger],input[data-gds-keep],input[data-gds-injection],input[data-gds-words],select[data-gds-summary-mode],select[data-gds-provider],select[data-gds-api-module],input[data-gds-director-enabled],select[data-gds-director-preset],select[data-gds-director-pacing],input[data-gds-director-pacing-custom],input[data-gds-director-toggle],input[data-gds-calendar-enabled],input[data-gds-calendar-builtins],input[data-gds-calendar-auto-advance],input[data-gds-calendar-window],input[data-gds-calendar-world-date],input[data-gds-reply-follow],select[data-gds-reply-viewpoint],select[data-gds-reply-detail],select[data-gds-reply-length],select[data-gds-reply-initiative],input[data-gds-reply-tone]')) {
         input.addEventListener('change', () => {
             const ctx = getContext();
             const settings = getSettings(ctx);
@@ -2528,9 +2617,16 @@ function createUi() {
                     const apiModule = overlay.querySelector('[data-gds-api-module]');
                     if (apiModule) apiModule.value = moduleName;
                     syncApiFormFromProvider(ctx, moduleName, { force: true });
+                    pullModelsForProvider(ctx, moduleName, { force: true }).catch(error => console.warn(`[${DISPLAY_NAME}] 模型列表拉取失败`, error));
                     if (moduleName === 'director') updateDirectorInjection(ctx).catch(console.error);
                     refreshUi();
                 }
+            }
+            if (input.matches('[data-gds-api-module]')) {
+                const moduleName = input.value || 'director';
+                runtime.apiFormModule = moduleName;
+                syncApiFormFromProvider(ctx, moduleName, { force: true });
+                pullModelsForProvider(ctx, moduleName, { force: true }).catch(error => console.warn(`[${DISPLAY_NAME}] 模型列表拉取失败`, error));
             }
             if (input.matches('[data-gds-director-enabled],[data-gds-director-preset],[data-gds-director-pacing],[data-gds-director-pacing-custom],input[data-gds-director-toggle],[data-gds-calendar-enabled],[data-gds-calendar-builtins],[data-gds-calendar-auto-advance],[data-gds-calendar-window],[data-gds-calendar-world-date]')) {
                 updateDirectorFromUi(ctx);

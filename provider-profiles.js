@@ -48,6 +48,7 @@ const CONNECTION_VALUE_KEYS = {
     model: ['model', 'modelName', 'model_name', 'defaultModel', 'default_model', 'selectedModel', 'selected_model', 'chatCompletionModel', 'chat_completion_model'],
     contextTokens: ['contextTokens', 'context_tokens', 'contextLength', 'context_length', 'maxContext', 'max_context', 'maxContextTokens', 'max_context_tokens'],
     outputTokens: ['outputTokens', 'output_tokens', 'maxOutputTokens', 'max_output_tokens', 'maxTokens', 'max_tokens', 'maxNewTokens', 'max_new_tokens'],
+    customIncludeHeaders: ['customIncludeHeaders', 'custom_include_headers', 'custom-include-headers'],
 };
 
 function connectionValue(profile, keys) {
@@ -82,6 +83,7 @@ export function normalizeConnectionManagerProfile(value) {
     const outputNumber = Number(connectionValue(value, CONNECTION_VALUE_KEYS.outputTokens));
     const contextTokens = Number.isFinite(contextNumber) && contextNumber > 0 ? Math.round(contextNumber) : 0;
     const outputTokens = Number.isFinite(outputNumber) && outputNumber >= 128 ? Math.round(outputNumber) : 0;
+    const customIncludeHeaders = String(connectionValue(value, CONNECTION_VALUE_KEYS.customIncludeHeaders) || '').trim();
     if (apiType) result.apiType = apiType;
     if (baseUrl) result.baseUrl = baseUrl;
     if (apiKey) result.apiKey = apiKey;
@@ -89,6 +91,7 @@ export function normalizeConnectionManagerProfile(value) {
     if (model) result.model = model;
     if (contextTokens) result.contextTokens = contextTokens;
     if (outputTokens) result.outputTokens = outputTokens;
+    if (customIncludeHeaders) result.customIncludeHeaders = customIncludeHeaders;
     if (value.stream !== undefined) result.stream = value.stream !== false;
     return result;
 }

@@ -195,9 +195,115 @@ async function directCompletion(profile, messages, signal, stream, onText, onSta
 export async function listDirectModels(profile, signal) {
     if (!profile?.baseUrl || typeof fetch !== 'function') throw new Error('独立连接缺少 URL 或浏览器 fetch 不可用');
     const response = await fetch(directModelsUrl(profile.baseUrl), { headers: directHeaders(profile), signal });
-    if (!response.ok) throw new Error(`获取模型列表失败：HTTP ${response.status}`);
+    if (!response.ok) {
+        const detail = await response.text().catch(() => '');
+        throw new Error(`获取模型列表失败：HTTP ${response.status}${detail ? ` · ${detail.slice(0, 300)}` : ''}`);
+    }
     const data = await response.json();
-    return (Array.isArray(data) ? data : data?.data || []).map(item => String(item?.id || item?.name || '')).filter(Boolean);
+    return normalizeModelList(data);
+}
+
+function normalizeModelList(data) {
+    const list = Array.isArray(data)
+        ? data
+        : Array.isArray(data?.data)
+            ? data.data
+            : Array.isArray(data?.models)
+                ? data.models
+                : Array.isArray(data?.data?.data)
+                    ? data.data.data
+                    : [];
+    return list
+        .map(item => typeof item === 'string' ? item : String(item?.id || item?.name || ''))
+        .map(item => item.trim())
+        .filter(Boolean)
+        .filter((item, index, all) => all.indexOf(item) === index);
+}
+
+async function getTavernRequestHeaders(ctx) {
+    const candidates = [ctx?.getRequestHeaders, globalThis.getRequestHeaders];
+    try {
+        const runtime = await import('/scripts/script.js');
+        candidates.push(runtime?.getRequestHeaders);
+    } catch { /* Older Tavern builds may not expose script.js as an importable module. */ }
+    for (const candidate of candidates) {
+        if (typeof candidate !== 'function') continue;
+        try {
+            const headers = await candidate();
+            if (headers && typeof headers === 'object') return { ...headers, 'Content-Type': 'application/json' };
+        } catch { /* Try the next compatible header provider. */ }
+    }
+    return { 'Content-Type': 'application/json' };
+}
+
+function connectionApiDetails(ctx, profile) {
+    const profiles = Array.isArray(ctx?.extensionSettings?.connectionManager?.profiles)
+        ? ctx.extensionSettings.connectionManager.profiles
+        : [];
+    const raw = profiles.find(item => String(item?.id || '').trim() === String(profile?.profileId || '').trim()) || null;
+    const apiType = String(raw?.api || raw?.apiType || raw?.api_type || profile?.apiType || '').trim();
+    const maps = [ctx?.CONNECT_API_MAP, globalThis.CONNECT_API_MAP];
+    let apiMap = null;
+    for (const map of maps) {
+        if (!map || !apiType) continue;
+        apiMap = map[apiType] || map[apiType.toLowerCase()]
+            || Object.entries(map).find(([key]) => key.toLowerCase() === apiType.toLowerCase())?.[1]
+            || null;
+        if (apiMap) break;
+    }
+    const selected = String(apiMap?.selected || '').trim().toLowerCase();
+    const mappedSource = String(apiMap?.source || '').trim().toLowerCase();
+    const rawSource = String(raw?.chat_completion_source || raw?.chatCompletionSource || raw?.source || '').trim().toLowerCase();
+    let source = mappedSource || rawSource || String(profile?.apiType || '').trim().toLowerCase();
+    if (source === 'openai-compatible' || source === 'openai_compatible' || source === 'direct') source = 'custom';
+    if (!source) source = profile?.baseUrl ? 'custom' : 'openai';
+    return { raw, apiMap, apiType, selected, source };
+}
+
+/**
+ * Ask SillyTavern's own Chat Completion status endpoint to resolve a
+ * Connection Manager profile's Secret Manager key and fetch its /models
+ * list. This keeps credentials inside Tavern instead of copying them into
+ * the extension or making a browser cross-origin request.
+ */
+export async function listConnectionModels(ctx, profile, signal) {
+    if (!profile?.profileId) throw new Error('酒馆连接缺少 Connection Manager 配置');
+    if (typeof fetch !== 'function') throw new Error('当前浏览器没有可用的 fetch 接口');
+    const details = connectionApiDetails(ctx, profile);
+    if (details.selected && details.selected !== 'openai') {
+        throw new Error('当前酒馆连接使用 Text Completion，酒馆没有通用的 Chat Completion 模型列表接口；已保留连接档案中的默认模型');
+    }
+    const source = details.source;
+    const baseUrl = String(profile.baseUrl || details.raw?.['api-url'] || '').trim().replace(/\/+$/, '');
+    const secretId = String(profile.secretId || details.raw?.['secret-id'] || '').trim();
+    const customIncludeHeaders = String(profile.customIncludeHeaders || details.raw?.custom_include_headers || details.raw?.['custom-include-headers'] || '').trim();
+    const body = {
+        chat_completion_source: source,
+        secret_id: secretId,
+    };
+    if (source === 'custom') {
+        if (!baseUrl) throw new Error('酒馆连接缺少自定义 API URL');
+        body.custom_url = baseUrl;
+    } else if (baseUrl && !secretId && profile.apiKey) {
+        // A profile explicitly carrying a key can represent a reverse proxy.
+        body.reverse_proxy = baseUrl;
+        body.proxy_password = profile.apiKey;
+    }
+    if (customIncludeHeaders) body.custom_include_headers = customIncludeHeaders;
+    const response = await fetch('/api/backends/chat-completions/status', {
+        method: 'POST',
+        headers: await getTavernRequestHeaders(ctx),
+        body: JSON.stringify(body),
+        signal,
+        cache: 'no-cache',
+    });
+    let data = null;
+    try { data = await response.json(); } catch { /* The status endpoint may return an empty error body. */ }
+    if (!response.ok || data?.error) {
+        const message = data?.message || data?.error?.message || data?.error || '';
+        throw new Error(`酒馆连接拉取模型失败：HTTP ${response.status}${message ? ` · ${message}` : ''}`);
+    }
+    return normalizeModelList(data);
 }
 
 export function mergeStreamText(previous, next) {

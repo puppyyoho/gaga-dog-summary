@@ -265,6 +265,7 @@ body.gds-panel-open { overflow: hidden !important; }
 .gds-provider-grid select, .gds-api-form input, .gds-api-form select, .gds-director-settings select, .gds-director-settings input[type="text"], .gds-reply-settings select, .gds-reply-settings input[type="text"] { box-sizing: border-box; min-width: 0; width: 100%; border: 1px solid var(--gds-line); border-radius: 8px; background: white; color: var(--gds-ink); padding: 7px 8px; font: inherit; }
 .gds-api-form { border-top: 1px dashed var(--gds-line); padding-top: 10px; }
 .gds-api-source { margin: -3px 0 10px; color: var(--gds-pink-deep); font-size: 12px; line-height: 1.5; }
+.gds-api-model-status { margin: -3px 0 0; color: var(--gds-muted); font-size: 12px; line-height: 1.45; }
 .gds-api-form .gds-settings-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); max-width: none; margin: 0; padding: 5px 0 10px; column-gap: 12px; }
 .gds-api-form label { display: flex; flex-direction: column; align-items: stretch; gap: 5px; }
 .gds-field input, .gds-field select { box-sizing: border-box; width: 100%; border: 1px solid var(--gds-line); border-radius: 8px; padding: 8px; color: var(--gds-ink); background: #fff; font: inherit; }

@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
     extractGeneratedText,
     generateWithFallback,
+    listConnectionModels,
     mergeStreamText,
 } from '../generation-client.js';
 
@@ -53,6 +54,67 @@ test('merges cumulative and delta stream chunks without duplication', () => {
     assert.equal(mergeStreamText('前半', '前半后半'), '前半后半');
     assert.equal(mergeStreamText('前半', '后半'), '前半后半');
     assert.equal(mergeStreamText('完整', '完整'), '完整');
+});
+
+test('pulls Connection Manager models through Tavern status endpoint', async () => {
+    const originalFetch = globalThis.fetch;
+    let request;
+    globalThis.fetch = async (url, options) => {
+        request = { url, options };
+        return new Response(JSON.stringify({ data: [{ id: 'model-a' }, { id: 'model-b' }] }), {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+        });
+    };
+    try {
+        const models = await listConnectionModels({ getRequestHeaders: () => ({ 'X-CSRF-Token': 'csrf' }) }, {
+            kind: 'connection',
+            profileId: 'cm1',
+            apiType: 'custom',
+            baseUrl: 'https://gateway.example/v1',
+            secretId: 'secret-1',
+        });
+        assert.deepEqual(models, ['model-a', 'model-b']);
+        assert.equal(request.url, '/api/backends/chat-completions/status');
+        assert.equal(request.options.method, 'POST');
+        assert.equal(request.options.headers['X-CSRF-Token'], 'csrf');
+        const body = JSON.parse(request.options.body);
+        assert.equal(body.chat_completion_source, 'custom');
+        assert.equal(body.custom_url, 'https://gateway.example/v1');
+        assert.equal(body.secret_id, 'secret-1');
+    } finally {
+        globalThis.fetch = originalFetch;
+    }
+});
+
+test('uses Tavern CONNECT_API_MAP for the selected Connection Manager source', async () => {
+    const originalFetch = globalThis.fetch;
+    let request;
+    globalThis.fetch = async (url, options) => {
+        request = { url, options };
+        return new Response(JSON.stringify({ data: [{ id: 'mapped-model' }] }), {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+        });
+    };
+    try {
+        const ctx = {
+            CONNECT_API_MAP: { openai: { selected: 'openai', source: 'custom' } },
+            extensionSettings: {
+                connectionManager: {
+                    profiles: [{ id: 'cm-mapped', api: 'openai', 'api-url': 'https://mapped.example/v1', 'secret-id': 'secret-mapped' }],
+                },
+            },
+        };
+        const models = await listConnectionModels(ctx, { kind: 'connection', profileId: 'cm-mapped', apiType: 'openai' });
+        assert.deepEqual(models, ['mapped-model']);
+        const body = JSON.parse(request.options.body);
+        assert.equal(body.chat_completion_source, 'custom');
+        assert.equal(body.custom_url, 'https://mapped.example/v1');
+        assert.equal(body.secret_id, 'secret-mapped');
+    } finally {
+        globalThis.fetch = originalFetch;
+    }
 });
 
 test('uses the live Text Completion service for real streaming', async () => {
