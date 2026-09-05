@@ -16,6 +16,7 @@ import {
     parseModelPacket,
     parseRoundCapsule,
     rangeForNewSummary,
+    roundRangesForBackfill,
     rangesForSummaryBacklog,
     rangeStillMatches,
     renderRoundCapsule,
@@ -91,7 +92,7 @@ const INJECTION_ID = `${EXTENSION_NAME}:memory`;
 const DIRECTOR_INJECTION_ID = `${EXTENSION_NAME}:director`;
 const PANEL_LOGO_URL = new URL('./assets/gaga-dog-logo.png', import.meta.url).href;
 const FLOATING_LOGO_URL = new URL('./assets/gaga-dog-floating.png', import.meta.url).href;
-const VERSION = '0.5.0';
+const VERSION = '0.5.1';
 const SETTINGS_VERSION = 7;
 
 const DEFAULT_SETTINGS = {
@@ -134,6 +135,8 @@ const runtime = {
     workflow: null,
     capsuleBusy: false,
     capsuleController: null,
+    backfillBusy: false,
+    backfillStopRequested: false,
     layeredPausedByError: false,
     activeOperation: '',
     generating: false,
@@ -521,6 +524,7 @@ function snapshotMemory(value) {
         roundCapsules: clone(state.roundCapsules),
         memoryArchives: clone(state.memoryArchives),
         lastCapsuleIndex: state.lastCapsuleIndex,
+        capsuleBackfill: clone(state.capsuleBackfill),
         lastProcessedIndex: state.lastProcessedIndex,
     };
 }
@@ -542,6 +546,7 @@ function restoreSnapshot(state, snapshot) {
     next.roundCapsules = clone(snapshot.roundCapsules || next.roundCapsules || []);
     next.memoryArchives = clone(snapshot.memoryArchives || next.memoryArchives || []);
     next.lastCapsuleIndex = Number(snapshot.lastCapsuleIndex ?? next.lastCapsuleIndex ?? -1);
+    next.capsuleBackfill = clone(snapshot.capsuleBackfill ?? next.capsuleBackfill ?? null);
     next.lastProcessedIndex = Number(snapshot.lastProcessedIndex ?? -1);
     next.lastStableIndex = next.lastProcessedIndex;
     return next;
@@ -1336,7 +1341,11 @@ async function startLayeredAuto() {
     await saveChat(ctx);
     refreshUi();
     scheduleLayeredMemory(100);
-    notify('success', '分层滚动记忆已启动，将在每轮回复完成后记录剧情胶囊。');
+    if (layeredNeedsInitialSummary(ctx, state, settings)) {
+        notify('info', '自动记录已开启。当前还有未记录的旧对话，请先点击“补建历史胶囊”，完成后会自动接着记录新对话。');
+    } else {
+        notify('success', '分层滚动记忆已启动，将在每轮回复完成后记录剧情胶囊。');
+    }
 }
 
 function stopLayeredAuto({ notifyUser = true } = {}) {
@@ -1348,7 +1357,7 @@ function stopLayeredAuto({ notifyUser = true } = {}) {
     clearLayeredTimer();
     runtime.layeredPausedByError = false;
     let interrupted = false;
-    if (runtime.capsuleController) {
+    if (runtime.capsuleController && runtime.activeOperation === 'round-capsule') {
         runtime.capsuleController.abort(new DOMException('用户停止分层滚动记忆', 'AbortError'));
         interrupted = true;
     }
@@ -1372,15 +1381,13 @@ function stopLayeredAuto({ notifyUser = true } = {}) {
 function layeredTaskBlocked(ctx) {
     reconcileGeneratingFlag(ctx);
     const chatState = getChatState(ctx);
-    return !chatState.enabled || chatState.pending || runtime.busy || runtime.workflowActive || runtime.capsuleBusy
+    return !chatState.enabled || chatState.pending || runtime.busy || runtime.workflowActive || runtime.capsuleBusy || runtime.backfillBusy
         || hostGenerationActive(ctx) || runtime.directorBusy || runtime.replyBusy;
 }
 
 function layeredNeedsInitialSummary(ctx, state, settings) {
-    return state.lastProcessedIndex < 0
-        && state.lastCapsuleIndex < 0
-        && !state.roundCapsules.length
-        && getMessages(ctx).length > settings.keepMessages + 2;
+    const recentStart = Math.max(0, getMessages(ctx).length - Math.max(1, settings.keepMessages));
+    return Boolean(nextRoundRange(getMessages(ctx), state, recentStart));
 }
 
 async function hideCoveredCapsuleMessages(ctx, state, settings) {
@@ -1407,18 +1414,18 @@ async function hideCoveredCapsuleMessages(ctx, state, settings) {
     return hiddenCount;
 }
 
-async function buildNextRoundCapsule(ctx) {
+async function generateRoundCapsuleForRange(ctx, range, {
+    operation = 'round-capsule',
+    status = `正在整理本轮剧情胶囊 · 消息 ${range.start}–${range.end}`,
+} = {}) {
     const settings = getSettings(ctx);
     let state = getChatState(ctx);
-    if (!settings.layeredAutoEnabled || settings.memoryMode !== 'layered' || layeredTaskBlocked(ctx) || layeredNeedsInitialSummary(ctx, state, settings)) return null;
-    const range = nextRoundRange(getMessages(ctx), state);
-    if (!range) return null;
     const controller = new AbortController();
     runtime.capsuleBusy = true;
     runtime.capsuleController = controller;
-    runtime.activeOperation = 'round-capsule';
+    runtime.activeOperation = operation;
     runtime.lastError = '';
-    setStatus(`正在整理本轮剧情胶囊 · 消息 ${range.start}–${range.end}`);
+    setStatus(status);
     refreshUi();
     try {
         const request = buildRoundCapsulePrompt({
@@ -1451,29 +1458,244 @@ async function buildNextRoundCapsule(ctx) {
         }
         if (!rangeStillMatches(getMessages(ctx), range)) throw new Error('生成期间本轮消息发生了变化，胶囊未保存');
         const capsule = createRoundCapsule(packet, range, `capsule_${Date.now()}_${simpleHash(range.rangeHash)}`);
-        state = appendRoundCapsule(getChatState(ctx), capsule);
+        const previousState = getChatState(ctx);
+        state = appendRoundCapsule(previousState, capsule);
         state.memoryMode = 'layered';
-        setChatState(state, ctx);
-        await applyInjection(ctx, state, settings);
-        await saveChat(ctx);
-        await hideCoveredCapsuleMessages(ctx, state, settings);
+        try {
+            await applyInjection(ctx, state, settings);
+            await saveChat(ctx);
+        } catch (error) {
+            setChatState(previousState, ctx);
+            try { await applyInjection(ctx, previousState, settings); } catch { /* Preserve the original save error. */ }
+            throw error;
+        }
+        try {
+            await hideCoveredCapsuleMessages(ctx, state, settings);
+        } catch (error) {
+            console.warn(`[${DISPLAY_NAME}] 胶囊已保存，但自动隐藏旧正文失败`, error);
+        }
         runtime.lastError = '';
         runtime.lastSuccess = `已记录本轮剧情 · 消息 ${range.start}–${range.end}`;
         runtime.lastResultScope = 'layered';
         return capsule;
+    } finally {
+        if (runtime.capsuleController === controller) runtime.capsuleController = null;
+        runtime.capsuleBusy = false;
+        if (runtime.activeOperation === operation) runtime.activeOperation = '';
+        refreshUi();
+    }
+}
+
+async function buildNextRoundCapsule(ctx) {
+    const settings = getSettings(ctx);
+    const state = getChatState(ctx);
+    if (!settings.layeredAutoEnabled || settings.memoryMode !== 'layered' || layeredTaskBlocked(ctx) || layeredNeedsInitialSummary(ctx, state, settings)) return null;
+    const range = nextRoundRange(getMessages(ctx), state);
+    if (!range) return null;
+    try {
+        return await generateRoundCapsuleForRange(ctx, range);
     } catch (error) {
-        if (!controller.signal.aborted) {
+        if (!isInterrupted(error, runtime.capsuleController)) {
             const message = `剧情胶囊生成失败：${readableGenerationError(error)}`;
             console.warn(`[${DISPLAY_NAME}] ${message}`, error);
             pauseLayeredAfterError(ctx, message);
         }
         return null;
+    }
+}
+
+function backfillRanges(ctx, state, goalEnd) {
+    return roundRangesForBackfill(getMessages(ctx), state, Math.max(0, Number(goalEnd) + 1));
+}
+
+async function saveBackfillTask(ctx, updates) {
+    const state = getChatState(ctx);
+    state.capsuleBackfill = {
+        ...(state.capsuleBackfill || {}),
+        ...clone(updates),
+        updatedAt: Date.now(),
+    };
+    setChatState(state, ctx);
+    await saveChat(ctx);
+    return state.capsuleBackfill;
+}
+
+function pauseBackfillAfterError(ctx, error) {
+    const settings = getSettings(ctx);
+    settings.layeredAutoEnabled = false;
+    ctx.extensionSettings[SETTINGS_KEY] = settings;
+    saveSettings(ctx);
+    clearLayeredTimer();
+    runtime.layeredPausedByError = true;
+    runtime.lastError = `历史胶囊补建失败：${readableGenerationError(error)}；任务已停在失败轮次`;
+    runtime.lastResultScope = 'layered';
+    notify('error', runtime.lastError);
+}
+
+async function runHistoricalBackfill({ resume = false, restart = false } = {}) {
+    const ctx = getContext();
+    reconcileGeneratingFlag(ctx);
+    if (runtime.busy || runtime.workflowActive || runtime.capsuleBusy || runtime.backfillBusy
+        || runtime.directorBusy || runtime.replyBusy || hostGenerationActive(ctx)) {
+        notify('info', '当前还有生成任务进行中，请稍后再补建历史胶囊。');
+        return null;
+    }
+
+    const settings = getSettings(ctx);
+    let state = getChatState(ctx);
+    const previousTask = state.capsuleBackfill;
+    const canResume = resume && !restart && previousTask && ['paused', 'failed', 'running'].includes(previousTask.status);
+    const goalEnd = canResume
+        ? Math.min(Number(previousTask.goalEnd), getMessages(ctx).length - 1)
+        : getMessages(ctx).length - Math.max(1, settings.keepMessages) - 1;
+    const ranges = backfillRanges(ctx, state, goalEnd);
+
+    if (goalEnd < 0 || !ranges.length) {
+        if (previousTask && canResume) {
+            await saveBackfillTask(ctx, {
+                status: 'completed',
+                goalEnd,
+                completedRounds: Math.max(previousTask.completedRounds || 0, previousTask.totalRounds || 0),
+                lastError: '',
+                completedAt: Date.now(),
+            });
+        }
+        runtime.lastError = '';
+        runtime.lastSuccess = '近期保留范围之前没有尚未记录的完整对话轮';
+        runtime.lastResultScope = 'layered';
+        refreshUi();
+        notify('info', runtime.lastSuccess);
+        return null;
+    }
+
+    settings.memoryMode = 'layered';
+    ctx.extensionSettings[SETTINGS_KEY] = settings;
+    saveSettings(ctx);
+    state.memoryMode = 'layered';
+    const previousTotal = canResume ? Math.max(0, Number(previousTask.totalRounds) || 0) : 0;
+    const completedRounds = canResume
+        ? Math.max(0, Number(previousTask.completedRounds) || 0, previousTotal - ranges.length)
+        : 0;
+    const task = {
+        status: 'running',
+        goalEnd,
+        totalRounds: canResume
+            ? Math.max(previousTotal, completedRounds + ranges.length)
+            : ranges.length,
+        completedRounds,
+        initialStart: canResume ? Number(previousTask.initialStart || ranges[0].start) : ranges[0].start,
+        nextStart: ranges[0].start,
+        lastError: '',
+        startedAt: canResume ? Number(previousTask.startedAt || Date.now()) : Date.now(),
+        updatedAt: Date.now(),
+        completedAt: 0,
+    };
+    state.capsuleBackfill = task;
+    setChatState(state, ctx);
+    await applyInjection(ctx, state, settings);
+    await saveChat(ctx);
+
+    runtime.backfillBusy = true;
+    runtime.backfillStopRequested = false;
+    runtime.layeredPausedByError = false;
+    runtime.lastError = '';
+    runtime.lastSuccess = '';
+    runtime.lastResultScope = 'layered';
+    let completedNormally = false;
+    refreshUi();
+
+    try {
+        while (!runtime.backfillStopRequested) {
+            state = getChatState(ctx);
+            const currentTask = state.capsuleBackfill || task;
+            const range = nextRoundRange(getMessages(ctx), state, Math.max(0, Number(currentTask.goalEnd) + 1));
+            if (!range) {
+                await saveBackfillTask(ctx, {
+                    status: 'completed',
+                    completedRounds: Math.max(currentTask.completedRounds || 0, currentTask.totalRounds || 0),
+                    nextStart: Math.max(0, currentTask.goalEnd + 1),
+                    lastError: '',
+                    completedAt: Date.now(),
+                });
+                completedNormally = true;
+                break;
+            }
+
+            const ordinal = Math.min(currentTask.totalRounds, currentTask.completedRounds + 1);
+            await saveBackfillTask(ctx, { status: 'running', nextStart: range.start, lastError: '' });
+            await generateRoundCapsuleForRange(ctx, range, {
+                operation: 'historical-backfill',
+                status: `正在补建历史胶囊 ${ordinal}/${currentTask.totalRounds} · 消息 ${range.start}–${range.end}`,
+            });
+            const latestTask = getChatState(ctx).capsuleBackfill || currentTask;
+            await saveBackfillTask(ctx, {
+                status: 'running',
+                completedRounds: Math.min(latestTask.totalRounds, Number(latestTask.completedRounds || 0) + 1),
+                nextStart: range.end + 1,
+                lastError: '',
+            });
+            refreshUi();
+        }
+
+        if (runtime.backfillStopRequested && !completedNormally) {
+            const currentTask = getChatState(ctx).capsuleBackfill || task;
+            await saveBackfillTask(ctx, { status: 'paused', nextStart: currentTask.nextStart, lastError: '' });
+        }
+    } catch (error) {
+        const interrupted = runtime.backfillStopRequested || error?.name === 'AbortError';
+        const currentTask = getChatState(ctx).capsuleBackfill || task;
+        if (interrupted) {
+            await saveBackfillTask(ctx, { status: 'paused', nextStart: currentTask.nextStart, lastError: '' });
+        } else {
+            const message = readableGenerationError(error);
+            console.warn(`[${DISPLAY_NAME}] 历史胶囊补建失败`, error);
+            pauseBackfillAfterError(ctx, error);
+            try {
+                await saveBackfillTask(ctx, { status: 'failed', nextStart: currentTask.nextStart, lastError: message });
+            } catch (saveError) {
+                console.warn(`[${DISPLAY_NAME}] 历史补建失败状态保存失败`, saveError);
+            }
+        }
     } finally {
-        if (runtime.capsuleController === controller) runtime.capsuleController = null;
-        runtime.capsuleBusy = false;
-        if (runtime.activeOperation === 'round-capsule') runtime.activeOperation = '';
+        runtime.backfillBusy = false;
+        runtime.backfillStopRequested = false;
         refreshUi();
     }
+
+    if (completedNormally) {
+        runtime.lastError = '';
+        runtime.lastSuccess = `历史胶囊补建完成 · 共 ${getChatState(ctx).capsuleBackfill?.totalRounds || ranges.length} 轮`;
+        runtime.lastResultScope = 'layered';
+        notify('success', runtime.lastSuccess);
+        refreshUi();
+        const currentSettings = getSettings(ctx);
+        if (currentSettings.autoConsolidateCapsules
+            && roundCapsuleTokens(getChatState(ctx)) >= currentSettings.capsuleConsolidationTokens) {
+            await consolidateRollingMemory(false, { allowWhenAutoOff: true });
+        } else if (currentSettings.layeredAutoEnabled) {
+            scheduleLayeredMemory(600);
+        }
+    }
+    return getChatState(ctx).capsuleBackfill;
+}
+
+async function stopHistoricalBackfill() {
+    if (!runtime.backfillBusy) return;
+    const ctx = getContext();
+    runtime.backfillStopRequested = true;
+    if (runtime.capsuleController && runtime.activeOperation === 'historical-backfill') {
+        runtime.capsuleController.abort(new DOMException('用户停止历史胶囊补建', 'AbortError'));
+        try { ctx.stopGeneration?.(); } catch (error) {
+            console.warn(`[${DISPLAY_NAME}] 酒馆停止接口调用失败`, error);
+        }
+    }
+    const task = getChatState(ctx).capsuleBackfill;
+    if (task) await saveBackfillTask(ctx, { status: 'paused', nextStart: task.nextStart, lastError: '' });
+    runtime.lastError = '';
+    runtime.lastSuccess = '历史胶囊补建已暂停，已完成的胶囊和断点均已保留';
+    runtime.lastResultScope = 'layered';
+    refreshUi();
+    notify('info', runtime.lastSuccess);
 }
 
 async function processLayeredMemory() {
@@ -1513,7 +1735,7 @@ function scheduleLayeredMemory(delay = 1400) {
     }, delay);
 }
 
-async function consolidateRollingMemory(manual = true) {
+async function consolidateRollingMemory(manual = true, { allowWhenAutoOff = false } = {}) {
     const ctx = getContext();
     reconcileGeneratingFlag(ctx);
     const settings = getSettings(ctx);
@@ -1525,7 +1747,7 @@ async function consolidateRollingMemory(manual = true) {
         state.memoryMode = 'layered';
         setChatState(state, ctx);
     }
-    if (!manual && (!settings.layeredAutoEnabled || runtime.layeredPausedByError)) {
+    if (!manual && !allowWhenAutoOff && (!settings.layeredAutoEnabled || runtime.layeredPausedByError)) {
         return null;
     }
     if (layeredTaskBlocked(ctx)) {
@@ -2496,7 +2718,7 @@ function refreshUi() {
     for (const metrics of runtime.overlay.querySelectorAll('[data-gds-metrics]')) metrics.innerHTML = metricsHtml;
     const fullStatus = runtime.overlay.querySelector('[data-gds-status="full"]');
     const layeredStatus = runtime.overlay.querySelector('[data-gds-status="layered"]');
-    if (!runtime.busy && !runtime.workflowActive && !runtime.capsuleBusy) {
+    if (!runtime.busy && !runtime.workflowActive && !runtime.capsuleBusy && !runtime.backfillBusy) {
         const hasCheckpoint = chatState.checkpoints.some(item => item.status === 'committed');
         const recapMissing = hasCheckpoint && !recap;
         const orphanOutput = Boolean(runtime.streamText.trim() && !hasCheckpoint && !chatState.pending);
@@ -2509,8 +2731,11 @@ function refreshUi() {
             else fullStatus.textContent = hasCheckpoint ? '完整剧情记忆已保存并正在注入' : '尚未建立完整剧情记忆，点击“立即完整梳理”';
         }
         if (layeredStatus) {
+            const backfill = chatState.capsuleBackfill;
             if (runtime.lastError && runtime.layeredPausedByError) layeredStatus.textContent = runtime.lastError;
-            else if (layeredNeedsInitialSummary(ctx, chatState, settings)) layeredStatus.textContent = '旧正文较多，请先到“完整剧情梳理”建立基础记忆，再启动自动记录';
+            else if (backfill?.status === 'failed') layeredStatus.textContent = `历史补建停在第 ${Math.min(backfill.totalRounds, backfill.completedRounds + 1)}/${backfill.totalRounds} 轮，可继续补建`;
+            else if (backfill && (backfill.status === 'paused' || (backfill.status === 'running' && !runtime.backfillBusy))) layeredStatus.textContent = `历史补建已暂停 · 已完成 ${backfill.completedRounds}/${backfill.totalRounds} 轮`;
+            else if (layeredNeedsInitialSummary(ctx, chatState, settings)) layeredStatus.textContent = '检测到未记录的旧对话，请先点击“补建历史胶囊”';
             else if (settings.layeredAutoEnabled && runtime.lastSuccess && runtime.lastResultScope === 'layered') layeredStatus.textContent = `${runtime.lastSuccess}；自动记录仍在运行`;
             else if (settings.layeredAutoEnabled) layeredStatus.textContent = '自动记录运行中，将在每轮回复完成后生成一个剧情胶囊';
             else if (runtime.lastSuccess && runtime.lastResultScope === 'layered') layeredStatus.textContent = runtime.lastSuccess;
@@ -2526,6 +2751,12 @@ function refreshUi() {
     const layeredStart = runtime.overlay.querySelector('[data-gds-layered-start]');
     const layeredPause = runtime.overlay.querySelector('[data-gds-layered-pause]');
     const layeredStop = runtime.overlay.querySelector('[data-gds-layered-stop]');
+    const backfillStart = runtime.overlay.querySelector('[data-gds-backfill-start]');
+    const backfillContinue = runtime.overlay.querySelector('[data-gds-backfill-continue]');
+    const backfillRestart = runtime.overlay.querySelector('[data-gds-backfill-restart]');
+    const backfillStop = runtime.overlay.querySelector('[data-gds-backfill-stop]');
+    const backfillProgress = runtime.overlay.querySelector('[data-gds-backfill-progress]');
+    const backfillBar = runtime.overlay.querySelector('[data-gds-backfill-bar]');
     const directorStop = runtime.overlay.querySelector('[data-gds-director-stop]');
     const directorContinue = runtime.overlay.querySelector('[data-gds-director-continue]');
     const directorRestart = runtime.overlay.querySelector('[data-gds-director-restart]');
@@ -2533,7 +2764,7 @@ function refreshUi() {
     const replyStop = runtime.overlay.querySelector('[data-gds-reply-stop]');
     const rebuild = runtime.overlay.querySelector('[data-gds-rebuild]');
     const restore = runtime.overlay.querySelector('[data-gds-restore]');
-    const taskActive = runtime.busy || runtime.workflowActive || runtime.capsuleBusy || runtime.directorBusy || runtime.replyBusy;
+    const taskActive = runtime.busy || runtime.workflowActive || runtime.capsuleBusy || runtime.backfillBusy || runtime.directorBusy || runtime.replyBusy;
     if (summarize) summarize.disabled = taskActive || Boolean(chatState.pending);
     if (consolidate) consolidate.disabled = taskActive || !activeRoundCapsules(chatState).length;
     if (restoreArchive) restoreArchive.disabled = taskActive || !chatState.memoryArchives.length;
@@ -2550,7 +2781,34 @@ function refreshUi() {
         layeredPause.hidden = !settings.layeredAutoEnabled;
         layeredPause.disabled = false;
     }
-    if (layeredStop) layeredStop.hidden = !(runtime.capsuleBusy || runtime.activeOperation === 'layered-consolidation');
+    if (layeredStop) layeredStop.hidden = !((runtime.capsuleBusy && runtime.activeOperation === 'round-capsule') || runtime.activeOperation === 'layered-consolidation');
+    const backfillTask = chatState.capsuleBackfill;
+    const backfillResumable = Boolean(backfillTask && ['paused', 'failed', 'running'].includes(backfillTask.status) && !runtime.backfillBusy);
+    if (backfillStart) {
+        backfillStart.hidden = runtime.backfillBusy || backfillResumable;
+        backfillStart.disabled = taskActive;
+        backfillStart.textContent = backfillTask?.status === 'completed' ? '补建新增历史' : '补建历史胶囊';
+    }
+    if (backfillContinue) {
+        backfillContinue.hidden = !backfillResumable;
+        backfillContinue.disabled = taskActive;
+    }
+    if (backfillRestart) {
+        backfillRestart.hidden = !backfillResumable;
+        backfillRestart.disabled = taskActive;
+    }
+    if (backfillStop) backfillStop.hidden = !runtime.backfillBusy;
+    if (backfillProgress) {
+        if (runtime.backfillBusy && backfillTask) backfillProgress.textContent = `正在连续补建 · 已完成 ${backfillTask.completedRounds}/${backfillTask.totalRounds} 轮 · 下一条从消息 ${backfillTask.nextStart} 开始`;
+        else if (backfillTask?.status === 'completed') backfillProgress.textContent = `本次补建完成 · 共 ${backfillTask.totalRounds} 轮 · 已保存全部断点`;
+        else if (backfillTask?.status === 'failed') backfillProgress.textContent = `失败后已暂停 · 已完成 ${backfillTask.completedRounds}/${backfillTask.totalRounds} 轮 · ${backfillTask.lastError || '可点击继续重试当前轮'}`;
+        else if (backfillResumable) backfillProgress.textContent = `任务已暂停 · 已完成 ${backfillTask.completedRounds}/${backfillTask.totalRounds} 轮`;
+        else backfillProgress.textContent = '扫描近期保留范围之前尚未记录的完整对话轮';
+    }
+    if (backfillBar) {
+        backfillBar.max = Math.max(1, Number(backfillTask?.totalRounds) || 1);
+        backfillBar.value = Math.min(backfillBar.max, Math.max(0, Number(backfillTask?.completedRounds) || 0));
+    }
     if (directorStop) directorStop.hidden = !(runtime.directorBusy && runtime.directorAbortController);
     if (directorContinue) {
         const resumable = Boolean(director.taskState?.task || director.mainPlan);
@@ -2582,10 +2840,14 @@ function refreshUi() {
     if (layeredSummary) layeredSummary.value = recap;
     const layeredState = runtime.overlay.querySelector('[data-gds-layered-state]');
     if (layeredState) {
-        const active = Boolean(settings.layeredAutoEnabled);
+        const active = Boolean(settings.layeredAutoEnabled || runtime.backfillBusy);
         layeredState.classList.toggle('active', active);
         layeredState.classList.toggle('error', runtime.layeredPausedByError);
-        layeredState.textContent = runtime.layeredPausedByError ? '因错误已自动暂停' : active ? '自动记录：运行中' : '自动记录：已停止';
+        layeredState.textContent = runtime.layeredPausedByError
+            ? '因错误已暂停'
+            : runtime.backfillBusy
+                ? '历史补建：运行中'
+                : settings.layeredAutoEnabled ? '自动记录：运行中' : '自动记录：已停止';
     }
     for (const [selector, value] of [
         ['[data-gds-keep]', settings.keepMessages],
@@ -2975,6 +3237,16 @@ function createUi() {
                 <div class="gds-layered-state" data-gds-layered-state></div>
                 <div class="gds-status" data-gds-status="layered">分层滚动记忆尚未启动</div>
                 <div class="gds-metrics" data-gds-metrics></div>
+                <div class="gds-backfill-panel">
+                    <div class="gds-backfill-copy"><strong>历史胶囊补建</strong><span data-gds-backfill-progress>扫描近期保留范围之前尚未记录的完整对话轮</span></div>
+                    <progress data-gds-backfill-bar max="1" value="0"></progress>
+                    <div class="gds-backfill-actions">
+                        <button class="gds-primary" data-gds-backfill-start>补建历史胶囊</button>
+                        <button data-gds-backfill-continue hidden>继续补建</button>
+                        <button data-gds-backfill-restart hidden>重新扫描补建</button>
+                        <button class="gds-danger" data-gds-backfill-stop hidden>停止补建</button>
+                    </div>
+                </div>
                 <div class="gds-actions">
                     <button class="gds-primary" data-gds-layered-start>启动自动记录</button>
                     <button data-gds-layered-pause>停止自动记录</button>
@@ -3000,7 +3272,7 @@ function createUi() {
                         <label>注入上限 Token <input type="number" min="160" step="100" data-gds-injection></label>
                         <label>前情目标字数 <input type="number" min="80" step="20" data-gds-words></label>
                     </div>
-                    <p class="gds-help">自动记录出错后会立即暂停，不会自行反复重试。点击“启动自动记录”后才会继续运行。</p>
+                    <p class="gds-help">刚开始使用时，可先补建近期保留范围之前的历史胶囊。补建会逐轮连续完成并保存断点。自动记录出错后会立即暂停，不会自行反复重试；历史补建同样会停在失败轮次。自动记录只负责补建完成后的新对话。</p>
                 </details>
                 <details class="gds-details" open><summary>逐轮胶囊与归档记录</summary><div data-gds-capsules></div></details>
             </section>
@@ -3099,7 +3371,7 @@ function createUi() {
     bindFloatingDrag(floating);
 
     overlay.addEventListener('click', async event => {
-        const target = event.target.closest('[data-gds-tab],[data-gds-close],[data-gds-summarize],[data-gds-layered-start],[data-gds-layered-pause],[data-gds-layered-stop],[data-gds-consolidate],[data-gds-restore-archive],[data-gds-continue],[data-gds-stop],[data-gds-rebuild],[data-gds-restore],[data-gds-save-summary],[data-gds-api-save],[data-gds-api-test],[data-gds-director-longline],[data-gds-director-branch],[data-gds-director-foreshadow],[data-gds-director-save],[data-gds-director-lock],[data-gds-director-select-branch],[data-gds-director-stop],[data-gds-director-continue],[data-gds-director-restart],[data-gds-director-clear],[data-gds-calendar-add],[data-gds-calendar-remove],[data-gds-calendar-sync],[data-gds-reply-generate],[data-gds-reply-copy],[data-gds-reply-insert],[data-gds-reply-stop]');
+        const target = event.target.closest('[data-gds-tab],[data-gds-close],[data-gds-summarize],[data-gds-layered-start],[data-gds-layered-pause],[data-gds-layered-stop],[data-gds-backfill-start],[data-gds-backfill-continue],[data-gds-backfill-restart],[data-gds-backfill-stop],[data-gds-consolidate],[data-gds-restore-archive],[data-gds-continue],[data-gds-stop],[data-gds-rebuild],[data-gds-restore],[data-gds-save-summary],[data-gds-api-save],[data-gds-api-test],[data-gds-director-longline],[data-gds-director-branch],[data-gds-director-foreshadow],[data-gds-director-save],[data-gds-director-lock],[data-gds-director-select-branch],[data-gds-director-stop],[data-gds-director-continue],[data-gds-director-restart],[data-gds-director-clear],[data-gds-calendar-add],[data-gds-calendar-remove],[data-gds-calendar-sync],[data-gds-reply-generate],[data-gds-reply-copy],[data-gds-reply-insert],[data-gds-reply-stop]');
         if (!target) return;
         try {
             if (target.matches('[data-gds-tab]')) {
@@ -3110,6 +3382,10 @@ function createUi() {
             if (target.matches('[data-gds-summarize]')) await startSummary(true);
             if (target.matches('[data-gds-layered-start]')) await startLayeredAuto();
             if (target.matches('[data-gds-layered-pause],[data-gds-layered-stop]')) stopLayeredAuto();
+            if (target.matches('[data-gds-backfill-start]')) await runHistoricalBackfill();
+            if (target.matches('[data-gds-backfill-continue]')) await runHistoricalBackfill({ resume: true });
+            if (target.matches('[data-gds-backfill-restart]')) await runHistoricalBackfill({ restart: true });
+            if (target.matches('[data-gds-backfill-stop]')) await stopHistoricalBackfill();
             if (target.matches('[data-gds-consolidate]')) await consolidateRollingMemory(true);
             if (target.matches('[data-gds-restore-archive]')) await restoreLatestCapsuleArchive(getContext());
             if (target.matches('[data-gds-continue]')) await continueSummary();

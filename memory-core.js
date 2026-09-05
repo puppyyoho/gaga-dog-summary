@@ -1,4 +1,4 @@
-export const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 3;
 
 export const DEFAULT_CHAT_STATE = {
     schemaVersion: SCHEMA_VERSION,
@@ -19,6 +19,7 @@ export const DEFAULT_CHAT_STATE = {
     roundCapsules: [],
     memoryArchives: [],
     lastCapsuleIndex: -1,
+    capsuleBackfill: null,
     styleAnchors: [],
     hiddenRanges: [],
     pinnedFactIds: [],
@@ -50,6 +51,31 @@ export function normalizeChatState(value) {
     result.summaryMode = ['novel', 'structured', 'mixed'].includes(result.summaryMode) ? result.summaryMode : 'mixed';
     result.memoryMode = ['manual', 'layered'].includes(result.memoryMode) ? result.memoryMode : 'manual';
     result.lastCapsuleIndex = Number.isInteger(Number(result.lastCapsuleIndex)) ? Number(result.lastCapsuleIndex) : -1;
+    if (!result.capsuleBackfill || typeof result.capsuleBackfill !== 'object' || Array.isArray(result.capsuleBackfill)) {
+        result.capsuleBackfill = null;
+    } else {
+        const goalEnd = Number(result.capsuleBackfill.goalEnd);
+        const initialStart = Number(result.capsuleBackfill.initialStart);
+        const nextStart = Number(result.capsuleBackfill.nextStart);
+        result.capsuleBackfill = {
+            status: ['running', 'paused', 'failed', 'completed'].includes(result.capsuleBackfill.status)
+                ? result.capsuleBackfill.status
+                : 'paused',
+            goalEnd: Number.isFinite(goalEnd) ? Math.max(-1, Math.round(goalEnd)) : -1,
+            totalRounds: Math.max(0, Math.round(Number(result.capsuleBackfill.totalRounds) || 0)),
+            completedRounds: Math.max(0, Math.round(Number(result.capsuleBackfill.completedRounds) || 0)),
+            initialStart: Number.isFinite(initialStart) ? Math.max(0, Math.round(initialStart)) : 0,
+            nextStart: Number.isFinite(nextStart) ? Math.max(0, Math.round(nextStart)) : 0,
+            lastError: compactText(result.capsuleBackfill.lastError || '', 1000),
+            startedAt: Math.max(0, Number(result.capsuleBackfill.startedAt) || 0),
+            updatedAt: Math.max(0, Number(result.capsuleBackfill.updatedAt) || 0),
+            completedAt: Math.max(0, Number(result.capsuleBackfill.completedAt) || 0),
+        };
+        result.capsuleBackfill.totalRounds = Math.max(
+            result.capsuleBackfill.totalRounds,
+            result.capsuleBackfill.completedRounds,
+        );
+    }
     if (!result.summaryArtifacts || typeof result.summaryArtifacts !== 'object' || Array.isArray(result.summaryArtifacts)) result.summaryArtifacts = { novel: '', structured: '', mixed: '' };
     result.summaryArtifacts = {
         novel: String(result.summaryArtifacts.novel || ''),
@@ -360,19 +386,42 @@ export function appendRoundCapsule(stateValue, capsule) {
     return next;
 }
 
-export function nextRoundRange(messages, stateValue) {
+export function nextRoundRange(messages, stateValue, exclusiveEndValue = null) {
     const normalized = normalizeMessages(messages);
     const state = normalizeChatState(stateValue);
     const start = Math.max(0, Number(state.lastProcessedIndex ?? -1) + 1, Number(state.lastCapsuleIndex ?? -1) + 1);
-    if (start >= normalized.length) return null;
-    let sawStoryMessage = false;
-    for (let index = start; index < normalized.length; index += 1) {
+    const exclusiveEnd = exclusiveEndValue === null
+        ? normalized.length
+        : Math.max(0, Math.min(normalized.length, Math.round(Number(exclusiveEndValue) || 0)));
+    if (start >= exclusiveEnd) return null;
+    let sawUser = false;
+    for (let index = start; index < exclusiveEnd; index += 1) {
         const item = normalized[index];
         if (item.isSystem) continue;
-        sawStoryMessage = true;
-        if (!item.isUser) return makeSourceRange(messages, start, index);
+        if (item.isUser) {
+            sawUser = true;
+            continue;
+        }
+        if (sawUser) return makeSourceRange(messages, start, index);
     }
-    return sawStoryMessage ? null : null;
+    return null;
+}
+
+export function roundRangesForBackfill(messages, stateValue, exclusiveEndValue) {
+    const ranges = [];
+    const state = normalizeChatState(stateValue);
+    const cursor = {
+        ...state,
+        lastProcessedIndex: state.lastProcessedIndex,
+        lastCapsuleIndex: state.lastCapsuleIndex,
+    };
+    while (true) {
+        const range = nextRoundRange(messages, cursor, exclusiveEndValue);
+        if (!range) break;
+        ranges.push(range);
+        cursor.lastCapsuleIndex = range.end;
+    }
+    return ranges;
 }
 
 export function activeRoundCapsules(stateValue) {

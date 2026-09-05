@@ -208,6 +208,16 @@ test('uses independent full-summary and layered-memory workflows without the old
     assert.match(js, /data-gds-layered-start/);
     assert.match(js, /data-gds-layered-pause/);
     assert.match(js, /data-gds-layered-stop/);
+    assert.match(js, /data-gds-backfill-start/);
+    assert.match(js, /data-gds-backfill-continue/);
+    assert.match(js, /data-gds-backfill-restart/);
+    assert.match(js, /data-gds-backfill-stop/);
+    assert.match(js, /data-gds-backfill-progress/);
+    assert.match(js, /async function runHistoricalBackfill/);
+    assert.match(js, /while \(!runtime\.backfillStopRequested\)/);
+    assert.match(js, /status:\s*'failed'/);
+    assert.match(js, /历史胶囊补建失败/);
+    assert.match(js, /任务已停在失败轮次/);
     assert.match(js, /data-gds-consolidate/);
     assert.match(js, /data-gds-capsules/);
     assert.match(js, /data-gds-restore-archive/);

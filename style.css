@@ -325,6 +325,35 @@ body.gds-panel-open { overflow: hidden !important; }
 .gds-actions .gds-danger { border-color: #c75466; background: #c75466; color: white; }
 .gds-actions button:disabled, .gds-field button:disabled { cursor: not-allowed; opacity: .52; }
 
+.gds-backfill-panel {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(150px, 240px) auto;
+    align-items: center;
+    gap: 12px;
+    margin: 0 22px 14px;
+    padding: 12px 14px;
+    border: 1px solid var(--gds-line);
+    border-radius: 12px;
+    background: rgba(255, 255, 255, .58);
+}
+.gds-backfill-copy { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.gds-backfill-copy strong { color: var(--gds-pink-deep); font-size: 13px; }
+.gds-backfill-copy span { color: var(--gds-muted); font-size: 11px; line-height: 1.45; }
+.gds-backfill-panel progress { width: 100%; height: 8px; accent-color: var(--gds-pink-deep); }
+.gds-backfill-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
+.gds-backfill-actions button {
+    border: 1px solid var(--gds-line);
+    border-radius: 9px;
+    background: #fff;
+    color: var(--gds-ink);
+    cursor: pointer;
+    padding: 7px 10px;
+    white-space: nowrap;
+}
+.gds-backfill-actions .gds-primary { border-color: var(--gds-pink-deep); background: var(--gds-pink-deep); color: #fff; }
+.gds-backfill-actions .gds-danger { border-color: #c75466; background: #c75466; color: #fff; }
+.gds-backfill-actions button:disabled { cursor: not-allowed; opacity: .52; }
+
 .gds-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 14px; padding: 0 22px; min-width: 0; }
 .gds-wide { grid-column: 1 / -1; }
 .gds-field { display: flex; flex-direction: column; gap: 7px; min-width: 0; color: var(--gds-muted); font-size: 13px; }
@@ -580,6 +609,9 @@ body.gds-panel-open { overflow: hidden !important; }
     .gds-metrics { padding: 0 14px 12px; }
     .gds-actions { padding: 0 14px 14px; }
     .gds-actions button { flex: 1 1 128px; min-height: 40px; }
+    .gds-backfill-panel { grid-template-columns: 1fr; margin: 0 14px 12px; }
+    .gds-backfill-actions { justify-content: stretch; }
+    .gds-backfill-actions button { flex: 1 1 130px; min-height: 38px; }
     .gds-grid { display: block; padding: 0 14px; }
     .gds-field { width: 100%; margin-bottom: 14px; }
     .gds-field textarea {

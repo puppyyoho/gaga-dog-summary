@@ -10,6 +10,7 @@ import {
     mergeMemoryPacket,
     normalizeChatState,
     nextRoundRange,
+    roundRangesForBackfill,
     parseModelPacket,
     parseRoundCapsule,
     rangeForNewSummary,
@@ -173,6 +174,49 @@ test('creates one incremental capsule for a completed user and assistant round',
     assert.equal(next.lastCapsuleIndex, 3);
     assert.equal(activeRoundCapsules(next).length, 1);
     assert.ok(roundCapsuleTokens(next) > 0);
+});
+
+test('historical backfill plans every complete old round and respects the recent boundary', () => {
+    const history = [
+        { name: 'Char', mes: '开场问候。', send_date: '0' },
+        { name: 'User', is_user: true, mes: '第一轮用户消息。', send_date: '1' },
+        { name: 'Char', mes: '第一轮角色回复。', send_date: '2' },
+        { name: 'User', is_user: true, mes: '第二轮用户消息。', send_date: '3' },
+        { name: 'Char', mes: '第二轮角色回复。', send_date: '4' },
+        { name: 'User', is_user: true, mes: '近期用户消息。', send_date: '5' },
+        { name: 'Char', mes: '近期角色回复。', send_date: '6' },
+    ];
+    const ranges = roundRangesForBackfill(history, normalizeChatState(), 5);
+    assert.deepEqual(ranges.map(range => [range.start, range.end]), [[0, 2], [3, 4]]);
+    assert.equal(ranges.some(range => range.end >= 5), false);
+});
+
+test('historical backfill resumes after the last saved capsule without repeating it', () => {
+    const state = normalizeChatState({ lastCapsuleIndex: 1 });
+    const ranges = roundRangesForBackfill(messages, state, 6);
+    assert.deepEqual(ranges.map(range => [range.start, range.end]), [[2, 3], [4, 5]]);
+});
+
+test('historical backfill covers messages 0 through 89 when 100 messages keep the newest 10', () => {
+    const hundred = Array.from({ length: 100 }, (_, index) => ({
+        name: index % 2 ? 'Char' : 'User',
+        is_user: index % 2 === 0,
+        mes: `第 ${index} 条消息`,
+        send_date: String(index),
+    }));
+    const ranges = roundRangesForBackfill(hundred, normalizeChatState(), 90);
+    assert.equal(ranges.length, 45);
+    assert.deepEqual([ranges[0].start, ranges.at(-1).end], [0, 89]);
+});
+
+test('normalizes persisted historical backfill progress', () => {
+    const state = normalizeChatState({
+        capsuleBackfill: { status: 'failed', goalEnd: 0, totalRounds: 8, completedRounds: 3, nextStart: 6, lastError: '网络错误' },
+    });
+    assert.equal(state.capsuleBackfill.goalEnd, 0);
+    assert.equal(state.capsuleBackfill.status, 'failed');
+    assert.equal(state.capsuleBackfill.completedRounds, 3);
+    assert.equal(state.capsuleBackfill.nextStart, 6);
 });
 
 test('layered injection omits capsules still covered by the complete recent floors', () => {
