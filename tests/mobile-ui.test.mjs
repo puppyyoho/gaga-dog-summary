@@ -148,8 +148,11 @@ test('keeps switched pages in a dedicated scrolling viewport and resists theme h
 test('opening lower detail sections preserves the internal scroll anchor', () => {
     assert.match(css, /\.gds-page-host\s*\{[\s\S]*?overflow-anchor:\s*none/);
     assert.match(js, /function bindStableDetailsScrolling\(pageHost\)/);
-    assert.match(js, /summary\.getBoundingClientRect\(\)\.top/);
-    assert.match(js, /pageHost\.scrollTop \+= delta/);
+    assert.match(js, /event\.preventDefault\(\)/);
+    assert.match(js, /const lockedScrollTop = pageHost\.scrollTop/);
+    assert.match(js, /details\.open = !details\.open/);
+    assert.match(js, /pageHost\.scrollTop = lockedScrollTop/);
+    assert.match(js, /const preservedScrollTop = Number\(pageHost\?\.scrollTop \|\| 0\)/);
     assert.match(js, /bindStableDetailsScrolling\(overlay\.querySelector\('\.gds-page-host'\)\)/);
 });
 

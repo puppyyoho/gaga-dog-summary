@@ -37,7 +37,20 @@ function currentStreamingApi(ctx) {
     return null;
 }
 
-function selectedConnectionProfile(ctx, requestedId = '') {
+function connectionModel(value) {
+    const sources = [value, value?.settings, value?.config, value?.connection, value?.data];
+    const keys = ['model', 'modelName', 'model_name', 'defaultModel', 'default_model', 'selectedModel', 'selected_model', 'chatCompletionModel', 'chat_completion_model'];
+    for (const source of sources) {
+        if (!source || typeof source !== 'object') continue;
+        for (const key of keys) {
+            const model = String(source[key] || '').trim();
+            if (model) return model;
+        }
+    }
+    return '';
+}
+
+function selectedConnectionProfile(ctx, requestedId = '', requestedModel = '') {
     const manager = ctx?.extensionSettings?.connectionManager;
     const disabled = Array.isArray(ctx?.extensionSettings?.disabledExtensions)
         && ctx.extensionSettings.disabledExtensions.includes('connection-manager');
@@ -52,11 +65,50 @@ function selectedConnectionProfile(ctx, requestedId = '') {
     } catch {
         return null;
     }
+    const model = String(requestedModel || connectionModel(profile)).trim();
     return {
         service: ctx.ConnectionManagerRequestService,
         profileId,
-        label: profile.name || profile.model || '连接管理器',
+        model,
+        label: [profile.name || '连接管理器', model].filter(Boolean).join(' · '),
     };
+}
+
+function resolveChatCompletionModel(ctx, settings) {
+    try {
+        const model = ctx?.getChatCompletionModel?.(settings);
+        if (model) return String(model).trim();
+    } catch { /* Fall through to provider-specific fields. */ }
+    const source = String(settings?.chat_completion_source || '').trim().toLowerCase();
+    const fieldBySource = {
+        claude: 'claude_model',
+        openai: 'openai_model',
+        makersuite: 'google_model',
+        vertexai: 'vertexai_model',
+        openrouter: 'openrouter_model',
+        mistralai: 'mistralai_model',
+        custom: 'custom_model',
+        cohere: 'cohere_model',
+        groq: 'groq_model',
+        siliconflow: 'siliconflow_model',
+        minimax: 'minimax_model',
+        electronhub: 'electronhub_model',
+        chutes: 'chutes_model',
+        nanogpt: 'nanogpt_model',
+        deepseek: 'deepseek_model',
+        xai: 'xai_model',
+        moonshot: 'moonshot_model',
+        fireworks: 'fireworks_model',
+        zai: 'zai_model',
+    };
+    return String(settings?.[fieldBySource[source]] || settings?.model || settings?.model_name || '').trim();
+}
+
+function ensurePayloadModel(payload, model) {
+    if (!payload || typeof payload !== 'object') throw new Error('无法构造当前 Chat Completion 请求');
+    if (!String(payload.model || '').trim() && String(model || '').trim()) payload.model = String(model).trim();
+    if (!String(payload.model || '').trim()) throw new Error('当前 Chat Completion 连接没有提供模型名称，请先在模型连接页选择模型');
+    return payload;
 }
 
 async function buildChatPayload(ctx, api, messages) {
@@ -64,10 +116,13 @@ async function buildChatPayload(ctx, api, messages) {
     if (typeof runtime.createGenerationParameters !== 'function') throw new Error('当前酒馆版本没有导出 Chat Completion normal 参数构造器');
     const settings = cloneSettings(api.settings);
     settings.stream_openai = true;
-    const model = ctx.getChatCompletionModel?.(settings);
+    let model = resolveChatCompletionModel(ctx, settings);
+    if (!model && typeof runtime.getChatCompletionModel === 'function') {
+        try { model = String(runtime.getChatCompletionModel(settings) || '').trim(); } catch { /* Validate below. */ }
+    }
+    if (!model) throw new Error('无法读取当前 Chat Completion 模型，请先在酒馆中选择模型');
     const built = await runtime.createGenerationParameters(settings, model, 'normal', messages);
-    const payload = built?.generate_data;
-    if (!payload || typeof payload !== 'object') throw new Error('无法构造当前 Chat Completion 请求');
+    const payload = ensurePayloadModel(built?.generate_data, model);
     payload.stream = true;
     delete payload.n;
     delete payload.tools;
@@ -75,7 +130,7 @@ async function buildChatPayload(ctx, api, messages) {
     delete payload.assistant_prefill;
     const ready = ctx.eventTypes?.CHAT_COMPLETION_SETTINGS_READY ?? ctx.event_types?.CHAT_COMPLETION_SETTINGS_READY;
     if (ready && typeof ctx.eventSource?.emit === 'function') await ctx.eventSource.emit(ready, payload);
-    return payload;
+    return ensurePayloadModel(payload, resolveChatCompletionModel(ctx, api.settings) || model);
 }
 
 function activeTextPreset(ctx, settings) {
@@ -365,7 +420,7 @@ export async function generateStreaming(ctx, { systemPrompt, prompt, signal, onT
     }
     const api = providerProfile?.kind === 'connection' ? null : currentStreamingApi(ctx);
     const connection = providerProfile?.kind === 'connection'
-        ? selectedConnectionProfile(ctx, providerProfile.profileId)
+        ? selectedConnectionProfile(ctx, providerProfile.profileId, providerProfile.model)
         : api ? null : selectedConnectionProfile(ctx);
     if (!api && !connection) return { supported: false, text: '', streamed: false };
     const source = api?.label || connection?.label || '当前连接';
@@ -383,6 +438,7 @@ export async function generateStreaming(ctx, { systemPrompt, prompt, signal, onT
                 messages,
                 configuredOutputLimit(providerProfile),
                 { stream: true, signal, extractData: true, includePreset: true, includeInstruct: true },
+                connection.model ? { model: connection.model } : {},
             );
         } else if (api.kind === 'chat') {
             const payload = await buildChatPayload(ctx, api, messages);
@@ -446,7 +502,7 @@ async function generateBuffered(ctx, options) {
         return directCompletion(options.providerProfile, messages, options.signal, false, options.onText, options.onStatus);
     }
     if (options.providerProfile?.kind === 'connection') {
-        const connection = selectedConnectionProfile(ctx, options.providerProfile.profileId);
+        const connection = selectedConnectionProfile(ctx, options.providerProfile.profileId, options.providerProfile.model);
         if (!connection) throw new Error('指定的酒馆 Connection Manager 连接不可用或已被禁用');
         const messages = [
             ...(options.systemPrompt ? [{ role: 'system', content: options.systemPrompt }] : []),
@@ -458,6 +514,7 @@ async function generateBuffered(ctx, options) {
                 messages,
                 configuredOutputLimit(options.providerProfile),
                 { stream: false, signal: options.signal, extractData: true, includePreset: true, includeInstruct: true },
+                connection.model ? { model: connection.model } : {},
             );
             const text = extractGeneratedText(response, ctx);
             if (!text.trim()) throw new Error(`${connection.label} 返回了空内容`);

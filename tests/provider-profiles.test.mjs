@@ -29,3 +29,16 @@ test('resolves a selected Connection Manager profile when available', () => {
     assert.equal(provider.baseUrl, 'https://api.example/v1');
     assert.equal(provider.model, 'claude-3');
 });
+
+test('lets each module override a Connection Manager model after pulling the model list', () => {
+    const ctx = {
+        extensionSettings: {
+            connectionManager: { profiles: [{ id: 'cm1', name: 'Claude', model: 'old-model' }] },
+        },
+    };
+    const provider = resolveModuleProvider({
+        moduleConnections: { memory: 'connection:cm1' },
+        moduleModels: { memory: 'claude-fable-5' },
+    }, 'memory', ctx);
+    assert.equal(provider.model, 'claude-fable-5');
+});

@@ -104,11 +104,18 @@ export function getConnectionManagerProfiles(ctx = {}) {
 
 export function resolveModuleProvider(settings = {}, moduleName = 'memory', ctx = {}) {
     const choice = settings?.moduleConnections?.[moduleName] || PROVIDER_CURRENT;
+    const moduleModel = String(settings?.moduleModels?.[moduleName] || '').trim();
     if (!choice || choice === PROVIDER_CURRENT || choice === 'tavern') return { kind: PROVIDER_CURRENT, name: '当前酒馆连接' };
     if (String(choice).startsWith('connection:')) {
         const profileId = String(choice).slice('connection:'.length).trim();
         const known = getConnectionManagerProfiles(ctx).find(profile => profile.id === profileId);
-        return profileId ? { kind: 'connection', profileId, ...(known || {}), name: known?.name || profileId } : { kind: PROVIDER_CURRENT, name: '当前酒馆连接' };
+        return profileId ? {
+            kind: 'connection',
+            profileId,
+            ...(known || {}),
+            ...(moduleModel ? { model: moduleModel } : {}),
+            name: known?.name || profileId,
+        } : { kind: PROVIDER_CURRENT, name: '当前酒馆连接' };
     }
     const custom = normalizeProviderProfiles(settings.apiProfiles).find(profile => profile.id === choice);
     return custom || { kind: PROVIDER_CURRENT, name: '当前酒馆连接' };

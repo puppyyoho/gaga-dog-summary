@@ -117,6 +117,34 @@ test('uses Tavern CONNECT_API_MAP for the selected Connection Manager source', a
     }
 });
 
+test('passes the module-selected model into Connection Manager generation', async () => {
+    const calls = [];
+    const ctx = {
+        extensionSettings: {
+            connectionManager: {
+                selectedProfile: 'cm-writer',
+                profiles: [{ id: 'cm-writer', name: '写作连接' }],
+            },
+        },
+        ConnectionManagerRequestService: {
+            isProfileSupported: () => true,
+            sendRequest: async (...args) => {
+                calls.push(args);
+                return { choices: [{ message: { content: '生成成功' } }] };
+            },
+        },
+    };
+    const result = await generateWithFallback(ctx, {
+        systemPrompt: '系统',
+        prompt: '材料',
+        preferStream: false,
+        providerProfile: { kind: 'connection', profileId: 'cm-writer', name: '写作连接', model: 'claude-fable-5' },
+    });
+    assert.equal(result.text, '生成成功');
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0][4].model, 'claude-fable-5');
+});
+
 test('uses the live Text Completion service for real streaming', async () => {
     const payloads = [];
     const updates = [];

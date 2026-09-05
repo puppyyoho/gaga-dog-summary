@@ -92,8 +92,8 @@ const INJECTION_ID = `${EXTENSION_NAME}:memory`;
 const DIRECTOR_INJECTION_ID = `${EXTENSION_NAME}:director`;
 const PANEL_LOGO_URL = new URL('./assets/gaga-dog-logo.png', import.meta.url).href;
 const FLOATING_LOGO_URL = new URL('./assets/gaga-dog-floating.png', import.meta.url).href;
-const VERSION = '0.5.1';
-const SETTINGS_VERSION = 7;
+const VERSION = '0.5.2';
+const SETTINGS_VERSION = 8;
 
 const DEFAULT_SETTINGS = {
     showFloatingButton: true,
@@ -116,6 +116,7 @@ const DEFAULT_SETTINGS = {
     streamOutput: true,
     apiProfiles: [],
     moduleConnections: { memory: PROVIDER_CURRENT, director: PROVIDER_CURRENT, reply: PROVIDER_CURRENT },
+    moduleModels: { memory: '', director: '', reply: '' },
     prompts: {},
 };
 
@@ -255,8 +256,13 @@ function getSettings(ctx = getContext()) {
         ...DEFAULT_SETTINGS.moduleConnections,
         ...(current?.moduleConnections && typeof current.moduleConnections === 'object' ? current.moduleConnections : {}),
     };
+    result.moduleModels = {
+        ...DEFAULT_SETTINGS.moduleModels,
+        ...(current?.moduleModels && typeof current.moduleModels === 'object' ? current.moduleModels : {}),
+    };
     for (const moduleName of ['memory', 'director', 'reply']) {
         result.moduleConnections[moduleName] = String(result.moduleConnections[moduleName] || PROVIDER_CURRENT);
+        result.moduleModels[moduleName] = String(result.moduleModels[moduleName] || '').trim();
     }
     for (const key of ['keepMessages', 'injectionMaxTokens', 'recallLimit', 'targetWords', 'capsuleConsolidationTokens']) {
         const value = Number(result[key]);
@@ -2420,6 +2426,12 @@ async function pullModelsForProvider(ctx, moduleName, { force = false, notifyUse
         }
         const applied = applyPulledModelsToForm(overlay, models, selected.profile.model);
         runtime.modelOptions = applied.options;
+        if (selected.profile.kind === 'connection' && applied.selected) {
+            const settings = getSettings(ctx);
+            settings.moduleModels[moduleName] = applied.selected;
+            ctx.extensionSettings[SETTINGS_KEY] = settings;
+            saveSettings(ctx);
+        }
         if (status) status.textContent = `已拉取 ${models.length} 个模型${applied.selected ? `，当前使用：${applied.selected}` : ''}`;
         if (notifyUser) notify('success', models.length ? `已从“${selected.profile.name || selected.profile.profileId}”拉取 ${models.length} 个模型。` : '连接成功，但服务未返回模型列表。');
         return models;
@@ -2451,9 +2463,10 @@ async function saveApiProfileFromUi(ctx) {
     if (selected.profile.kind === 'connection') {
         const settings = getSettings(ctx);
         settings.moduleConnections[moduleName] = selected.choice;
+        settings.moduleModels[moduleName] = model || selected.profile.model || '';
         ctx.extensionSettings[SETTINGS_KEY] = settings;
         saveSettings(ctx);
-        notify('success', `已直接绑定酒馆连接到${moduleName === 'memory' ? '剧情记忆' : moduleName === 'director' ? '情节导演' : '代写回复'}，不需要重复填写模型名。`);
+        notify('success', `已直接绑定酒馆连接和模型 ${settings.moduleModels[moduleName] || '（跟随连接默认值）'} 到${moduleName === 'memory' ? '剧情记忆' : moduleName === 'director' ? '情节导演' : '代写回复'}。`);
         return;
     }
     if (!baseUrl || !model) throw new Error('请先填写独立 API URL 和模型名，或先选择一个酒馆连接。');
@@ -2529,39 +2542,28 @@ function setActiveTab(tab = 'home') {
 function bindStableDetailsScrolling(pageHost) {
     if (!pageHost || pageHost.dataset.gdsStableDetails === 'true') return;
     pageHost.dataset.gdsStableDetails = 'true';
-    let pendingAnchor = null;
 
-    // Native <details> may scroll a nested overflow container when a summary
-    // near the bottom is activated. Remember the clicked summary before the
-    // default toggle and keep it at the same visual position after reflow.
+    // Some Tavern themes focus a <summary> by scrolling the nearest nested
+    // overflow container back to its beginning. Own the toggle and restore the
+    // exact container offset after every layout phase instead of accumulating
+    // viewport-coordinate deltas.
     pageHost.addEventListener('click', event => {
         const summary = event.target.closest?.('summary');
         const details = summary?.parentElement;
         if (!summary || !details?.matches('details.gds-details') || !pageHost.contains(details)) return;
-        pendingAnchor = {
-            details,
-            summary,
-            top: summary.getBoundingClientRect().top,
+        event.preventDefault();
+        const lockedScrollTop = pageHost.scrollTop;
+        details.open = !details.open;
+        const restore = () => {
+            if (pageHost.isConnected) pageHost.scrollTop = lockedScrollTop;
         };
-    }, true);
-
-    for (const details of pageHost.querySelectorAll('details.gds-details')) {
-        details.addEventListener('toggle', () => {
-            if (!pendingAnchor || pendingAnchor.details !== details) return;
-            const anchor = pendingAnchor;
-            pendingAnchor = null;
-            const restore = () => {
-                if (!pageHost.isConnected || !anchor.summary.isConnected) return;
-                const delta = anchor.summary.getBoundingClientRect().top - anchor.top;
-                if (Number.isFinite(delta) && Math.abs(delta) > 0.5) pageHost.scrollTop += delta;
-            };
+        restore();
+        queueMicrotask(restore);
+        requestAnimationFrame(() => {
             restore();
-            requestAnimationFrame(() => {
-                restore();
-                requestAnimationFrame(restore);
-            });
+            requestAnimationFrame(restore);
         });
-    }
+    }, true);
 }
 
 function updateDirectorFromUi(ctx) {
@@ -2671,6 +2673,8 @@ function savedRecap(chatState) {
 
 function refreshUi() {
     if (!runtime.overlay) return;
+    const pageHost = runtime.overlay.querySelector('.gds-page-host');
+    const preservedScrollTop = Number(pageHost?.scrollTop || 0);
     const ctx = getContext();
     reconcileGeneratingFlag(ctx);
     const settings = getSettings(ctx);
@@ -2915,6 +2919,7 @@ function refreshUi() {
     refreshSettingsEntry();
     applyFloatingAppearance();
     applyCollapsedView();
+    if (pageHost?.isConnected) pageHost.scrollTop = preservedScrollTop;
 }
 
 function applyCollapsedView() {
@@ -3478,7 +3483,7 @@ function createUi() {
         refreshUi();
     });
 
-    for (const input of overlay.querySelectorAll('input[data-gds-hide],input[data-gds-collapse],input[data-gds-stream],input[data-gds-keep],input[data-gds-capsule-auto],input[data-gds-capsule-threshold],input[data-gds-capsule-keep],input[data-gds-injection],input[data-gds-words],select[data-gds-summary-mode],select[data-gds-provider],select[data-gds-api-module],select[data-gds-api-model-select],input[data-gds-director-enabled],select[data-gds-director-preset],select[data-gds-director-pacing],input[data-gds-director-pacing-custom],input[data-gds-director-toggle],input[data-gds-calendar-enabled],input[data-gds-calendar-builtins],input[data-gds-calendar-auto-advance],input[data-gds-calendar-window],input[data-gds-calendar-world-date],input[data-gds-reply-follow],select[data-gds-reply-viewpoint],select[data-gds-reply-detail],select[data-gds-reply-length],select[data-gds-reply-initiative],input[data-gds-reply-tone]')) {
+    for (const input of overlay.querySelectorAll('input[data-gds-hide],input[data-gds-collapse],input[data-gds-stream],input[data-gds-keep],input[data-gds-capsule-auto],input[data-gds-capsule-threshold],input[data-gds-capsule-keep],input[data-gds-injection],input[data-gds-words],select[data-gds-summary-mode],select[data-gds-provider],select[data-gds-api-module],select[data-gds-api-model-select],input[data-gds-api-model],input[data-gds-director-enabled],select[data-gds-director-preset],select[data-gds-director-pacing],input[data-gds-director-pacing-custom],input[data-gds-director-toggle],input[data-gds-calendar-enabled],input[data-gds-calendar-builtins],input[data-gds-calendar-auto-advance],input[data-gds-calendar-window],input[data-gds-calendar-world-date],input[data-gds-reply-follow],select[data-gds-reply-viewpoint],select[data-gds-reply-detail],select[data-gds-reply-length],select[data-gds-reply-initiative],input[data-gds-reply-tone]')) {
         input.addEventListener('change', () => {
             const ctx = getContext();
             const settings = getSettings(ctx);
@@ -3503,10 +3508,11 @@ function createUi() {
                 applyInjection(ctx, chatState, settings).catch(console.error);
                 saveChat(ctx).catch(console.error);
             }
-            if (input.matches('[data-gds-provider]')) {
-                const moduleName = input.dataset.gdsProvider;
-                if (['memory', 'director', 'reply'].includes(moduleName)) {
-                    settings.moduleConnections[moduleName] = input.value || PROVIDER_CURRENT;
+                if (input.matches('[data-gds-provider]')) {
+                    const moduleName = input.dataset.gdsProvider;
+                    if (['memory', 'director', 'reply'].includes(moduleName)) {
+                        if (settings.moduleConnections[moduleName] !== (input.value || PROVIDER_CURRENT)) settings.moduleModels[moduleName] = '';
+                        settings.moduleConnections[moduleName] = input.value || PROVIDER_CURRENT;
                     ctx.extensionSettings[SETTINGS_KEY] = settings;
                     saveSettings(ctx);
                     runtime.apiFormModule = moduleName;
@@ -3524,13 +3530,21 @@ function createUi() {
                 syncApiFormFromProvider(ctx, moduleName, { force: true });
                 pullModelsForProvider(ctx, moduleName, { force: true }).catch(error => console.warn(`[${DISPLAY_NAME}] 模型列表拉取失败`, error));
             }
-            if (input.matches('[data-gds-api-model-select]') && input.value) {
-                const modelInput = overlay.querySelector('[data-gds-api-model]');
-                if (modelInput) {
-                    modelInput.value = input.value;
-                    modelInput.dispatchEvent?.(new Event('input', { bubbles: true }));
+                if (input.matches('[data-gds-api-model-select]') && input.value) {
+                    const modelInput = overlay.querySelector('[data-gds-api-model]');
+                    if (modelInput) {
+                        modelInput.value = input.value;
+                        modelInput.dispatchEvent?.(new Event('input', { bubbles: true }));
+                    }
                 }
-            }
+                if (input.matches('[data-gds-api-model-select],[data-gds-api-model]')) {
+                    const moduleName = runtime.apiFormModule || overlay.querySelector('[data-gds-api-module]')?.value || 'director';
+                    const selected = selectedProviderForModule(ctx, moduleName);
+                    if (selected.profile.kind === 'connection') {
+                        const chosenModel = String(overlay.querySelector('[data-gds-api-model]')?.value || '').trim();
+                        settings.moduleModels[moduleName] = chosenModel;
+                    }
+                }
             if (input.matches('[data-gds-director-enabled],[data-gds-director-preset],[data-gds-director-pacing],[data-gds-director-pacing-custom],input[data-gds-director-toggle],[data-gds-calendar-enabled],[data-gds-calendar-builtins],[data-gds-calendar-auto-advance],[data-gds-calendar-window],[data-gds-calendar-world-date]')) {
                 updateDirectorFromUi(ctx);
                 updateDirectorInjection(ctx).catch(console.error);
