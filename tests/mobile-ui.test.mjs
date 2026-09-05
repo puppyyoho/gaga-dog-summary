@@ -55,8 +55,12 @@ test('summary UI exposes streaming, stop, and resumable pending tasks', () => {
     assert.match(js, /status === 'committed' && String\(item\.recap/);
 });
 
-test('workbench exposes three independent modules and selected summary artifacts', () => {
-    assert.match(js, /data-gds-tab="memory"/);
+test('workbench exposes full summary and rolling memory as separate modules', () => {
+    assert.match(js, /data-gds-tab="memory-full"/);
+    assert.match(js, /data-gds-tab="memory-layered"/);
+    assert.match(js, /data-gds-tab-panel="memory-full"/);
+    assert.match(js, /data-gds-tab-panel="memory-layered"/);
+    assert.doesNotMatch(js, /data-gds-memory-mode/);
     assert.match(js, /data-gds-tab="director"/);
     assert.match(js, /data-gds-tab="reply"/);
     assert.match(js, /data-gds-summary-mode/);
@@ -141,6 +145,14 @@ test('keeps switched pages in a dedicated scrolling viewport and resists theme h
     assert.match(js, /pageHost\.scrollTop = 0/);
 });
 
+test('opening lower detail sections preserves the internal scroll anchor', () => {
+    assert.match(css, /\.gds-page-host\s*\{[\s\S]*?overflow-anchor:\s*none/);
+    assert.match(js, /function bindStableDetailsScrolling\(pageHost\)/);
+    assert.match(js, /summary\.getBoundingClientRect\(\)\.top/);
+    assert.match(js, /pageHost\.scrollTop \+= delta/);
+    assert.match(js, /bindStableDetailsScrolling\(overlay\.querySelector\('\.gds-page-host'\)\)/);
+});
+
 test('reply candidates can be copied or inserted without auto-sending', () => {
     assert.doesNotMatch(js, /待写回复/);
     assert.match(js, /代写回复/);
@@ -185,14 +197,17 @@ test('brands the extension as the workshop and exposes local floating icon contr
     assert.match(css, /@media \(max-width: 900px\)[\s\S]*?\.gds-floating-actions/);
 });
 
-test('uses manual full summaries and layered rolling memory without the old automatic trigger', () => {
+test('uses independent full-summary and layered-memory workflows without the old automatic trigger', () => {
     assert.doesNotMatch(js, /triggerTokens:\s*60000/);
     assert.match(js, /FALLBACK_BATCH_TOKENS/);
     assert.doesNotMatch(js, /自动总结触发约 Token/);
     assert.match(js, /memoryMode:\s*'manual'/);
     assert.match(js, /keepMessages:\s*5/);
     assert.match(js, /capsuleConsolidationTokens:\s*20000/);
-    assert.match(js, /data-gds-memory-mode/);
+    assert.match(js, /layeredAutoEnabled:\s*false/);
+    assert.match(js, /data-gds-layered-start/);
+    assert.match(js, /data-gds-layered-pause/);
+    assert.match(js, /data-gds-layered-stop/);
     assert.match(js, /data-gds-consolidate/);
     assert.match(js, /data-gds-capsules/);
     assert.match(js, /data-gds-restore-archive/);
@@ -207,6 +222,18 @@ test('uses manual full summaries and layered rolling memory without the old auto
     assert.match(js, /pending\.workflow = clone\(workflowInfo\)/);
     assert.doesNotMatch(js, /manualKeepMessages/);
     assert.match(js, /近期消息只按楼层完整保留，不受 Token 限制/);
+});
+
+test('rolling memory stops cleanly and pauses itself after an error', () => {
+    assert.match(js, /function clearLayeredTimer\(\)/);
+    assert.match(js, /function pauseLayeredAfterError\(ctx, message\)/);
+    assert.match(js, /settings\.layeredAutoEnabled = false/);
+    assert.match(js, /runtime\.layeredPausedByError = true/);
+    assert.match(js, /function stopLayeredAuto/);
+    assert.match(js, /runtime\.capsuleController\.abort/);
+    assert.match(js, /runtime\.activeOperation === 'layered-consolidation'/);
+    assert.match(js, /if \(!settings\.layeredAutoEnabled \|\| runtime\.layeredPausedByError \|\| runtime\.layeredTimer\) return/);
+    assert.match(js, /自动记录出错后会立即暂停，不会自行反复重试/);
 });
 
 test('floating dog can be dragged without accidentally opening the panel', () => {

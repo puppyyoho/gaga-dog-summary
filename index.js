@@ -91,8 +91,8 @@ const INJECTION_ID = `${EXTENSION_NAME}:memory`;
 const DIRECTOR_INJECTION_ID = `${EXTENSION_NAME}:director`;
 const PANEL_LOGO_URL = new URL('./assets/gaga-dog-logo.png', import.meta.url).href;
 const FLOATING_LOGO_URL = new URL('./assets/gaga-dog-floating.png', import.meta.url).href;
-const VERSION = '0.4.0';
-const SETTINGS_VERSION = 6;
+const VERSION = '0.5.0';
+const SETTINGS_VERSION = 7;
 
 const DEFAULT_SETTINGS = {
     showFloatingButton: true,
@@ -101,6 +101,7 @@ const DEFAULT_SETTINGS = {
     floatingPosition: null,
     panelPosition: null,
     memoryMode: 'manual',
+    layeredAutoEnabled: false,
     autoHide: true,
     collapseHidden: true,
     keepMessages: 5,
@@ -133,10 +134,13 @@ const runtime = {
     workflow: null,
     capsuleBusy: false,
     capsuleController: null,
+    layeredPausedByError: false,
+    activeOperation: '',
     generating: false,
     lastChatSignature: '',
     lastError: '',
     lastSuccess: '',
+    lastResultScope: '',
     directorBusy: false,
     directorAbortController: null,
     directorText: '',
@@ -238,6 +242,9 @@ function getSettings(ctx = getContext()) {
     result.prompts = { ...DEFAULT_PROMPTS, ...(current?.prompts && typeof current.prompts === 'object' ? current.prompts : {}) };
     result.summaryMode = ['novel', 'structured', 'mixed'].includes(result.summaryMode) ? result.summaryMode : DEFAULT_SETTINGS.summaryMode;
     result.memoryMode = ['manual', 'layered'].includes(result.memoryMode) ? result.memoryMode : DEFAULT_SETTINGS.memoryMode;
+    result.layeredAutoEnabled = typeof current?.layeredAutoEnabled === 'boolean'
+        ? current.layeredAutoEnabled
+        : current?.memoryMode === 'layered';
     result.floatingIconSize = Math.min(120, Math.max(32, Math.round(Number(result.floatingIconSize) || DEFAULT_SETTINGS.floatingIconSize)));
     result.floatingIconData = normalizeFloatingIconData(result.floatingIconData);
     result.apiProfiles = normalizeProviderProfiles(result.apiProfiles);
@@ -626,8 +633,7 @@ async function savePending(ctx, pending) {
 function updateStreamPreview(text, meta = {}) {
     runtime.streamText = String(text || '');
     runtime.streamMeta = meta;
-    const output = runtime.overlay?.querySelector('[data-gds-stream-preview]');
-    if (output) {
+    for (const output of runtime.overlay?.querySelectorAll('[data-gds-stream-preview]') || []) {
         output.value = runtime.streamText;
         output.scrollTop = output.scrollHeight;
     }
@@ -691,10 +697,12 @@ async function summarizeRange(ctx, range, settings, reason = 'manual', resumeTas
     runtime.busy = true;
     runtime.lastError = '';
     runtime.lastSuccess = '';
+    runtime.lastResultScope = '';
     runtime.taskSerial += 1;
     const serial = runtime.taskSerial;
     const controller = new AbortController();
     runtime.abortController = controller;
+    runtime.activeOperation = 'full-summary';
     const current = getChatState(ctx);
     const before = normalizeChatState(current);
     const summaryMode = ['novel', 'structured', 'mixed'].includes(before.summaryMode) ? before.summaryMode : settings.summaryMode;
@@ -838,6 +846,7 @@ async function summarizeRange(ctx, range, settings, reason = 'manual', resumeTas
         runtime.lastSuccess = workflowInfo
             ? `已保存第 ${workflowInfo.batchIndex + 1}/${workflowInfo.totalBatches} 批 · 消息 ${range.start}–${range.end}`
             : `已保存检查点 · 消息 ${range.start}–${range.end}`;
+        runtime.lastResultScope = 'full';
         if (!workflowInfo) notify('success', `已总结消息 ${range.start}–${range.end}${settings.autoHide ? '，旧正文已退出上下文' : ''}。`);
         return draft;
     } catch (error) {
@@ -863,8 +872,9 @@ async function summarizeRange(ctx, range, settings, reason = 'manual', resumeTas
         if (runtime.abortController === controller) runtime.abortController = null;
         runtime.busy = false;
         runtime.activeStage = '';
+        if (runtime.activeOperation === 'full-summary') runtime.activeOperation = '';
         refreshUi();
-        if (!runtime.workflowActive && !runtime.lastError && !getChatState(ctx).pending) scheduleLayeredMemory(1200);
+        if (!runtime.workflowActive && !runtime.lastError && !getChatState(ctx).pending && getSettings(ctx).layeredAutoEnabled) scheduleLayeredMemory(1200);
     }
 }
 
@@ -1286,6 +1296,79 @@ async function buildWorkflowBatchPlan(ctx, goalRange, reason) {
     });
 }
 
+function clearLayeredTimer() {
+    if (!runtime.layeredTimer) return;
+    clearTimeout(runtime.layeredTimer);
+    runtime.layeredTimer = null;
+}
+
+function pauseLayeredAfterError(ctx, message) {
+    const settings = getSettings(ctx);
+    settings.layeredAutoEnabled = false;
+    ctx.extensionSettings[SETTINGS_KEY] = settings;
+    saveSettings(ctx);
+    clearLayeredTimer();
+    runtime.layeredPausedByError = true;
+    runtime.lastError = `${message}；自动记录已暂停`;
+    runtime.lastResultScope = 'layered';
+    notify('error', runtime.lastError);
+}
+
+async function startLayeredAuto() {
+    const ctx = getContext();
+    const settings = getSettings(ctx);
+    if (runtime.busy || runtime.workflowActive || runtime.capsuleBusy || runtime.directorBusy || runtime.replyBusy) {
+        notify('info', '当前还有生成任务进行中，请稍后再启动自动记录。');
+        return;
+    }
+    settings.memoryMode = 'layered';
+    settings.layeredAutoEnabled = true;
+    ctx.extensionSettings[SETTINGS_KEY] = settings;
+    saveSettings(ctx);
+    runtime.layeredPausedByError = false;
+    runtime.lastError = '';
+    runtime.lastSuccess = '';
+    runtime.lastResultScope = 'layered';
+    const state = getChatState(ctx);
+    state.memoryMode = 'layered';
+    setChatState(state, ctx);
+    await applyInjection(ctx, state, settings);
+    await saveChat(ctx);
+    refreshUi();
+    scheduleLayeredMemory(100);
+    notify('success', '分层滚动记忆已启动，将在每轮回复完成后记录剧情胶囊。');
+}
+
+function stopLayeredAuto({ notifyUser = true } = {}) {
+    const ctx = getContext();
+    const settings = getSettings(ctx);
+    settings.layeredAutoEnabled = false;
+    ctx.extensionSettings[SETTINGS_KEY] = settings;
+    saveSettings(ctx);
+    clearLayeredTimer();
+    runtime.layeredPausedByError = false;
+    let interrupted = false;
+    if (runtime.capsuleController) {
+        runtime.capsuleController.abort(new DOMException('用户停止分层滚动记忆', 'AbortError'));
+        interrupted = true;
+    }
+    if (runtime.activeOperation === 'layered-consolidation' && runtime.abortController) {
+        runtime.taskSerial += 1;
+        runtime.abortController.abort(new DOMException('用户停止滚动记忆梳理', 'AbortError'));
+        interrupted = true;
+    }
+    if (interrupted) {
+        try { ctx.stopGeneration?.(); } catch (error) {
+            console.warn(`[${DISPLAY_NAME}] 酒馆停止接口调用失败`, error);
+        }
+    }
+    runtime.lastError = '';
+    runtime.lastSuccess = interrupted ? '已停止自动记录和当前滚动记忆任务' : '分层滚动记忆已停止';
+    runtime.lastResultScope = 'layered';
+    refreshUi();
+    if (notifyUser) notify('info', `${runtime.lastSuccess}，已经保存的胶囊不会删除。`);
+}
+
 function layeredTaskBlocked(ctx) {
     reconcileGeneratingFlag(ctx);
     const chatState = getChatState(ctx);
@@ -1327,12 +1410,13 @@ async function hideCoveredCapsuleMessages(ctx, state, settings) {
 async function buildNextRoundCapsule(ctx) {
     const settings = getSettings(ctx);
     let state = getChatState(ctx);
-    if (settings.memoryMode !== 'layered' || layeredTaskBlocked(ctx) || layeredNeedsInitialSummary(ctx, state, settings)) return null;
+    if (!settings.layeredAutoEnabled || settings.memoryMode !== 'layered' || layeredTaskBlocked(ctx) || layeredNeedsInitialSummary(ctx, state, settings)) return null;
     const range = nextRoundRange(getMessages(ctx), state);
     if (!range) return null;
     const controller = new AbortController();
     runtime.capsuleBusy = true;
     runtime.capsuleController = controller;
+    runtime.activeOperation = 'round-capsule';
     runtime.lastError = '';
     setStatus(`正在整理本轮剧情胶囊 · 消息 ${range.start}–${range.end}`);
     refreshUi();
@@ -1375,16 +1459,19 @@ async function buildNextRoundCapsule(ctx) {
         await hideCoveredCapsuleMessages(ctx, state, settings);
         runtime.lastError = '';
         runtime.lastSuccess = `已记录本轮剧情 · 消息 ${range.start}–${range.end}`;
+        runtime.lastResultScope = 'layered';
         return capsule;
     } catch (error) {
         if (!controller.signal.aborted) {
-            runtime.lastError = `剧情胶囊生成失败：${readableGenerationError(error)}`;
-            console.warn(`[${DISPLAY_NAME}] ${runtime.lastError}`, error);
+            const message = `剧情胶囊生成失败：${readableGenerationError(error)}`;
+            console.warn(`[${DISPLAY_NAME}] ${message}`, error);
+            pauseLayeredAfterError(ctx, message);
         }
         return null;
     } finally {
         if (runtime.capsuleController === controller) runtime.capsuleController = null;
         runtime.capsuleBusy = false;
+        if (runtime.activeOperation === 'round-capsule') runtime.activeOperation = '';
         refreshUi();
     }
 }
@@ -1392,7 +1479,7 @@ async function buildNextRoundCapsule(ctx) {
 async function processLayeredMemory() {
     const ctx = getContext();
     const settings = getSettings(ctx);
-    if (settings.memoryMode !== 'layered' || layeredTaskBlocked(ctx)) return;
+    if (!settings.layeredAutoEnabled || runtime.layeredPausedByError || settings.memoryMode !== 'layered' || layeredTaskBlocked(ctx)) return;
     const state = getChatState(ctx);
     if (layeredNeedsInitialSummary(ctx, state, settings)) return;
     const capsule = await buildNextRoundCapsule(ctx);
@@ -1400,6 +1487,7 @@ async function processLayeredMemory() {
         scheduleLayeredMemory(500);
         return;
     }
+    if (!getSettings(ctx).layeredAutoEnabled || runtime.layeredPausedByError || runtime.lastError) return;
     const current = getChatState(ctx);
     if (settings.autoConsolidateCapsules && roundCapsuleTokens(current) >= settings.capsuleConsolidationTokens) {
         await consolidateRollingMemory(false);
@@ -1407,13 +1495,20 @@ async function processLayeredMemory() {
 }
 
 function scheduleLayeredMemory(delay = 1400) {
-    if (runtime.layeredTimer) return;
+    let settings;
+    try { settings = getSettings(); } catch { return; }
+    if (!settings.layeredAutoEnabled || runtime.layeredPausedByError || runtime.layeredTimer) return;
     runtime.layeredTimer = setTimeout(async () => {
         runtime.layeredTimer = null;
+        if (!getSettings().layeredAutoEnabled || runtime.layeredPausedByError) return;
         try {
             await processLayeredMemory();
         } catch (error) {
-            console.warn(`[${DISPLAY_NAME}] 分层滚动记忆处理失败`, error);
+            const ctx = getContext();
+            const message = `分层滚动记忆处理失败：${readableGenerationError(error)}`;
+            console.warn(`[${DISPLAY_NAME}] ${message}`, error);
+            pauseLayeredAfterError(ctx, message);
+            refreshUi();
         }
     }, delay);
 }
@@ -1423,7 +1518,14 @@ async function consolidateRollingMemory(manual = true) {
     reconcileGeneratingFlag(ctx);
     const settings = getSettings(ctx);
     if (settings.memoryMode !== 'layered') {
-        if (manual) notify('info', '请先把记忆模式切换为“分层滚动记忆”。');
+        settings.memoryMode = 'layered';
+        ctx.extensionSettings[SETTINGS_KEY] = settings;
+        saveSettings(ctx);
+        const state = getChatState(ctx);
+        state.memoryMode = 'layered';
+        setChatState(state, ctx);
+    }
+    if (!manual && (!settings.layeredAutoEnabled || runtime.layeredPausedByError)) {
         return null;
     }
     if (layeredTaskBlocked(ctx)) {
@@ -1452,9 +1554,11 @@ async function consolidateRollingMemory(manual = true) {
     const controller = new AbortController();
     runtime.busy = true;
     runtime.abortController = controller;
+    runtime.activeOperation = 'layered-consolidation';
     runtime.activeStage = 'archive';
     runtime.lastError = '';
     runtime.lastSuccess = '';
+    runtime.lastResultScope = '';
     setStatus(`${manual ? '手动' : '自动'}梳理滚动记忆 · ${capsules.length} 个胶囊`);
     refreshUi();
 
@@ -1555,22 +1659,24 @@ async function consolidateRollingMemory(manual = true) {
         await saveChat(ctx);
         await hideCoveredCapsuleMessages(ctx, draft, settings);
         runtime.lastSuccess = `${manual ? '手动' : '自动'}梳理完成 · ${capsules.length} 个胶囊 · 消息 ${start}–${end}`;
+        runtime.lastResultScope = 'layered';
         notify('success', runtime.lastSuccess);
         return draft;
     } catch (error) {
         if (controller.signal.aborted) notify('info', '滚动记忆梳理已中断，原胶囊保持不变。');
         else {
-            runtime.lastError = `滚动记忆梳理失败：${readableGenerationError(error)}`;
-            console.error(`[${DISPLAY_NAME}] ${runtime.lastError}`, error);
-            notify('error', runtime.lastError);
+            const message = `滚动记忆梳理失败：${readableGenerationError(error)}`;
+            console.error(`[${DISPLAY_NAME}] ${message}`, error);
+            pauseLayeredAfterError(ctx, message);
         }
         return null;
     } finally {
         if (runtime.abortController === controller) runtime.abortController = null;
         runtime.busy = false;
         runtime.activeStage = '';
+        if (runtime.activeOperation === 'layered-consolidation') runtime.activeOperation = '';
         refreshUi();
-        scheduleLayeredMemory(900);
+        if (getSettings(ctx).layeredAutoEnabled && !runtime.layeredPausedByError && !runtime.lastError) scheduleLayeredMemory(900);
     }
 }
 
@@ -1664,13 +1770,14 @@ async function runSummaryWorkflow(ctx, options = {}) {
         runtime.lastError = '';
         const planText = batchPlan.strategy === 'single' ? '整段完成' : `自适应完成 ${batchIndex} 批`;
         runtime.lastSuccess = `手动完整梳理完成 · 消息 ${goalStart}–${goalEnd} · ${planText}`;
+        runtime.lastResultScope = 'full';
         notify('success', `手动完整梳理已一次完成消息 ${goalStart}–${goalEnd}，${planText}${settings.autoHide ? '，旧正文已退出上下文' : ''}。`);
         return getChatState(ctx);
     } finally {
         runtime.workflowActive = false;
         runtime.workflow = null;
         refreshUi();
-        if (!runtime.lastError && !getChatState(ctx).pending) scheduleLayeredMemory(1200);
+        if (!runtime.lastError && !getChatState(ctx).pending && getSettings(ctx).layeredAutoEnabled) scheduleLayeredMemory(1200);
     }
 }
 
@@ -1770,8 +1877,9 @@ async function reconcileAndRefresh() {
 }
 
 function setStatus(message) {
-    const node = runtime.overlay?.querySelector('[data-gds-status]');
-    if (node) node.textContent = message || (runtime.busy ? '处理中……' : '已就绪');
+    for (const node of runtime.overlay?.querySelectorAll('[data-gds-status]') || []) {
+        node.textContent = message || (runtime.busy ? '处理中……' : '已就绪');
+    }
 }
 
 function renderCheckpointList(chatState) {
@@ -1822,6 +1930,7 @@ async function restoreLatestCapsuleArchive(ctx) {
     await saveChat(ctx);
     runtime.lastError = '';
     runtime.lastSuccess = '已恢复最近一次胶囊梳理前的记忆';
+    runtime.lastResultScope = 'layered';
     notify('success', runtime.lastSuccess);
     refreshUi();
     return restored;
@@ -2173,7 +2282,7 @@ async function testApiProfileFromUi(ctx) {
 function setActiveTab(tab = 'home') {
     const windowNode = runtime.overlay?.querySelector('.gds-window');
     if (!windowNode) return;
-    const active = ['home', 'memory', 'director', 'reply', 'connections'].includes(tab) ? tab : 'home';
+    const active = ['home', 'memory-full', 'memory-layered', 'director', 'reply', 'connections'].includes(tab) ? tab : 'home';
     windowNode.dataset.gdsTab = active;
     for (const button of windowNode.querySelectorAll('[data-gds-tab]')) button.classList.toggle('active', button.dataset.gdsTab === active);
     for (const panel of windowNode.querySelectorAll('[data-gds-tab-panel]')) panel.hidden = panel.dataset.gdsTabPanel !== active;
@@ -2184,7 +2293,8 @@ function setActiveTab(tab = 'home') {
     const title = windowNode.querySelector('[data-gds-page-title]');
     const subtitles = {
         home: ['嘎嘎小狗工坊', '选择一个功能开始'],
-        memory: ['剧情记忆', '精简前情 · 保留细节 · 自动隐藏'],
+        'memory-full': ['完整剧情梳理', '一次梳理旧正文 · 文学润色 · 安全隐藏'],
+        'memory-layered': ['分层滚动记忆', '逐轮胶囊 · 自动归档 · 随时停止'],
         director: ['情节导演', '规划主线 · 分支 · 伏笔 · 日历'],
         reply: ['代写回复', '生成候选 · 复制或放入编辑栏'],
         connections: ['模型连接', '分别绑定酒馆连接或独立 API'],
@@ -2192,6 +2302,44 @@ function setActiveTab(tab = 'home') {
     if (title) title.textContent = subtitles[active][0];
     const subtitle = windowNode.querySelector('[data-gds-page-subtitle]');
     if (subtitle) subtitle.textContent = subtitles[active][1];
+}
+
+function bindStableDetailsScrolling(pageHost) {
+    if (!pageHost || pageHost.dataset.gdsStableDetails === 'true') return;
+    pageHost.dataset.gdsStableDetails = 'true';
+    let pendingAnchor = null;
+
+    // Native <details> may scroll a nested overflow container when a summary
+    // near the bottom is activated. Remember the clicked summary before the
+    // default toggle and keep it at the same visual position after reflow.
+    pageHost.addEventListener('click', event => {
+        const summary = event.target.closest?.('summary');
+        const details = summary?.parentElement;
+        if (!summary || !details?.matches('details.gds-details') || !pageHost.contains(details)) return;
+        pendingAnchor = {
+            details,
+            summary,
+            top: summary.getBoundingClientRect().top,
+        };
+    }, true);
+
+    for (const details of pageHost.querySelectorAll('details.gds-details')) {
+        details.addEventListener('toggle', () => {
+            if (!pendingAnchor || pendingAnchor.details !== details) return;
+            const anchor = pendingAnchor;
+            pendingAnchor = null;
+            const restore = () => {
+                if (!pageHost.isConnected || !anchor.summary.isConnected) return;
+                const delta = anchor.summary.getBoundingClientRect().top - anchor.top;
+                if (Number.isFinite(delta) && Math.abs(delta) > 0.5) pageHost.scrollTop += delta;
+            };
+            restore();
+            requestAnimationFrame(() => {
+                restore();
+                requestAnimationFrame(restore);
+            });
+        });
+    }
 }
 
 function updateDirectorFromUi(ctx) {
@@ -2313,8 +2461,8 @@ function refreshUi() {
     }
     const chatState = getChatState(ctx);
     const summary = runtime.overlay.querySelector('[data-gds-summary]');
-    const preview = runtime.overlay.querySelector('[data-gds-preview]');
-    const streamPreview = runtime.overlay.querySelector('[data-gds-stream-preview]');
+    const previews = runtime.overlay.querySelectorAll('[data-gds-preview]');
+    const streamPreviews = runtime.overlay.querySelectorAll('[data-gds-stream-preview]');
     const recap = savedRecap(chatState);
     const director = getDirectorState(ctx);
     const reply = getReplyState(ctx);
@@ -2326,18 +2474,18 @@ function refreshUi() {
         saveChat(ctx).catch(error => console.warn(`[${DISPLAY_NAME}] 检查点前情回填保存失败`, error));
     }
     if (summary && (document.activeElement !== summary || !summary.value.trim())) summary.value = recap;
-    if (streamPreview && document.activeElement !== streamPreview) {
-        streamPreview.value = runtime.streamText || chatState.pending?.partialText || '';
+    for (const streamPreview of streamPreviews) {
+        if (document.activeElement !== streamPreview) streamPreview.value = runtime.streamText || chatState.pending?.partialText || '';
     }
-    if (preview) preview.value = compileInjection({ ...chatState, memoryMode: settings.memoryMode }, {
+    const injectionPreview = compileInjection({ ...chatState, memoryMode: settings.memoryMode }, {
         maxTokens: settings.injectionMaxTokens,
         recentStartIndex: Math.max(0, getMessages(ctx).length - settings.keepMessages),
         capsuleLimit: Math.max(8, settings.keepRecentCapsules * 2),
         query: recentQuery(getMessages(ctx)),
         recallLimit: settings.recallLimit,
     });
-    const metrics = runtime.overlay.querySelector('[data-gds-metrics]');
-    if (metrics) metrics.innerHTML = `
+    for (const preview of previews) preview.value = injectionPreview;
+    const metricsHtml = `
         <span>场景 ${chatState.sceneCards.length}</span>
         <span>事实 ${chatState.facts.length}</span>
         <span>未结 ${chatState.threads.filter(item => item.status === 'open').length}</span>
@@ -2345,24 +2493,39 @@ function refreshUi() {
         <span>归档 ${chatState.memoryArchives.length}</span>
         <span>检查点 ${chatState.checkpoints.length}</span>
         <span>注入约 ${chatState.lastInjectionTokens || tokenEstimate(chatState.lastInjection || '')} Token</span>`;
-    const status = runtime.overlay.querySelector('[data-gds-status]');
-    if (status && !runtime.busy && !runtime.workflowActive && !runtime.capsuleBusy) {
+    for (const metrics of runtime.overlay.querySelectorAll('[data-gds-metrics]')) metrics.innerHTML = metricsHtml;
+    const fullStatus = runtime.overlay.querySelector('[data-gds-status="full"]');
+    const layeredStatus = runtime.overlay.querySelector('[data-gds-status="layered"]');
+    if (!runtime.busy && !runtime.workflowActive && !runtime.capsuleBusy) {
         const hasCheckpoint = chatState.checkpoints.some(item => item.status === 'committed');
         const recapMissing = hasCheckpoint && !recap;
         const orphanOutput = Boolean(runtime.streamText.trim() && !hasCheckpoint && !chatState.pending);
-        if (chatState.pending) status.textContent = `总结未完成：${stageName(chatState.pending.stage)}，请点击“继续”`;
-        else if (runtime.lastError) status.textContent = `未保存：${runtime.lastError}`;
-        else if (recapMissing) status.textContent = '检查点已保存，但当前总结成品为空，请点击“恢复并重建”';
-        else if (orphanOutput) status.textContent = '收到模型文本，但尚未保存成记忆，请重新总结';
-        else if (runtime.lastSuccess) status.textContent = runtime.lastSuccess;
-        else if (settings.memoryMode === 'layered' && layeredNeedsInitialSummary(ctx, chatState, settings)) status.textContent = '旧正文尚未建立基础记忆，请先点击“立即完整梳理”';
-        else status.textContent = hasCheckpoint || chatState.roundCapsules.length ? '记忆已保存并正在注入' : '尚未建立记忆，点击“立即完整梳理”';
+        if (fullStatus) {
+            if (chatState.pending) fullStatus.textContent = `总结未完成：${stageName(chatState.pending.stage)}，请点击“继续”`;
+            else if (runtime.lastError && !runtime.layeredPausedByError) fullStatus.textContent = `未保存：${runtime.lastError}`;
+            else if (recapMissing) fullStatus.textContent = '检查点已保存，但当前总结成品为空，请点击“恢复并重建”';
+            else if (orphanOutput) fullStatus.textContent = '收到模型文本，但尚未保存成记忆，请重新总结';
+            else if (runtime.lastSuccess && runtime.lastResultScope === 'full') fullStatus.textContent = runtime.lastSuccess;
+            else fullStatus.textContent = hasCheckpoint ? '完整剧情记忆已保存并正在注入' : '尚未建立完整剧情记忆，点击“立即完整梳理”';
+        }
+        if (layeredStatus) {
+            if (runtime.lastError && runtime.layeredPausedByError) layeredStatus.textContent = runtime.lastError;
+            else if (layeredNeedsInitialSummary(ctx, chatState, settings)) layeredStatus.textContent = '旧正文较多，请先到“完整剧情梳理”建立基础记忆，再启动自动记录';
+            else if (settings.layeredAutoEnabled && runtime.lastSuccess && runtime.lastResultScope === 'layered') layeredStatus.textContent = `${runtime.lastSuccess}；自动记录仍在运行`;
+            else if (settings.layeredAutoEnabled) layeredStatus.textContent = '自动记录运行中，将在每轮回复完成后生成一个剧情胶囊';
+            else if (runtime.lastSuccess && runtime.lastResultScope === 'layered') layeredStatus.textContent = runtime.lastSuccess;
+            else if (chatState.roundCapsules.length || chatState.memoryArchives.length) layeredStatus.textContent = '自动记录已停止，现有胶囊和归档仍会继续注入';
+            else layeredStatus.textContent = '分层滚动记忆尚未启动';
+        }
     }
     const summarize = runtime.overlay.querySelector('[data-gds-summarize]');
     const consolidate = runtime.overlay.querySelector('[data-gds-consolidate]');
     const restoreArchive = runtime.overlay.querySelector('[data-gds-restore-archive]');
     const resume = runtime.overlay.querySelector('[data-gds-continue]');
     const stop = runtime.overlay.querySelector('[data-gds-stop]');
+    const layeredStart = runtime.overlay.querySelector('[data-gds-layered-start]');
+    const layeredPause = runtime.overlay.querySelector('[data-gds-layered-pause]');
+    const layeredStop = runtime.overlay.querySelector('[data-gds-layered-stop]');
     const directorStop = runtime.overlay.querySelector('[data-gds-director-stop]');
     const directorContinue = runtime.overlay.querySelector('[data-gds-director-continue]');
     const directorRestart = runtime.overlay.querySelector('[data-gds-director-restart]');
@@ -2372,13 +2535,22 @@ function refreshUi() {
     const restore = runtime.overlay.querySelector('[data-gds-restore]');
     const taskActive = runtime.busy || runtime.workflowActive || runtime.capsuleBusy || runtime.directorBusy || runtime.replyBusy;
     if (summarize) summarize.disabled = taskActive || Boolean(chatState.pending);
-    if (consolidate) consolidate.disabled = taskActive || settings.memoryMode !== 'layered' || !activeRoundCapsules(chatState).length;
+    if (consolidate) consolidate.disabled = taskActive || !activeRoundCapsules(chatState).length;
     if (restoreArchive) restoreArchive.disabled = taskActive || !chatState.memoryArchives.length;
     if (resume) {
         resume.hidden = taskActive || !chatState.pending;
         resume.disabled = taskActive;
     }
-    if (stop) stop.hidden = !(runtime.busy && runtime.abortController);
+    if (stop) stop.hidden = !(runtime.busy && runtime.abortController && runtime.activeOperation === 'full-summary');
+    if (layeredStart) {
+        layeredStart.hidden = settings.layeredAutoEnabled;
+        layeredStart.disabled = taskActive;
+    }
+    if (layeredPause) {
+        layeredPause.hidden = !settings.layeredAutoEnabled;
+        layeredPause.disabled = false;
+    }
+    if (layeredStop) layeredStop.hidden = !(runtime.capsuleBusy || runtime.activeOperation === 'layered-consolidation');
     if (directorStop) directorStop.hidden = !(runtime.directorBusy && runtime.directorAbortController);
     if (directorContinue) {
         const resumable = Boolean(director.taskState?.task || director.mainPlan);
@@ -2394,22 +2566,27 @@ function refreshUi() {
     if (list) list.innerHTML = renderCheckpointList(chatState);
     const capsuleList = runtime.overlay.querySelector('[data-gds-capsules]');
     if (capsuleList) capsuleList.innerHTML = renderCapsuleList(chatState);
-    const hide = runtime.overlay.querySelector('[data-gds-hide]');
-    const collapse = runtime.overlay.querySelector('[data-gds-collapse]');
-    const stream = runtime.overlay.querySelector('[data-gds-stream]');
+    const hides = runtime.overlay.querySelectorAll('[data-gds-hide]');
+    const collapses = runtime.overlay.querySelectorAll('[data-gds-collapse]');
+    const streams = runtime.overlay.querySelectorAll('[data-gds-stream]');
     const mode = runtime.overlay.querySelector('[data-gds-mode]');
-    const summaryMode = runtime.overlay.querySelector('[data-gds-summary-mode]');
-    const memoryMode = runtime.overlay.querySelector('[data-gds-memory-mode]');
+    const summaryModes = runtime.overlay.querySelectorAll('[data-gds-summary-mode]');
     const autoConsolidate = runtime.overlay.querySelector('[data-gds-capsule-auto]');
-    const layeredSettings = runtime.overlay.querySelector('[data-gds-layered-settings]');
-    if (hide) hide.checked = Boolean(settings.autoHide);
-    if (collapse) collapse.checked = Boolean(settings.collapseHidden);
-    if (stream) stream.checked = settings.streamOutput !== false;
+    for (const hide of hides) hide.checked = Boolean(settings.autoHide);
+    for (const collapse of collapses) collapse.checked = Boolean(settings.collapseHidden);
+    for (const stream of streams) stream.checked = settings.streamOutput !== false;
     if (mode) mode.value = 'balanced';
-    if (summaryMode) summaryMode.value = chatState.summaryMode || settings.summaryMode;
-    if (memoryMode) memoryMode.value = settings.memoryMode;
+    for (const summaryMode of summaryModes) summaryMode.value = chatState.summaryMode || settings.summaryMode;
     if (autoConsolidate) autoConsolidate.checked = Boolean(settings.autoConsolidateCapsules);
-    if (layeredSettings) layeredSettings.hidden = settings.memoryMode !== 'layered';
+    const layeredSummary = runtime.overlay.querySelector('[data-gds-layered-summary]');
+    if (layeredSummary) layeredSummary.value = recap;
+    const layeredState = runtime.overlay.querySelector('[data-gds-layered-state]');
+    if (layeredState) {
+        const active = Boolean(settings.layeredAutoEnabled);
+        layeredState.classList.toggle('active', active);
+        layeredState.classList.toggle('error', runtime.layeredPausedByError);
+        layeredState.textContent = runtime.layeredPausedByError ? '因错误已自动暂停' : active ? '自动记录：运行中' : '自动记录：已停止';
+    }
     for (const [selector, value] of [
         ['[data-gds-keep]', settings.keepMessages],
         ['[data-gds-capsule-threshold]', settings.capsuleConsolidationTokens],
@@ -2417,8 +2594,9 @@ function refreshUi() {
         ['[data-gds-injection]', settings.injectionMaxTokens],
         ['[data-gds-words]', settings.targetWords],
     ]) {
-        const input = runtime.overlay.querySelector(selector);
-        if (input && document.activeElement !== input) input.value = value;
+        for (const input of runtime.overlay.querySelectorAll(selector)) {
+            if (document.activeElement !== input) input.value = value;
+        }
     }
     const directorEnabled = runtime.overlay.querySelector('[data-gds-director-enabled]');
     const directorPreset = runtime.overlay.querySelector('[data-gds-director-preset]');
@@ -2748,58 +2926,84 @@ function createUi() {
                 <div><img class="gds-puppy" src="${escapeHtml(PANEL_LOGO_URL)}" alt="" aria-hidden="true"><div><h2 data-gds-page-title>嘎嘎小狗工坊</h2><small data-gds-page-subtitle>选择一个功能开始</small></div></div>
                 <button class="gds-icon-button" data-gds-close title="关闭">×</button>
             </header>
-            <nav class="gds-tabs" aria-label="故事工作台功能"><button data-gds-tab="home">功能首页</button><button data-gds-tab="memory">剧情记忆</button><button data-gds-tab="director">情节导演</button><button data-gds-tab="reply">代写回复</button><button data-gds-tab="connections">模型连接</button></nav>
+            <nav class="gds-tabs" aria-label="故事工作台功能"><button data-gds-tab="home">功能首页</button><button data-gds-tab="memory-full">完整剧情梳理</button><button data-gds-tab="memory-layered">分层滚动记忆</button><button data-gds-tab="director">情节导演</button><button data-gds-tab="reply">代写回复</button><button data-gds-tab="connections">模型连接</button></nav>
             <main class="gds-page-host">
                 <section class="gds-home" data-gds-tab-panel="home">
                     <div class="gds-home-intro"><h3>选择要使用的功能</h3></div>
                     <div class="gds-home-grid">
-                        <button class="gds-home-card" data-gds-tab="memory"><strong>剧情记忆</strong><span>总结前情、保留文风、隐藏旧正文</span></button>
+                        <button class="gds-home-card" data-gds-tab="memory-full"><strong>完整剧情梳理</strong><span>一次梳理全部旧正文，生成经过润色的长期前情</span></button>
+                        <button class="gds-home-card" data-gds-tab="memory-layered"><strong>分层滚动记忆</strong><span>每轮生成剧情胶囊，达到阈值后自动归档整理</span></button>
                         <button class="gds-home-card" data-gds-tab="director"><strong>情节导演</strong><span>长线规划、分支、伏笔与故事日历</span></button>
                         <button class="gds-home-card" data-gds-tab="reply"><strong>代写回复</strong><span>生成多个用户回复候选并放入编辑栏</span></button>
                         <button class="gds-home-card" data-gds-tab="connections"><strong>模型连接</strong><span>分别配置三个功能使用的酒馆连接或独立 API</span></button>
                     </div>
                 </section>
-            <div class="gds-status" data-gds-tab-panel="memory" data-gds-status>尚未建立记忆，点击“立即完整梳理”</div>
-            <div class="gds-metrics" data-gds-tab-panel="memory" data-gds-metrics></div>
-            <div class="gds-actions" data-gds-tab-panel="memory">
-                <button class="gds-primary" data-gds-summarize>立即完整梳理</button>
-                <button data-gds-consolidate>立即梳理滚动记忆</button>
-                <button data-gds-restore-archive>恢复最近一次胶囊梳理</button>
-                <button class="gds-primary" data-gds-continue hidden>继续</button>
-                <button class="gds-danger" data-gds-stop hidden>中断</button>
-                <button data-gds-rebuild>恢复并重建</button>
-                <button data-gds-restore>恢复隐藏</button>
-            </div>
-            <div class="gds-grid" data-gds-tab-panel="memory">
-                <label class="gds-field gds-wide gds-stream-field"><span>当前阶段原始返回（事实 → 草稿 → 润色，不代表已保存）</span><textarea rows="6" readonly data-gds-stream-preview placeholder="每个阶段会重新显示；正常批次会自动衔接，只有中断或失败后才需要点击继续"></textarea></label>
-                <label class="gds-field gds-wide"><span>记忆模式</span><select data-gds-memory-mode><option value="manual">手动完整梳理</option><option value="layered">分层滚动记忆</option></select></label>
-                <label class="gds-field gds-wide"><span>总结版本</span><select data-gds-summary-mode><option value="novel">小说版：全知视角与文学表达</option><option value="structured">结构化版：事实、状态和未结事项</option><option value="mixed">混合版：文学前情＋必要记忆锚点</option></select></label>
-                <label class="gds-field gds-wide"><span>当前总结成品（可编辑）</span><textarea rows="10" data-gds-summary placeholder="选择总结版本后，这里显示唯一会注入正文模型的记忆成品"></textarea><button data-gds-save-summary>保存当前总结</button></label>
-                <label class="gds-field gds-wide"><span>模型实际收到的记忆注入</span><textarea rows="10" readonly data-gds-preview></textarea></label>
-            </div>
-            <details class="gds-details" data-gds-tab-panel="memory" open><summary>记忆模式与上下文</summary>
-                <div class="gds-settings-grid">
-                    <label class="gds-toggle-row"><input type="checkbox" data-gds-hide><span>总结成功后自动隐藏旧正文</span></label>
-                    <label class="gds-toggle-row"><input type="checkbox" data-gds-collapse><span>在界面折叠已隐藏范围</span></label>
-                    <label class="gds-toggle-row"><input type="checkbox" data-gds-stream><span>流式生成与实时显示</span></label>
-                    <label>完整保留近期消息 <input type="number" min="1" step="1" data-gds-keep></label>
+            <section class="gds-memory-page" data-gds-tab-panel="memory-full" hidden>
+                <div class="gds-status" data-gds-status="full">尚未建立记忆，点击“立即完整梳理”</div>
+                <div class="gds-metrics" data-gds-metrics></div>
+                <div class="gds-actions">
+                    <button class="gds-primary" data-gds-summarize>立即完整梳理</button>
+                    <button class="gds-primary" data-gds-continue hidden>继续</button>
+                    <button class="gds-danger" data-gds-stop hidden>中断</button>
+                    <button data-gds-rebuild>恢复并重建</button>
+                    <button data-gds-restore>恢复隐藏</button>
                 </div>
-                <div class="gds-settings-grid" data-gds-layered-settings hidden>
-                    <label class="gds-toggle-row"><input type="checkbox" data-gds-capsule-auto><span>达到阈值后自动梳理胶囊</span></label>
-                    <label>胶囊整理阈值 Token <input type="number" min="2000" step="1000" data-gds-capsule-threshold></label>
-                    <label>整理时保留最近胶囊 <input type="number" min="0" step="1" data-gds-capsule-keep></label>
+                <div class="gds-grid">
+                    <label class="gds-field gds-wide gds-stream-field"><span>当前阶段原始返回（事实 → 草稿 → 润色，不代表已保存）</span><textarea rows="6" readonly data-gds-stream-preview placeholder="每个阶段会重新显示；正常批次会自动衔接，只有中断或失败后才需要点击继续"></textarea></label>
+                    <label class="gds-field gds-wide"><span>总结版本</span><select data-gds-summary-mode><option value="novel">小说版：全知视角与文学表达</option><option value="structured">结构化版：事实、状态和未结事项</option><option value="mixed">混合版：文学前情＋必要记忆锚点</option></select></label>
+                    <label class="gds-field gds-wide"><span>当前总结成品（可编辑）</span><textarea rows="10" data-gds-summary placeholder="选择总结版本后，这里显示唯一会注入正文模型的记忆成品"></textarea><button data-gds-save-summary>保存当前总结</button></label>
+                    <label class="gds-field gds-wide"><span>模型实际收到的记忆注入</span><textarea rows="10" readonly data-gds-preview></textarea></label>
                 </div>
-                <p class="gds-help">近期消息只按楼层完整保留，不受 Token 限制。手动梳理会一次处理此前全部旧正文；分层模式会在每轮完成后记录增量胶囊。</p>
-            </details>
-            <details class="gds-details" data-gds-tab-panel="memory"><summary>高级输出设置</summary>
-                <div class="gds-settings-grid">
-                    <label>注入上限 Token <input type="number" min="160" step="100" data-gds-injection></label>
-                    <label>前情目标字数 <input type="number" min="80" step="20" data-gds-words></label>
+                <details class="gds-details" open><summary>完整梳理设置</summary>
+                    <div class="gds-settings-grid">
+                        <label class="gds-toggle-row"><input type="checkbox" data-gds-hide><span>总结成功后自动隐藏旧正文</span></label>
+                        <label class="gds-toggle-row"><input type="checkbox" data-gds-collapse><span>在界面折叠已隐藏范围</span></label>
+                        <label class="gds-toggle-row"><input type="checkbox" data-gds-stream><span>流式生成与实时显示</span></label>
+                        <label>完整保留近期消息 <input type="number" min="1" step="1" data-gds-keep></label>
+                    </div>
+                    <p class="gds-help">点击一次即可处理近期消息以前的全部旧正文。近期消息只按楼层完整保留，不受 Token 限制。</p>
+                </details>
+                <details class="gds-details"><summary>高级输出设置</summary>
+                    <div class="gds-settings-grid">
+                        <label>注入上限 Token <input type="number" min="160" step="100" data-gds-injection></label>
+                        <label>前情目标字数 <input type="number" min="80" step="20" data-gds-words></label>
+                    </div>
+                </details>
+                <details class="gds-details"><summary>检查点</summary><div data-gds-checkpoints></div></details>
+            </section>
+            <section class="gds-memory-page" data-gds-tab-panel="memory-layered" hidden>
+                <div class="gds-layered-state" data-gds-layered-state></div>
+                <div class="gds-status" data-gds-status="layered">分层滚动记忆尚未启动</div>
+                <div class="gds-metrics" data-gds-metrics></div>
+                <div class="gds-actions">
+                    <button class="gds-primary" data-gds-layered-start>启动自动记录</button>
+                    <button data-gds-layered-pause>停止自动记录</button>
+                    <button data-gds-consolidate>立即梳理滚动记忆</button>
+                    <button class="gds-danger" data-gds-layered-stop hidden>停止当前任务并暂停</button>
+                    <button data-gds-restore-archive>恢复最近一次胶囊梳理</button>
                 </div>
-            </details>
-            <details class="gds-details" data-gds-tab-panel="memory"><summary>逐轮胶囊与归档记录</summary>
-                <div data-gds-capsules></div>
-            </details>
+                <div class="gds-grid">
+                    <label class="gds-field gds-wide gds-stream-field"><span>滚动记忆当前生成内容</span><textarea rows="6" readonly data-gds-stream-preview placeholder="自动记录本轮胶囊或梳理长期记忆时，会在这里显示生成进度"></textarea></label>
+                    <label class="gds-field gds-wide"><span>归档总结版本</span><select data-gds-summary-mode><option value="novel">小说版：全知视角与文学表达</option><option value="structured">结构化版：事实、状态和未结事项</option><option value="mixed">混合版：文学前情＋必要记忆锚点</option></select></label>
+                    <label class="gds-field gds-wide"><span>当前长期记忆</span><textarea rows="8" readonly data-gds-layered-summary></textarea></label>
+                    <label class="gds-field gds-wide"><span>模型实际收到的记忆注入</span><textarea rows="8" readonly data-gds-preview></textarea></label>
+                </div>
+                <details class="gds-details" open><summary>自动记录与归档设置</summary>
+                    <div class="gds-settings-grid">
+                        <label class="gds-toggle-row"><input type="checkbox" data-gds-capsule-auto><span>达到阈值后自动梳理胶囊</span></label>
+                        <label class="gds-toggle-row"><input type="checkbox" data-gds-hide><span>保存成功后自动隐藏旧正文</span></label>
+                        <label class="gds-toggle-row"><input type="checkbox" data-gds-collapse><span>在界面折叠已隐藏范围</span></label>
+                        <label class="gds-toggle-row"><input type="checkbox" data-gds-stream><span>流式生成与实时显示</span></label>
+                        <label>完整保留近期消息 <input type="number" min="1" step="1" data-gds-keep></label>
+                        <label>胶囊整理阈值 Token <input type="number" min="2000" step="1000" data-gds-capsule-threshold></label>
+                        <label>整理时保留最近胶囊 <input type="number" min="0" step="1" data-gds-capsule-keep></label>
+                        <label>注入上限 Token <input type="number" min="160" step="100" data-gds-injection></label>
+                        <label>前情目标字数 <input type="number" min="80" step="20" data-gds-words></label>
+                    </div>
+                    <p class="gds-help">自动记录出错后会立即暂停，不会自行反复重试。点击“启动自动记录”后才会继续运行。</p>
+                </details>
+                <details class="gds-details" open><summary>逐轮胶囊与归档记录</summary><div data-gds-capsules></div></details>
+            </section>
             <details class="gds-details" data-gds-tab-panel="connections"><summary>模型连接</summary>
                 <div class="gds-settings-grid gds-provider-grid">
                     <label>剧情记忆使用 <select data-gds-provider="memory"></select></label>
@@ -2824,7 +3028,6 @@ function createUi() {
                     <p class="gds-api-model-status" data-gds-api-model-status>选择酒馆连接后会自动拉取模型列表</p>
                 </div>
             </details>
-            <details class="gds-details" data-gds-tab-panel="memory"><summary>检查点</summary><div data-gds-checkpoints></div></details>
             <section class="gds-tab-content" data-gds-tab-panel="director" hidden>
                 <div class="gds-section-title"><div><h3>情节导演</h3><p>规划未来剧情，不会把计划自动写入已发生记忆。</p></div><div class="gds-director-task-actions"><button data-gds-director-stop hidden>停止</button><button data-gds-director-continue disabled>续写</button><button data-gds-director-restart>重新开始</button><button class="gds-danger" data-gds-director-clear>清空全部</button></div></div>
                 <div class="gds-settings-grid gds-director-settings">
@@ -2884,6 +3087,7 @@ function createUi() {
     const windowNode = overlay.querySelector('.gds-window');
     const headerNode = overlay.querySelector('.gds-header');
     if (windowNode && headerNode) bindPanelDrag(windowNode, headerNode);
+    bindStableDetailsScrolling(overlay.querySelector('.gds-page-host'));
 
     const floating = document.createElement('button');
     floating.className = 'gds-floating';
@@ -2895,7 +3099,7 @@ function createUi() {
     bindFloatingDrag(floating);
 
     overlay.addEventListener('click', async event => {
-        const target = event.target.closest('[data-gds-tab],[data-gds-close],[data-gds-summarize],[data-gds-consolidate],[data-gds-restore-archive],[data-gds-continue],[data-gds-stop],[data-gds-rebuild],[data-gds-restore],[data-gds-save-summary],[data-gds-api-save],[data-gds-api-test],[data-gds-director-longline],[data-gds-director-branch],[data-gds-director-foreshadow],[data-gds-director-save],[data-gds-director-lock],[data-gds-director-select-branch],[data-gds-director-stop],[data-gds-director-continue],[data-gds-director-restart],[data-gds-director-clear],[data-gds-calendar-add],[data-gds-calendar-remove],[data-gds-calendar-sync],[data-gds-reply-generate],[data-gds-reply-copy],[data-gds-reply-insert],[data-gds-reply-stop]');
+        const target = event.target.closest('[data-gds-tab],[data-gds-close],[data-gds-summarize],[data-gds-layered-start],[data-gds-layered-pause],[data-gds-layered-stop],[data-gds-consolidate],[data-gds-restore-archive],[data-gds-continue],[data-gds-stop],[data-gds-rebuild],[data-gds-restore],[data-gds-save-summary],[data-gds-api-save],[data-gds-api-test],[data-gds-director-longline],[data-gds-director-branch],[data-gds-director-foreshadow],[data-gds-director-save],[data-gds-director-lock],[data-gds-director-select-branch],[data-gds-director-stop],[data-gds-director-continue],[data-gds-director-restart],[data-gds-director-clear],[data-gds-calendar-add],[data-gds-calendar-remove],[data-gds-calendar-sync],[data-gds-reply-generate],[data-gds-reply-copy],[data-gds-reply-insert],[data-gds-reply-stop]');
         if (!target) return;
         try {
             if (target.matches('[data-gds-tab]')) {
@@ -2904,6 +3108,8 @@ function createUi() {
             }
             if (target.matches('[data-gds-close]')) togglePanel(false);
             if (target.matches('[data-gds-summarize]')) await startSummary(true);
+            if (target.matches('[data-gds-layered-start]')) await startLayeredAuto();
+            if (target.matches('[data-gds-layered-pause],[data-gds-layered-stop]')) stopLayeredAuto();
             if (target.matches('[data-gds-consolidate]')) await consolidateRollingMemory(true);
             if (target.matches('[data-gds-restore-archive]')) await restoreLatestCapsuleArchive(getContext());
             if (target.matches('[data-gds-continue]')) await continueSummary();
@@ -2996,7 +3202,7 @@ function createUi() {
         refreshUi();
     });
 
-    for (const input of overlay.querySelectorAll('input[data-gds-hide],input[data-gds-collapse],input[data-gds-stream],input[data-gds-keep],input[data-gds-capsule-auto],input[data-gds-capsule-threshold],input[data-gds-capsule-keep],input[data-gds-injection],input[data-gds-words],select[data-gds-memory-mode],select[data-gds-summary-mode],select[data-gds-provider],select[data-gds-api-module],select[data-gds-api-model-select],input[data-gds-director-enabled],select[data-gds-director-preset],select[data-gds-director-pacing],input[data-gds-director-pacing-custom],input[data-gds-director-toggle],input[data-gds-calendar-enabled],input[data-gds-calendar-builtins],input[data-gds-calendar-auto-advance],input[data-gds-calendar-window],input[data-gds-calendar-world-date],input[data-gds-reply-follow],select[data-gds-reply-viewpoint],select[data-gds-reply-detail],select[data-gds-reply-length],select[data-gds-reply-initiative],input[data-gds-reply-tone]')) {
+    for (const input of overlay.querySelectorAll('input[data-gds-hide],input[data-gds-collapse],input[data-gds-stream],input[data-gds-keep],input[data-gds-capsule-auto],input[data-gds-capsule-threshold],input[data-gds-capsule-keep],input[data-gds-injection],input[data-gds-words],select[data-gds-summary-mode],select[data-gds-provider],select[data-gds-api-module],select[data-gds-api-model-select],input[data-gds-director-enabled],select[data-gds-director-preset],select[data-gds-director-pacing],input[data-gds-director-pacing-custom],input[data-gds-director-toggle],input[data-gds-calendar-enabled],input[data-gds-calendar-builtins],input[data-gds-calendar-auto-advance],input[data-gds-calendar-window],input[data-gds-calendar-world-date],input[data-gds-reply-follow],select[data-gds-reply-viewpoint],select[data-gds-reply-detail],select[data-gds-reply-length],select[data-gds-reply-initiative],input[data-gds-reply-tone]')) {
         input.addEventListener('change', () => {
             const ctx = getContext();
             const settings = getSettings(ctx);
@@ -3009,15 +3215,6 @@ function createUi() {
             if (input.matches('[data-gds-capsule-keep]')) settings.keepRecentCapsules = Math.max(0, Number(input.value) || 0);
             if (input.matches('[data-gds-injection]')) settings.injectionMaxTokens = Math.max(160, Number(input.value) || DEFAULT_SETTINGS.injectionMaxTokens);
             if (input.matches('[data-gds-words]')) settings.targetWords = Math.max(80, Number(input.value) || DEFAULT_SETTINGS.targetWords);
-            if (input.matches('[data-gds-memory-mode]')) {
-                settings.memoryMode = ['manual', 'layered'].includes(input.value) ? input.value : 'manual';
-                const chatState = getChatState(ctx);
-                chatState.memoryMode = settings.memoryMode;
-                setChatState(chatState, ctx);
-                applyInjection(ctx, chatState, settings).catch(console.error);
-                saveChat(ctx).catch(console.error);
-                if (settings.memoryMode === 'layered') scheduleLayeredMemory(500);
-            }
             if (input.matches('[data-gds-summary-mode]')) {
                 const chatState = getChatState(ctx);
                 const mode = ['novel', 'structured', 'mixed'].includes(input.value) ? input.value : 'mixed';

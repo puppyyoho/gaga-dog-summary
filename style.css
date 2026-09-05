@@ -89,6 +89,7 @@
     min-height: 0;
     flex: 1 1 auto;
     overflow: auto;
+    overflow-anchor: none;
     overscroll-behavior: contain;
 }
 
@@ -280,6 +281,20 @@ body.gds-panel-open { overflow: hidden !important; }
     color: var(--gds-pink-deep);
     font-size: 13px;
 }
+
+.gds-memory-page { min-width: 0; padding-bottom: 18px; }
+.gds-layered-state {
+    width: fit-content;
+    margin: 16px 22px 4px;
+    padding: 5px 10px;
+    border: 1px solid var(--gds-line);
+    border-radius: 999px;
+    background: #fff;
+    color: var(--gds-muted);
+    font-size: 12px;
+}
+.gds-layered-state.active { border-color: #93d4aa; background: #f0fff5; color: #387b50; }
+.gds-layered-state.error { border-color: #e7a5af; background: #fff1f3; color: #b33f52; }
 
 .gds-metrics {
     display: flex;
@@ -561,6 +576,7 @@ body.gds-panel-open { overflow: hidden !important; }
     .gds-section-title { padding-top: 13px; }
     .gds-section-title h3 { font-size: 17px; }
     .gds-status { margin: 12px 14px 7px; }
+    .gds-layered-state { margin: 12px 14px 4px; }
     .gds-metrics { padding: 0 14px 12px; }
     .gds-actions { padding: 0 14px 14px; }
     .gds-actions button { flex: 1 1 128px; min-height: 40px; }
