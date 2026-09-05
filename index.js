@@ -92,7 +92,7 @@ const INJECTION_ID = `${EXTENSION_NAME}:memory`;
 const DIRECTOR_INJECTION_ID = `${EXTENSION_NAME}:director`;
 const PANEL_LOGO_URL = new URL('./assets/gaga-dog-logo.png', import.meta.url).href;
 const FLOATING_LOGO_URL = new URL('./assets/gaga-dog-floating.png', import.meta.url).href;
-const VERSION = '0.5.2';
+const VERSION = '0.5.3';
 const SETTINGS_VERSION = 8;
 
 const DEFAULT_SETTINGS = {
@@ -1450,12 +1450,12 @@ async function generateRoundCapsuleForRange(ctx, range, {
         });
         let packet;
         try {
-            packet = parseRoundCapsule(result.text);
+            packet = parseRoundCapsule(result.text, { allowPlainText: false });
         } catch (error) {
             console.warn(`[${DISPLAY_NAME}] 剧情胶囊格式需要修复`, error);
             const repaired = await generateWithFallback(ctx, {
-                ...request,
-                prompt: `${request.prompt}\n\n上一次返回格式无效。请重新输出一个完整、合法的 JSON 对象，只包含 title、text、importance、participants、keywords。`,
+                systemPrompt: `你是 JSON 格式修复器。把输入中的剧情胶囊内容原样整理为一个合法 JSON 对象，不得续写、删改事实或解释。只输出 title、text、importance、participants、keywords；importance 只能是 critical、high、medium、low。`,
+                prompt: `<待修复的模型返回>\n${String(result.text || '').slice(0, 24000)}\n</待修复的模型返回>\n\n只输出修复后的完整 JSON 对象。JSON 字符串中的换行与双引号必须正确转义。`,
                 providerProfile: moduleProvider(ctx, 'memory'),
                 preferStream: false,
                 signal: controller.signal,

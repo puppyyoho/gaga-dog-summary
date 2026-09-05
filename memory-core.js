@@ -339,26 +339,171 @@ export function tokenEstimate(text) {
     return Math.max(1, Math.ceil(cjk * 0.9 + latin / 3.6));
 }
 
-export function parseRoundCapsule(raw) {
-    const text = compactText(raw, 30000);
-    let value = null;
-    try { value = JSON.parse(text); } catch {
-        const match = text.match(/\{[\s\S]*\}/);
-        if (match) {
-            try { value = JSON.parse(match[0]); } catch { /* Report the stable error below. */ }
+function capsuleResponseText(raw) {
+    return String(raw ?? '')
+        .replace(/<(think|thinking|analysis)>[\s\S]*?<\/\1>/gi, '')
+        .replace(/<(think|thinking|analysis)>[\s\S]*$/gi, '')
+        .replace(/^\s*```(?:json|jsonl|text)?\s*/i, '')
+        .replace(/\s*```\s*$/i, '')
+        .replace(/\u0000/g, '')
+        .trim()
+        .slice(0, 30000);
+}
+
+function balancedJsonCandidates(text) {
+    const candidates = [text];
+    for (let start = 0; start < text.length; start += 1) {
+        if (text[start] !== '{' && text[start] !== '[') continue;
+        const stack = [];
+        let inString = false;
+        let escaped = false;
+        for (let index = start; index < text.length; index += 1) {
+            const char = text[index];
+            if (inString) {
+                if (escaped) escaped = false;
+                else if (char === '\\') escaped = true;
+                else if (char === '"') inString = false;
+                continue;
+            }
+            if (char === '"') {
+                inString = true;
+                continue;
+            }
+            if (char === '{' || char === '[') stack.push(char);
+            else if (char === '}' || char === ']') {
+                const expected = char === '}' ? '{' : '[';
+                if (stack.at(-1) !== expected) break;
+                stack.pop();
+                if (!stack.length) {
+                    candidates.push(text.slice(start, index + 1));
+                    start = index;
+                    break;
+                }
+            }
         }
     }
-    if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('模型没有返回可解析的剧情胶囊');
-    const capsuleText = compactText(value.text || value.summary || value.recap || '', 2400);
-    if (!capsuleText) throw new Error('模型返回了空的剧情胶囊');
-    const importance = String(value.importance || 'medium').toLowerCase();
+    const firstObject = text.indexOf('{');
+    const lastObject = text.lastIndexOf('}');
+    if (firstObject >= 0 && lastObject > firstObject) candidates.push(text.slice(firstObject, lastObject + 1));
+    return [...new Set(candidates.map(item => item.trim()).filter(Boolean))];
+}
+
+function repairCapsuleJson(value) {
+    const source = String(value || '');
+    let output = '';
+    let inString = false;
+    let escaped = false;
+    for (let index = 0; index < source.length; index += 1) {
+        const char = source[index];
+        if (!inString) {
+            output += char;
+            if (char === '"') inString = true;
+            continue;
+        }
+        if (escaped) {
+            if (!'"\\/bfnrtu'.includes(char)) output += '\\\\';
+            output += char;
+            escaped = false;
+            continue;
+        }
+        if (char === '\\') {
+            output += char;
+            escaped = true;
+            continue;
+        }
+        if (char === '\r' || char === '\n') {
+            if (char === '\r' && source[index + 1] === '\n') index += 1;
+            output += '\\n';
+            continue;
+        }
+        if (char === '"') {
+            let rest = source.slice(index + 1);
+            while (true) {
+                rest = rest.replace(/^\s+/, '');
+                if (/^\\[nrt]/.test(rest)) rest = rest.slice(2);
+                else break;
+            }
+            if (/^[,}:\]]/.test(rest) || !rest) {
+                output += char;
+                inString = false;
+            } else {
+                output += '\\"';
+            }
+            continue;
+        }
+        if (char.charCodeAt(0) < 0x20) {
+            output += `\\u${char.charCodeAt(0).toString(16).padStart(4, '0')}`;
+            continue;
+        }
+        output += char;
+    }
+    return output;
+}
+
+function capsuleValueCandidates(value, depth = 0) {
+    if (depth > 4 || value == null) return [];
+    if (Array.isArray(value)) return value.flatMap(item => capsuleValueCandidates(item, depth + 1));
+    if (typeof value !== 'object') return [];
+    const output = [value];
+    for (const key of ['capsule', 'result', 'data', 'output', 'message', 'content', 'response']) {
+        const nested = value[key];
+        if (nested && typeof nested === 'object') output.push(...capsuleValueCandidates(nested, depth + 1));
+        else if (typeof nested === 'string' && /[\[{]/.test(nested)) {
+            for (const candidate of balancedJsonCandidates(nested)) {
+                try { output.push(...capsuleValueCandidates(JSON.parse(candidate), depth + 1)); } catch { /* Try the next wrapper. */ }
+            }
+        }
+    }
+    return output;
+}
+
+function normalizeCapsuleValue(value) {
+    const capsuleText = compactText(
+        value?.text || value?.summary || value?.recap || value?.content
+        || value?.['内容'] || value?.['摘要'] || value?.['剧情'] || '',
+        2400,
+    );
+    if (!capsuleText) return null;
+    const importanceValue = value?.importance || value?.priority || value?.['重要性'] || 'medium';
+    const importanceMap = { '关键': 'critical', '极高': 'critical', '高': 'high', '中': 'medium', '一般': 'medium', '低': 'low' };
+    const importance = importanceMap[String(importanceValue).trim()] || String(importanceValue).toLowerCase();
+    const participants = value?.participants || value?.characters || value?.['人物'] || value?.['参与者'];
+    const keywords = value?.keywords || value?.tags || value?.['关键词'] || value?.['标签'];
+    const normalizeList = list => Array.isArray(list)
+        ? list
+        : typeof list === 'string' ? list.split(/[，,、；;|]/) : [];
     return {
-        title: compactText(value.title || value.name || '本轮剧情', 120),
+        title: compactText(value?.title || value?.name || value?.['标题'] || '本轮剧情', 120),
         text: capsuleText,
         importance: ['critical', 'high', 'medium', 'low'].includes(importance) ? importance : 'medium',
-        participants: Array.isArray(value.participants) ? value.participants.map(item => compactText(item, 80)).filter(Boolean).slice(0, 20) : [],
-        keywords: Array.isArray(value.keywords) ? value.keywords.map(item => compactText(item, 80)).filter(Boolean).slice(0, 24) : [],
+        participants: normalizeList(participants).map(item => compactText(item, 80)).filter(Boolean).slice(0, 20),
+        keywords: normalizeList(keywords).map(item => compactText(item, 80)).filter(Boolean).slice(0, 24),
     };
+}
+
+export function parseRoundCapsule(raw, { allowPlainText = true } = {}) {
+    const text = capsuleResponseText(raw);
+    if (!text) throw new Error('模型返回了空的剧情胶囊');
+    for (const candidate of balancedJsonCandidates(text)) {
+        for (const source of [candidate, repairCapsuleJson(candidate)]) {
+            try {
+                const parsed = JSON.parse(source);
+                for (const value of capsuleValueCandidates(parsed)) {
+                    const capsule = normalizeCapsuleValue(value);
+                    if (capsule) return capsule;
+                }
+            } catch { /* Try the remaining bounded and repaired candidates. */ }
+        }
+    }
+    // Some otherwise capable role-play models insist on returning the capsule
+    // as ordinary prose. It is still a faithful compression of this exact,
+    // hash-checked source round, so preserve it instead of trapping a historical
+    // backfill in an endless format-error loop.
+    const plain = compactText(text.replace(/^剧情胶囊\s*[：:]\s*/i, ''), 2400);
+    if (allowPlainText && plain && !/^(?:抱歉|对不起|sorry\b|i\s+(?:cannot|can't)\b)/i.test(plain)) {
+        return { title: '本轮剧情', text: plain, importance: 'medium', participants: [], keywords: [] };
+    }
+    throw new Error('模型没有返回可解析的剧情胶囊');
 }
 
 export function createRoundCapsule(packet, sourceRange, id = `capsule_${Date.now()}`) {

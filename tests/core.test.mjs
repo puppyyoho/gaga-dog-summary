@@ -176,6 +176,37 @@ test('creates one incremental capsule for a completed user and assistant round',
     assert.ok(roundCapsuleTokens(next) > 0);
 });
 
+test('parses fenced, reasoning-prefixed and wrapped capsule responses', () => {
+    const response = `<thinking>先分析人物关系 {不属于输出}</thinking>\n\n\`\`\`json\n${JSON.stringify({
+        result: {
+            title: '雨夜靠近',
+            text: '她接过外套，两人的距离悄然缩短。',
+            importance: 'high',
+            participants: ['她', '他'],
+            keywords: ['外套', '靠近'],
+        },
+    })}\n\`\`\``;
+    const capsule = parseRoundCapsule(response);
+    assert.equal(capsule.title, '雨夜靠近');
+    assert.equal(capsule.importance, 'high');
+    assert.deepEqual(capsule.participants, ['她', '他']);
+});
+
+test('repairs raw line breaks and dialogue quotes in capsule JSON', () => {
+    const response = `{"title":"追问","text":"她抬头问："你还回来吗？"\n他没有立刻回答。","importance":"中","人物":"她、他","关键词":"追问,约定"}`;
+    const capsule = parseRoundCapsule(response);
+    assert.match(capsule.text, /你还回来吗/);
+    assert.equal(capsule.importance, 'medium');
+    assert.deepEqual(capsule.participants, ['她', '他']);
+});
+
+test('accepts a plain-text capsule without blocking historical backfill', () => {
+    const capsule = parseRoundCapsule('剧情胶囊：她收下钥匙，同时仍对他的真实身份存有疑虑。');
+    assert.equal(capsule.title, '本轮剧情');
+    assert.match(capsule.text, /收下钥匙/);
+    assert.throws(() => parseRoundCapsule('先随便写一段散文。', { allowPlainText: false }), /可解析/);
+});
+
 test('historical backfill plans every complete old round and respects the recent boundary', () => {
     const history = [
         { name: 'Char', mes: '开场问候。', send_date: '0' },
