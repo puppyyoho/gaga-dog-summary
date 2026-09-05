@@ -279,3 +279,21 @@ test('layered summary and capsule injection share one strict token budget', () =
     const injection = compileInjection(state, { recentStartIndex: 6, maxTokens: 240, capsuleLimit: 12 });
     assert.ok(tokenEstimate(injection) <= 240);
 });
+
+test('injection trimming never exposes implementation placeholders or cuts the retained head mid-sentence', () => {
+    const state = normalizeChatState({
+        memoryMode: 'manual',
+        summaryMode: 'novel',
+        summaryArtifacts: {
+            novel: `开端的完整事实。${'很长的中间剧情。'.repeat(900)}结尾的完整事实。`,
+            structured: '',
+            mixed: '',
+        },
+    });
+    const injection = compileInjection(state, { maxTokens: 160 });
+    assert.doesNotMatch(injection, /按注入上限省略|中间部分已/);
+    assert.match(injection, /开端的完整事实。/);
+    assert.match(injection, /结尾的完整事实。/);
+    assert.match(injection, /<gaga_memory>[\s\S]*<\/gaga_memory>/);
+    assert.ok(tokenEstimate(injection) <= 160);
+});

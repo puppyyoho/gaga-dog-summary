@@ -660,11 +660,43 @@ function trimSummaryForInjection(value, maxChars) {
     const text = String(value || '');
     const limit = Math.max(30, Math.floor(Number(maxChars) || 300));
     if (text.length <= limit) return text;
-    const marker = '\n……中间部分已按注入上限省略……\n';
-    const available = Math.max(12, limit - marker.length);
-    const head = Math.max(7, Math.floor(available * 0.68));
-    const tail = Math.max(5, available - head);
-    return `${text.slice(0, head)}${marker}${text.slice(-tail)}`;
+    const separator = '\n';
+    const available = Math.max(12, limit - separator.length);
+    const headBudget = Math.max(7, Math.floor(available * 0.62));
+    const tailBudget = Math.max(5, available - headBudget);
+
+    const clipHead = (source, budget) => {
+        const excerpt = source.slice(0, budget);
+        const minimum = Math.floor(budget * 0.45);
+        let cut = -1;
+        for (let index = minimum; index < excerpt.length; index += 1) {
+            if (/[。！？!?；;\n>]/.test(excerpt[index])) cut = index + 1;
+        }
+        if (cut < 0) {
+            for (let index = Math.floor(budget * 0.68); index < excerpt.length; index += 1) {
+                if (/[，,、：:\s]/.test(excerpt[index])) cut = index + 1;
+            }
+        }
+        return excerpt.slice(0, cut > 0 ? cut : budget).trimEnd();
+    };
+
+    const clipTail = (source, budget) => {
+        const excerpt = source.slice(-budget);
+        const searchLimit = Math.max(1, Math.floor(budget * 0.45));
+        for (let index = 0; index < Math.min(searchLimit, excerpt.length); index += 1) {
+            if (/[。！？!?；;\n]/.test(excerpt[index])) return excerpt.slice(index + 1).trimStart();
+        }
+        for (let index = 0; index < Math.min(searchLimit, excerpt.length); index += 1) {
+            if (/[，,、：:\s]/.test(excerpt[index])) return excerpt.slice(index + 1).trimStart();
+        }
+        return excerpt.trimStart();
+    };
+
+    const head = clipHead(text, headBudget);
+    const tail = clipTail(text, tailBudget);
+    // Omission is an implementation detail, not story content. Never inject a
+    // visible placeholder that a role-play model could copy into its reply.
+    return [head, tail].filter(Boolean).join(separator).slice(0, limit);
 }
 
 function trimForTokenBudget(value, maxTokens) {

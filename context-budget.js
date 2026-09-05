@@ -42,6 +42,14 @@ export function resolveOutputReserveTokens(ctx = {}, doc = globalThis.document) 
     ], 128) || 4096;
 }
 
+export function chooseInjectionBudget(options = {}) {
+    const configuredTokens = Math.max(0, Math.round(Number(options.configuredTokens || 0)));
+    if (configuredTokens >= 160) return configuredTokens;
+    const contextTokens = Math.max(0, Math.round(Number(options.contextTokens || 0)));
+    if (!contextTokens) return 12000;
+    return Math.max(2048, Math.min(64000, Math.floor(contextTokens * 0.32)));
+}
+
 export function chooseSummaryBatchPlan(options = {}) {
     const contextTokens = Math.max(0, Number(options.contextTokens || 0));
     const sourceTokens = Math.max(1, Number(options.sourceTokens || 1));

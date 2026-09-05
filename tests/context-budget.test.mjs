@@ -1,10 +1,19 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+    chooseInjectionBudget,
     chooseSummaryBatchPlan,
     resolveContextWindowTokens,
     resolveOutputReserveTokens,
 } from '../context-budget.js';
+
+test('sizes the memory injection budget from the active model context', () => {
+    assert.equal(chooseInjectionBudget({ contextTokens: 32000 }), 10240);
+    assert.equal(chooseInjectionBudget({ contextTokens: 128000 }), 40960);
+    assert.equal(chooseInjectionBudget({ contextTokens: 200000 }), 64000);
+    assert.equal(chooseInjectionBudget({ contextTokens: 0 }), 12000);
+    assert.equal(chooseInjectionBudget({ contextTokens: 200000, configuredTokens: 18000 }), 18000);
+});
 
 test('reads the active Tavern context and output limits', () => {
     const ctx = {

@@ -65,7 +65,10 @@ test('workbench exposes full summary and rolling memory as separate modules', ()
     assert.match(js, /data-gds-tab="reply"/);
     assert.match(js, /data-gds-summary-mode/);
     assert.match(js, /summaryArtifacts/);
-    assert.match(js, /compileInjection\(chatState, \{[\s\S]*maxTokens:\s*settings\.injectionMaxTokens/);
+    assert.match(js, /chooseInjectionBudget\(\{[\s\S]*contextTokens:\s*resolveContextWindowTokens\(ctx\)/);
+    assert.match(js, /compileInjection\(chatState, \{[\s\S]*maxTokens:\s*injectionBudget/);
+    assert.match(js, /记忆注入预算 Token（0＝自动）/);
+    assert.match(js, /result\.injectionMaxTokens === 1400/);
     assert.match(js, /data-gds-provider="memory"/);
     assert.match(js, /data-gds-provider="director"/);
     assert.match(js, /data-gds-provider="reply"/);

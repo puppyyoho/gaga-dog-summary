@@ -41,6 +41,7 @@ import {
 } from './prompts.js';
 import { generateDirectOnly, generateWithFallback, listConnectionModels, listDirectModels, readableGenerationError } from './generation-client.js';
 import {
+    chooseInjectionBudget,
     chooseSummaryBatchPlan,
     FALLBACK_BATCH_TOKENS,
     resolveContextWindowTokens,
@@ -92,8 +93,8 @@ const INJECTION_ID = `${EXTENSION_NAME}:memory`;
 const DIRECTOR_INJECTION_ID = `${EXTENSION_NAME}:director`;
 const PANEL_LOGO_URL = new URL('./assets/gaga-dog-logo.png', import.meta.url).href;
 const FLOATING_LOGO_URL = new URL('./assets/gaga-dog-floating.png', import.meta.url).href;
-const VERSION = '0.5.3';
-const SETTINGS_VERSION = 8;
+const VERSION = '0.5.4';
+const SETTINGS_VERSION = 9;
 
 const DEFAULT_SETTINGS = {
     showFloatingButton: true,
@@ -109,7 +110,7 @@ const DEFAULT_SETTINGS = {
     autoConsolidateCapsules: true,
     capsuleConsolidationTokens: 20000,
     keepRecentCapsules: 8,
-    injectionMaxTokens: 1400,
+    injectionMaxTokens: 0,
     recallLimit: 3,
     targetWords: 520,
     summaryMode: 'mixed',
@@ -238,6 +239,7 @@ function getMessages(ctx = getContext()) {
 function getSettings(ctx = getContext()) {
     ctx.extensionSettings ??= {};
     const current = ctx.extensionSettings[SETTINGS_KEY];
+    const previousSettingsVersion = Number(current?.settingsVersion || 0);
     const needsMigration = Boolean(!current || Number(current.settingsVersion || 0) < SETTINGS_VERSION || 'autoSummarize' in current || 'triggerTokens' in current);
     const result = { ...DEFAULT_SETTINGS, ...(current && typeof current === 'object' ? current : {}) };
     delete result.autoSummarize;
@@ -264,10 +266,16 @@ function getSettings(ctx = getContext()) {
         result.moduleConnections[moduleName] = String(result.moduleConnections[moduleName] || PROVIDER_CURRENT);
         result.moduleModels[moduleName] = String(result.moduleModels[moduleName] || '').trim();
     }
-    for (const key of ['keepMessages', 'injectionMaxTokens', 'recallLimit', 'targetWords', 'capsuleConsolidationTokens']) {
+    for (const key of ['keepMessages', 'recallLimit', 'targetWords', 'capsuleConsolidationTokens']) {
         const value = Number(result[key]);
         result[key] = Number.isFinite(value) ? Math.max(1, Math.round(value)) : DEFAULT_SETTINGS[key];
     }
+    const savedInjectionLimit = Number(result.injectionMaxTokens);
+    result.injectionMaxTokens = Number.isFinite(savedInjectionLimit) ? Math.max(0, Math.round(savedInjectionLimit)) : 0;
+    // 1400 was the old hard-coded default rather than a deliberate user
+    // choice. Migrate it to adaptive budgeting once, leaving other custom
+    // limits untouched.
+    if (previousSettingsVersion < 9 && result.injectionMaxTokens === 1400) result.injectionMaxTokens = 0;
     result.keepMessages = Math.max(1, result.keepMessages);
     result.capsuleConsolidationTokens = Math.max(2000, result.capsuleConsolidationTokens);
     result.keepRecentCapsules = Number.isFinite(Number(result.keepRecentCapsules))
@@ -896,8 +904,12 @@ async function applyInjection(ctx = getContext(), chatState = getChatState(ctx),
         if (typeof ctx.setExtensionPrompt === 'function') await ctx.setExtensionPrompt(INJECTION_ID, '', 1, 0, false, 0);
         return '';
     }
+    const injectionBudget = chooseInjectionBudget({
+        contextTokens: resolveContextWindowTokens(ctx),
+        configuredTokens: settings.injectionMaxTokens,
+    });
     const injection = compileInjection(chatState, {
-        maxTokens: settings.injectionMaxTokens,
+        maxTokens: injectionBudget,
         recentStartIndex: Math.max(0, messages.length - settings.keepMessages),
         capsuleLimit: Math.max(8, settings.keepRecentCapsules * 2),
         query: recentQuery(messages),
@@ -2703,8 +2715,12 @@ function refreshUi() {
     for (const streamPreview of streamPreviews) {
         if (document.activeElement !== streamPreview) streamPreview.value = runtime.streamText || chatState.pending?.partialText || '';
     }
+    const injectionBudget = chooseInjectionBudget({
+        contextTokens: resolveContextWindowTokens(ctx),
+        configuredTokens: settings.injectionMaxTokens,
+    });
     const injectionPreview = compileInjection({ ...chatState, memoryMode: settings.memoryMode }, {
-        maxTokens: settings.injectionMaxTokens,
+        maxTokens: injectionBudget,
         recentStartIndex: Math.max(0, getMessages(ctx).length - settings.keepMessages),
         capsuleLimit: Math.max(8, settings.keepRecentCapsules * 2),
         query: recentQuery(getMessages(ctx)),
@@ -2720,6 +2736,11 @@ function refreshUi() {
         <span>检查点 ${chatState.checkpoints.length}</span>
         <span>注入约 ${chatState.lastInjectionTokens || tokenEstimate(chatState.lastInjection || '')} Token</span>`;
     for (const metrics of runtime.overlay.querySelectorAll('[data-gds-metrics]')) metrics.innerHTML = metricsHtml;
+    for (const label of runtime.overlay.querySelectorAll('[data-gds-injection-budget]')) {
+        label.textContent = settings.injectionMaxTokens >= 160
+            ? `当前手动上限：${injectionBudget} Token`
+            : `当前自动预算：${injectionBudget} Token（按正文模型上下文计算）`;
+    }
     const fullStatus = runtime.overlay.querySelector('[data-gds-status="full"]');
     const layeredStatus = runtime.overlay.querySelector('[data-gds-status="layered"]');
     if (!runtime.busy && !runtime.workflowActive && !runtime.capsuleBusy && !runtime.backfillBusy) {
@@ -3232,7 +3253,7 @@ function createUi() {
                 </details>
                 <details class="gds-details"><summary>高级输出设置</summary>
                     <div class="gds-settings-grid">
-                        <label>注入上限 Token <input type="number" min="160" step="100" data-gds-injection></label>
+                        <label><span class="gds-injection-copy">记忆注入预算 Token（0＝自动）<small data-gds-injection-budget></small></span><input type="number" min="0" step="100" data-gds-injection></label>
                         <label>前情目标字数 <input type="number" min="80" step="20" data-gds-words></label>
                     </div>
                 </details>
@@ -3274,7 +3295,7 @@ function createUi() {
                         <label>完整保留近期消息 <input type="number" min="1" step="1" data-gds-keep></label>
                         <label>胶囊整理阈值 Token <input type="number" min="2000" step="1000" data-gds-capsule-threshold></label>
                         <label>整理时保留最近胶囊 <input type="number" min="0" step="1" data-gds-capsule-keep></label>
-                        <label>注入上限 Token <input type="number" min="160" step="100" data-gds-injection></label>
+                        <label><span class="gds-injection-copy">记忆注入预算 Token（0＝自动）<small data-gds-injection-budget></small></span><input type="number" min="0" step="100" data-gds-injection></label>
                         <label>前情目标字数 <input type="number" min="80" step="20" data-gds-words></label>
                     </div>
                     <p class="gds-help">刚开始使用时，可先补建近期保留范围之前的历史胶囊。补建会逐轮连续完成并保存断点。自动记录出错后会立即暂停，不会自行反复重试；历史补建同样会停在失败轮次。自动记录只负责补建完成后的新对话。</p>
@@ -3494,7 +3515,10 @@ function createUi() {
             if (input.matches('[data-gds-capsule-auto]')) settings.autoConsolidateCapsules = input.checked;
             if (input.matches('[data-gds-capsule-threshold]')) settings.capsuleConsolidationTokens = Math.max(2000, Number(input.value) || DEFAULT_SETTINGS.capsuleConsolidationTokens);
             if (input.matches('[data-gds-capsule-keep]')) settings.keepRecentCapsules = Math.max(0, Number(input.value) || 0);
-            if (input.matches('[data-gds-injection]')) settings.injectionMaxTokens = Math.max(160, Number(input.value) || DEFAULT_SETTINGS.injectionMaxTokens);
+            if (input.matches('[data-gds-injection]')) {
+                const value = Math.round(Number(input.value) || 0);
+                settings.injectionMaxTokens = value >= 160 ? value : 0;
+            }
             if (input.matches('[data-gds-words]')) settings.targetWords = Math.max(80, Number(input.value) || DEFAULT_SETTINGS.targetWords);
             if (input.matches('[data-gds-summary-mode]')) {
                 const chatState = getChatState(ctx);

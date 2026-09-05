@@ -391,6 +391,8 @@ body.gds-panel-open { overflow: hidden !important; }
 .gds-settings-grid label { display: flex; align-items: center; justify-content: space-between; gap: 12px; color: var(--gds-muted); }
 .gds-settings-grid .gds-toggle-row { width: fit-content; max-width: 100%; min-height: 24px; justify-content: flex-start; gap: 9px; }
 .gds-settings-grid input[type="number"] { width: 86px; border: 1px solid var(--gds-line); border-radius: 7px; padding: 5px 7px; }
+.gds-injection-copy { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.gds-injection-copy small { color: var(--gds-muted); font-size: 10px; line-height: 1.35; }
 .gds-settings-grid input[type="checkbox"] {
     appearance: none !important;
     -webkit-appearance: none !important;
