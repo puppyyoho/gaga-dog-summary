@@ -1,17 +1,25 @@
 import {
     assertMemoryPacket,
+    activeRoundCapsules,
+    appendRoundCapsule,
+    capsulesForConsolidation,
     clone,
     compactText,
     compileInjection,
+    createRoundCapsule,
     DEFAULT_CHAT_STATE,
     makeSourceRange,
     mergeMemoryPacket,
     normalizeChatState,
     normalizeMessages,
+    nextRoundRange,
     parseModelPacket,
+    parseRoundCapsule,
     rangeForNewSummary,
     rangesForSummaryBacklog,
     rangeStillMatches,
+    renderRoundCapsule,
+    roundCapsuleTokens,
     selectStyleAnchors,
     simpleHash,
     tokenEstimate,
@@ -21,9 +29,11 @@ import {
 import { persistChatMetadata, readChatState, writeChatState } from './chat-state.js';
 import {
     buildAuditPrompt,
+    buildCapsuleConsolidationPrompt,
     buildFactPrompt,
     buildPolishPrompt,
     buildProsePrompt,
+    buildRoundCapsulePrompt,
     DEFAULT_PROMPTS,
     PROMPT_VERSION,
     renderFactsForProse,
@@ -81,8 +91,8 @@ const INJECTION_ID = `${EXTENSION_NAME}:memory`;
 const DIRECTOR_INJECTION_ID = `${EXTENSION_NAME}:director`;
 const PANEL_LOGO_URL = new URL('./assets/gaga-dog-logo.png', import.meta.url).href;
 const FLOATING_LOGO_URL = new URL('./assets/gaga-dog-floating.png', import.meta.url).href;
-const VERSION = '0.3.12';
-const SETTINGS_VERSION = 5;
+const VERSION = '0.4.0';
+const SETTINGS_VERSION = 6;
 
 const DEFAULT_SETTINGS = {
     showFloatingButton: true,
@@ -90,11 +100,13 @@ const DEFAULT_SETTINGS = {
     floatingIconData: '',
     floatingPosition: null,
     panelPosition: null,
-    autoSummarize: true,
+    memoryMode: 'manual',
     autoHide: true,
     collapseHidden: true,
-    triggerTokens: 60000,
-    keepMessages: 10,
+    keepMessages: 5,
+    autoConsolidateCapsules: true,
+    capsuleConsolidationTokens: 20000,
+    keepRecentCapsules: 8,
     injectionMaxTokens: 1400,
     recallLimit: 3,
     targetWords: 520,
@@ -111,8 +123,7 @@ const runtime = {
     settingsEntry: null,
     open: false,
     busy: false,
-    scheduled: false,
-    timer: null,
+    layeredTimer: null,
     taskSerial: 0,
     abortController: null,
     streamText: '',
@@ -120,6 +131,8 @@ const runtime = {
     activeStage: '',
     workflowActive: false,
     workflow: null,
+    capsuleBusy: false,
+    capsuleController: null,
     generating: false,
     lastChatSignature: '',
     lastError: '',
@@ -217,12 +230,14 @@ function getMessages(ctx = getContext()) {
 function getSettings(ctx = getContext()) {
     ctx.extensionSettings ??= {};
     const current = ctx.extensionSettings[SETTINGS_KEY];
+    const needsMigration = Boolean(!current || Number(current.settingsVersion || 0) < SETTINGS_VERSION || 'autoSummarize' in current || 'triggerTokens' in current);
     const result = { ...DEFAULT_SETTINGS, ...(current && typeof current === 'object' ? current : {}) };
-    const migratedDefault = Boolean(current && typeof current === 'object' && !current.settingsVersion && Number(current.triggerTokens) === 1800);
-    if (migratedDefault) result.triggerTokens = DEFAULT_SETTINGS.triggerTokens;
+    delete result.autoSummarize;
+    delete result.triggerTokens;
     result.settingsVersion = SETTINGS_VERSION;
     result.prompts = { ...DEFAULT_PROMPTS, ...(current?.prompts && typeof current.prompts === 'object' ? current.prompts : {}) };
     result.summaryMode = ['novel', 'structured', 'mixed'].includes(result.summaryMode) ? result.summaryMode : DEFAULT_SETTINGS.summaryMode;
+    result.memoryMode = ['manual', 'layered'].includes(result.memoryMode) ? result.memoryMode : DEFAULT_SETTINGS.memoryMode;
     result.floatingIconSize = Math.min(120, Math.max(32, Math.round(Number(result.floatingIconSize) || DEFAULT_SETTINGS.floatingIconSize)));
     result.floatingIconData = normalizeFloatingIconData(result.floatingIconData);
     result.apiProfiles = normalizeProviderProfiles(result.apiProfiles);
@@ -233,10 +248,15 @@ function getSettings(ctx = getContext()) {
     for (const moduleName of ['memory', 'director', 'reply']) {
         result.moduleConnections[moduleName] = String(result.moduleConnections[moduleName] || PROVIDER_CURRENT);
     }
-    for (const key of ['triggerTokens', 'keepMessages', 'injectionMaxTokens', 'recallLimit', 'targetWords']) {
+    for (const key of ['keepMessages', 'injectionMaxTokens', 'recallLimit', 'targetWords', 'capsuleConsolidationTokens']) {
         const value = Number(result[key]);
         result[key] = Number.isFinite(value) ? Math.max(1, Math.round(value)) : DEFAULT_SETTINGS[key];
     }
+    result.keepMessages = Math.max(1, result.keepMessages);
+    result.capsuleConsolidationTokens = Math.max(2000, result.capsuleConsolidationTokens);
+    result.keepRecentCapsules = Number.isFinite(Number(result.keepRecentCapsules))
+        ? Math.max(0, Math.round(Number(result.keepRecentCapsules)))
+        : DEFAULT_SETTINGS.keepRecentCapsules;
     const floatingPosition = result.floatingPosition;
     result.floatingPosition = floatingPosition
         && Number.isFinite(Number(floatingPosition.x))
@@ -250,8 +270,8 @@ function getSettings(ctx = getContext()) {
         ? { x: Math.round(Number(panelPosition.x)), y: Math.round(Number(panelPosition.y)) }
         : null;
     ctx.extensionSettings[SETTINGS_KEY] = result;
-    if (migratedDefault) {
-        try { ctx.saveSettingsDebounced?.(); } catch (error) { console.warn(`[${DISPLAY_NAME}] 默认批次迁移保存失败`, error); }
+    if (needsMigration) {
+        try { ctx.saveSettingsDebounced?.(); } catch (error) { console.warn(`[${DISPLAY_NAME}] 记忆模式设置迁移保存失败`, error); }
     }
     return result;
 }
@@ -491,6 +511,9 @@ function snapshotMemory(value) {
         recap: state.recap,
         summaryMode: state.summaryMode,
         summaryArtifacts: clone(state.summaryArtifacts),
+        roundCapsules: clone(state.roundCapsules),
+        memoryArchives: clone(state.memoryArchives),
+        lastCapsuleIndex: state.lastCapsuleIndex,
         lastProcessedIndex: state.lastProcessedIndex,
     };
 }
@@ -509,6 +532,9 @@ function restoreSnapshot(state, snapshot) {
         structured: String(snapshot.summaryArtifacts?.structured || next.summaryArtifacts?.structured || ''),
         mixed: String(snapshot.summaryArtifacts?.mixed || next.summaryArtifacts?.mixed || ''),
     };
+    next.roundCapsules = clone(snapshot.roundCapsules || next.roundCapsules || []);
+    next.memoryArchives = clone(snapshot.memoryArchives || next.memoryArchives || []);
+    next.lastCapsuleIndex = Number(snapshot.lastCapsuleIndex ?? next.lastCapsuleIndex ?? -1);
     next.lastProcessedIndex = Number(snapshot.lastProcessedIndex ?? -1);
     next.lastStableIndex = next.lastProcessedIndex;
     return next;
@@ -525,8 +551,33 @@ async function invalidateIfNeeded(ctx, chatState) {
     const next = restoreSnapshot(chatState, previous?.memorySnapshot);
     next.checkpoints = checkpoints.slice(0, brokenIndex);
     next.sceneCards = next.sceneCards.filter(card => next.checkpoints.some(cp => cp.sceneCardId === card.id));
-    next.hiddenRanges = (next.hiddenRanges || []).filter(item => next.checkpoints.some(cp => cp.id === item.checkpointId));
+    const validOwners = new Set([
+        ...next.checkpoints.map(item => item.id),
+        ...next.roundCapsules.map(item => item.id),
+    ]);
+    next.hiddenRanges = (next.hiddenRanges || []).filter(item => validOwners.has(item.checkpointId));
     next.pending = null;
+    setChatState(next, ctx);
+    return { state: next, changed: true, affected: affected.length };
+}
+
+async function invalidateRoundCapsulesIfNeeded(ctx, chatState) {
+    const capsules = Array.isArray(chatState.roundCapsules) ? chatState.roundCapsules : [];
+    const brokenIndex = capsules.findIndex(item => Number(item?.sourceRange?.end ?? -1) > chatState.lastProcessedIndex && !rangeStillMatches(getMessages(ctx), item.sourceRange));
+    if (brokenIndex < 0) return { state: chatState, changed: false, affected: 0 };
+    const affected = capsules.slice(brokenIndex);
+    await restoreOwnedMessages(ctx, affected.map(item => item.id));
+    const next = normalizeChatState(chatState);
+    next.roundCapsules = capsules.slice(0, brokenIndex);
+    next.lastCapsuleIndex = Math.max(
+        next.lastProcessedIndex,
+        ...next.roundCapsules.map(item => Number(item?.sourceRange?.end ?? -1)),
+    );
+    const validOwners = new Set([
+        ...next.checkpoints.map(item => item.id),
+        ...next.roundCapsules.map(item => item.id),
+    ]);
+    next.hiddenRanges = next.hiddenRanges.filter(item => validOwners.has(item.checkpointId));
     setChatState(next, ctx);
     return { state: next, changed: true, affected: affected.length };
 }
@@ -551,6 +602,7 @@ function renderSelectedSummary(state, novelText, mode) {
 }
 
 function stageName(stage) {
+    if (stage === 'archive') return '滚动记忆归档';
     if (stage === 'polish') return '文学润色';
     if (stage === 'prose') return '前情草稿';
     return '事实记忆';
@@ -812,18 +864,23 @@ async function summarizeRange(ctx, range, settings, reason = 'manual', resumeTas
         runtime.busy = false;
         runtime.activeStage = '';
         refreshUi();
-        if (!runtime.workflowActive && !runtime.lastError && !getChatState(ctx).pending) scheduleAutoSummary(1200);
+        if (!runtime.workflowActive && !runtime.lastError && !getChatState(ctx).pending) scheduleLayeredMemory(1200);
     }
 }
 
 async function applyInjection(ctx = getContext(), chatState = getChatState(ctx), settings = getSettings(ctx)) {
     const messages = getMessages(ctx);
+    chatState.memoryMode = settings.memoryMode;
     if (!chatState.enabled) {
         if (typeof ctx.setExtensionPrompt === 'function') await ctx.setExtensionPrompt(INJECTION_ID, '', 1, 0, false, 0);
         return '';
     }
     const injection = compileInjection(chatState, {
         maxTokens: settings.injectionMaxTokens,
+        recentStartIndex: Math.max(0, messages.length - settings.keepMessages),
+        capsuleLimit: Math.max(8, settings.keepRecentCapsules * 2),
+        query: recentQuery(messages),
+        recallLimit: settings.recallLimit,
     });
     chatState.lastInjection = injection;
     chatState.lastInjectionTokens = tokenEstimate(injection);
@@ -1071,7 +1128,7 @@ async function trackDirectorProgress(ctx = getContext()) {
         if (runtime.directorAbortController === controller) runtime.directorAbortController = null;
         runtime.directorBusy = false;
         refreshUi();
-        scheduleAutoSummary(1200);
+        scheduleLayeredMemory(1200);
     }
 }
 
@@ -1225,36 +1282,296 @@ async function buildWorkflowBatchPlan(ctx, goalRange, reason) {
         outputTokens: Number(provider?.outputTokens) >= 128 ? Number(provider.outputTokens) : resolveOutputReserveTokens(ctx),
         sourceTokens,
         promptTokens,
-        autoTriggerTokens: settings.triggerTokens,
         fallbackTokens: FALLBACK_BATCH_TOKENS,
     });
 }
 
-function shouldAutoSummarize(ctx) {
+function layeredTaskBlocked(ctx) {
     reconcileGeneratingFlag(ctx);
-    const settings = getSettings(ctx);
     const chatState = getChatState(ctx);
-    if (!settings.autoSummarize || !chatState.enabled || chatState.pending || runtime.busy || runtime.workflowActive || hostGenerationActive(ctx) || runtime.directorBusy || runtime.replyBusy) return false;
-    const range = planEligibleRange(ctx);
-    if (!range) return false;
-    const messages = getMessages(ctx);
-    const text = formatMessages(messages, range.start, range.end);
-    return tokenEstimate(text) >= settings.triggerTokens;
+    return !chatState.enabled || chatState.pending || runtime.busy || runtime.workflowActive || runtime.capsuleBusy
+        || hostGenerationActive(ctx) || runtime.directorBusy || runtime.replyBusy;
 }
 
-function scheduleAutoSummary(delay = 1100) {
-    if (runtime.timer || runtime.scheduled) return;
-    runtime.scheduled = true;
-    runtime.timer = setTimeout(async () => {
-        runtime.timer = null;
-        runtime.scheduled = false;
+function layeredNeedsInitialSummary(ctx, state, settings) {
+    return state.lastProcessedIndex < 0
+        && state.lastCapsuleIndex < 0
+        && !state.roundCapsules.length
+        && getMessages(ctx).length > settings.keepMessages + 2;
+}
+
+async function hideCoveredCapsuleMessages(ctx, state, settings) {
+    if (!settings.autoHide || settings.memoryMode !== 'layered') return 0;
+    const messages = getMessages(ctx);
+    const hideEnd = messages.length - Math.max(1, settings.keepMessages) - 1;
+    if (hideEnd < 0) return 0;
+    let hiddenCount = 0;
+    for (const capsule of state.roundCapsules) {
+        const range = capsule?.sourceRange;
+        if (!range || Number(range.end) > hideEnd) continue;
+        const hidden = await hideRange(ctx, range, capsule.id);
+        if (!hidden.length) continue;
+        hiddenCount += hidden.length;
+        state.hiddenRanges = [
+            ...state.hiddenRanges.filter(item => item.checkpointId !== capsule.id),
+            { checkpointId: capsule.id, kind: 'capsule', range: clone(range), hidden, createdAt: Date.now() },
+        ];
+    }
+    if (hiddenCount) {
+        setChatState(state, ctx);
+        await saveChat(ctx, { includeMessages: true });
+    }
+    return hiddenCount;
+}
+
+async function buildNextRoundCapsule(ctx) {
+    const settings = getSettings(ctx);
+    let state = getChatState(ctx);
+    if (settings.memoryMode !== 'layered' || layeredTaskBlocked(ctx) || layeredNeedsInitialSummary(ctx, state, settings)) return null;
+    const range = nextRoundRange(getMessages(ctx), state);
+    if (!range) return null;
+    const controller = new AbortController();
+    runtime.capsuleBusy = true;
+    runtime.capsuleController = controller;
+    runtime.lastError = '';
+    setStatus(`正在整理本轮剧情胶囊 · 消息 ${range.start}–${range.end}`);
+    refreshUi();
+    try {
+        const request = buildRoundCapsulePrompt({
+            messages: formatMessages(getMessages(ctx), range.start, range.end),
+            currentMemory: [
+                savedRecap(state),
+                ...activeRoundCapsules(state).slice(-4).map(renderRoundCapsule),
+            ].filter(Boolean).join('\n\n'),
+            customPrompts: settings.prompts,
+        });
+        const result = await generateWithFallback(ctx, {
+            ...request,
+            providerProfile: moduleProvider(ctx, 'memory'),
+            preferStream: false,
+            signal: controller.signal,
+        });
+        let packet;
         try {
-            const ctx = getContext();
-            if (shouldAutoSummarize(ctx)) await startSummary(false);
+            packet = parseRoundCapsule(result.text);
         } catch (error) {
-            console.warn(`[${DISPLAY_NAME}] 自动总结失败`, error);
+            console.warn(`[${DISPLAY_NAME}] 剧情胶囊格式需要修复`, error);
+            const repaired = await generateWithFallback(ctx, {
+                ...request,
+                prompt: `${request.prompt}\n\n上一次返回格式无效。请重新输出一个完整、合法的 JSON 对象，只包含 title、text、importance、participants、keywords。`,
+                providerProfile: moduleProvider(ctx, 'memory'),
+                preferStream: false,
+                signal: controller.signal,
+            });
+            packet = parseRoundCapsule(repaired.text);
+        }
+        if (!rangeStillMatches(getMessages(ctx), range)) throw new Error('生成期间本轮消息发生了变化，胶囊未保存');
+        const capsule = createRoundCapsule(packet, range, `capsule_${Date.now()}_${simpleHash(range.rangeHash)}`);
+        state = appendRoundCapsule(getChatState(ctx), capsule);
+        state.memoryMode = 'layered';
+        setChatState(state, ctx);
+        await applyInjection(ctx, state, settings);
+        await saveChat(ctx);
+        await hideCoveredCapsuleMessages(ctx, state, settings);
+        runtime.lastError = '';
+        runtime.lastSuccess = `已记录本轮剧情 · 消息 ${range.start}–${range.end}`;
+        return capsule;
+    } catch (error) {
+        if (!controller.signal.aborted) {
+            runtime.lastError = `剧情胶囊生成失败：${readableGenerationError(error)}`;
+            console.warn(`[${DISPLAY_NAME}] ${runtime.lastError}`, error);
+        }
+        return null;
+    } finally {
+        if (runtime.capsuleController === controller) runtime.capsuleController = null;
+        runtime.capsuleBusy = false;
+        refreshUi();
+    }
+}
+
+async function processLayeredMemory() {
+    const ctx = getContext();
+    const settings = getSettings(ctx);
+    if (settings.memoryMode !== 'layered' || layeredTaskBlocked(ctx)) return;
+    const state = getChatState(ctx);
+    if (layeredNeedsInitialSummary(ctx, state, settings)) return;
+    const capsule = await buildNextRoundCapsule(ctx);
+    if (capsule) {
+        scheduleLayeredMemory(500);
+        return;
+    }
+    const current = getChatState(ctx);
+    if (settings.autoConsolidateCapsules && roundCapsuleTokens(current) >= settings.capsuleConsolidationTokens) {
+        await consolidateRollingMemory(false);
+    }
+}
+
+function scheduleLayeredMemory(delay = 1400) {
+    if (runtime.layeredTimer) return;
+    runtime.layeredTimer = setTimeout(async () => {
+        runtime.layeredTimer = null;
+        try {
+            await processLayeredMemory();
+        } catch (error) {
+            console.warn(`[${DISPLAY_NAME}] 分层滚动记忆处理失败`, error);
         }
     }, delay);
+}
+
+async function consolidateRollingMemory(manual = true) {
+    const ctx = getContext();
+    reconcileGeneratingFlag(ctx);
+    const settings = getSettings(ctx);
+    if (settings.memoryMode !== 'layered') {
+        if (manual) notify('info', '请先把记忆模式切换为“分层滚动记忆”。');
+        return null;
+    }
+    if (layeredTaskBlocked(ctx)) {
+        if (manual) notify('info', '当前还有生成任务进行中，请稍后再梳理滚动记忆。');
+        return null;
+    }
+    const before = getChatState(ctx);
+    const recentStart = Math.max(0, getMessages(ctx).length - settings.keepMessages);
+    let capsules = capsulesForConsolidation(before, settings.keepRecentCapsules)
+        .filter(item => Number(item?.sourceRange?.end ?? Number.POSITIVE_INFINITY) < recentStart);
+    if (manual && !capsules.length) {
+        capsules = activeRoundCapsules(before)
+            .filter(item => Number(item?.sourceRange?.end ?? Number.POSITIVE_INFINITY) < recentStart);
+    }
+    if (!capsules.length) {
+        if (manual) notify('info', '目前没有位于近期正文之前的胶囊需要梳理。');
+        return null;
+    }
+    if (!manual && roundCapsuleTokens(before) < settings.capsuleConsolidationTokens) return null;
+
+    const start = Number(capsules[0].sourceRange.start);
+    const end = Number(capsules.at(-1).sourceRange.end);
+    const sourceRange = makeSourceRange(getMessages(ctx), start, end);
+    if (!rangeStillMatches(getMessages(ctx), sourceRange)) return null;
+    const checkpointId = `archive_${Date.now()}_${simpleHash(capsules.map(item => item.id).join('|'))}`;
+    const controller = new AbortController();
+    runtime.busy = true;
+    runtime.abortController = controller;
+    runtime.activeStage = 'archive';
+    runtime.lastError = '';
+    runtime.lastSuccess = '';
+    setStatus(`${manual ? '手动' : '自动'}梳理滚动记忆 · ${capsules.length} 个胶囊`);
+    refreshUi();
+
+    const generateArchiveStage = async (request, stage) => {
+        runtime.activeStage = stage;
+        runtime.streamText = '';
+        updateStreamPreview('', { phase: 'preparing' });
+        return generateWithFallback(ctx, {
+            ...request,
+            providerProfile: moduleProvider(ctx, 'memory'),
+            preferStream: settings.streamOutput !== false,
+            signal: controller.signal,
+            onText: (text, meta) => updateStreamPreview(text, meta),
+        });
+    };
+
+    try {
+        const capsuleText = capsules.map(renderRoundCapsule).join('\n\n');
+        const request = buildCapsuleConsolidationPrompt({
+            capsules: capsuleText,
+            currentMemory: savedRecap(before),
+            currentState: formatState(before),
+            openThreads: formatThreads(before),
+            customPrompts: settings.prompts,
+        });
+        let packet;
+        try {
+            const result = await generateArchiveStage(request, 'archive');
+            packet = assertMemoryPacket(parseModelPacket(result.text));
+        } catch (error) {
+            if (controller.signal.aborted) throw error;
+            console.warn(`[${DISPLAY_NAME}] 胶囊归档结构需要修复`, error);
+            const repaired = await generateArchiveStage({
+                ...request,
+                prompt: `${request.prompt}\n\n上一次返回无法解析。请重新输出一个完整、合法的 JSON 对象，只包含 scene、facts、stateUpdates、threads、recap。`,
+            }, 'archive');
+            packet = assertMemoryPacket(parseModelPacket(repaired.text));
+        }
+        if (!rangeStillMatches(getMessages(ctx), sourceRange)) throw new Error('梳理期间原消息发生了变化，归档未保存');
+
+        const draft = mergeMemoryPacket(before, packet, sourceRange, checkpointId);
+        const summaryMode = ['novel', 'structured', 'mixed'].includes(before.summaryMode) ? before.summaryMode : settings.summaryMode;
+        let polishedProse = '';
+        if (summaryMode !== 'structured') {
+            const styleAnchors = selectStyleAnchors(getMessages(ctx), 3, { includeHidden: true });
+            const styleText = styleAnchors.map(anchor => `[消息 ${anchor.index}]\n${anchor.text}`).join('\n\n');
+            const factsForProse = renderFactsForProse(draft);
+            let proseDraft = cleanProse(packet.recap);
+            if (!proseDraft) {
+                const proseResult = await generateArchiveStage(buildProsePrompt({
+                    facts: factsForProse,
+                    currentState: formatState(draft),
+                    openThreads: formatThreads(draft),
+                    previousRecap: before.summaryArtifacts?.novel || before.recap || '',
+                    styleAnchors: styleText,
+                    targetWords: settings.targetWords,
+                    customPrompts: settings.prompts,
+                }), 'prose');
+                proseDraft = cleanProse(proseResult.text);
+            }
+            if (!proseDraft) throw new Error('滚动记忆前情草稿为空');
+            const polished = await generateArchiveStage(buildPolishPrompt({
+                facts: factsForProse,
+                draft: proseDraft,
+                previousRecap: before.summaryArtifacts?.novel || before.recap || '',
+                styleAnchors: styleText,
+                targetWords: settings.targetWords,
+                customPrompts: settings.prompts,
+            }), 'polish');
+            polishedProse = cleanProse(polished.text);
+            if (!polishedProse) throw new Error('滚动记忆文学润色结果为空');
+            draft.styleAnchors = styleAnchors;
+        }
+
+        const selectedSummary = renderSelectedSummary(draft, polishedProse, summaryMode);
+        draft.summaryMode = selectedSummary.mode;
+        draft.summaryArtifacts = selectedSummary.artifacts;
+        draft.recap = selectedSummary.active;
+        draft.memoryMode = 'layered';
+        draft.memoryArchives.push({
+            id: checkpointId,
+            capsuleIds: capsules.map(item => item.id),
+            sourceRange: clone(sourceRange),
+            tokenCount: capsules.reduce((total, item) => total + Number(item.tokenCount || tokenEstimate(item.text)), 0),
+            createdAt: Date.now(),
+            mode: summaryMode,
+        });
+        const checkpoint = draft.checkpoints.find(item => item.id === checkpointId);
+        if (!checkpoint) throw new Error('滚动记忆检查点建立失败');
+        checkpoint.recap = draft.recap;
+        checkpoint.promptVersion = PROMPT_VERSION;
+        checkpoint.reason = 'capsule-consolidation';
+        checkpoint.beforeSnapshot = snapshotMemory(before);
+        checkpoint.memorySnapshot = snapshotMemory(draft);
+        draft.pending = null;
+        setChatState(draft, ctx);
+        await applyInjection(ctx, draft, settings);
+        await saveChat(ctx);
+        await hideCoveredCapsuleMessages(ctx, draft, settings);
+        runtime.lastSuccess = `${manual ? '手动' : '自动'}梳理完成 · ${capsules.length} 个胶囊 · 消息 ${start}–${end}`;
+        notify('success', runtime.lastSuccess);
+        return draft;
+    } catch (error) {
+        if (controller.signal.aborted) notify('info', '滚动记忆梳理已中断，原胶囊保持不变。');
+        else {
+            runtime.lastError = `滚动记忆梳理失败：${readableGenerationError(error)}`;
+            console.error(`[${DISPLAY_NAME}] ${runtime.lastError}`, error);
+            notify('error', runtime.lastError);
+        }
+        return null;
+    } finally {
+        if (runtime.abortController === controller) runtime.abortController = null;
+        runtime.busy = false;
+        runtime.activeStage = '';
+        refreshUi();
+        scheduleLayeredMemory(900);
+    }
 }
 
 async function startSummary(manual = true) {
@@ -1272,15 +1589,11 @@ async function startSummary(manual = true) {
     }
     const range = planEligibleRange(ctx);
     if (!range) {
-        notify('info', manual ? '目前没有足够的旧正文可总结；请保留一些近期消息后再试。' : '尚未达到自动总结阈值。');
+        notify('info', '目前没有位于近期保留楼层之前的旧正文可总结。');
         return;
     }
-    if (!manual) {
-        const sourceTokens = tokenEstimate(formatMessages(getMessages(ctx), range.start, range.end));
-        if (sourceTokens < settings.triggerTokens) return;
-    }
     await runSummaryWorkflow(ctx, {
-        reason: manual ? 'manual' : 'auto',
+        reason: 'manual',
         goalRange: range,
     });
 }
@@ -1350,14 +1663,14 @@ async function runSummaryWorkflow(ctx, options = {}) {
         }
         runtime.lastError = '';
         const planText = batchPlan.strategy === 'single' ? '整段完成' : `自适应完成 ${batchIndex} 批`;
-        runtime.lastSuccess = `${reason === 'manual' ? '手动全量总结' : '自动总结'}完成 · 消息 ${goalStart}–${goalEnd} · ${planText}`;
-        notify('success', `${reason === 'manual' ? '手动总结' : '自动总结'}已一次完成消息 ${goalStart}–${goalEnd}，${planText}${settings.autoHide ? '，旧正文已退出上下文' : ''}。`);
+        runtime.lastSuccess = `手动完整梳理完成 · 消息 ${goalStart}–${goalEnd} · ${planText}`;
+        notify('success', `手动完整梳理已一次完成消息 ${goalStart}–${goalEnd}，${planText}${settings.autoHide ? '，旧正文已退出上下文' : ''}。`);
         return getChatState(ctx);
     } finally {
         runtime.workflowActive = false;
         runtime.workflow = null;
         refreshUi();
-        if (!runtime.lastError && !getChatState(ctx).pending) scheduleAutoSummary(1200);
+        if (!runtime.lastError && !getChatState(ctx).pending) scheduleLayeredMemory(1200);
     }
 }
 
@@ -1419,7 +1732,7 @@ async function rebuildFromStart() {
     await restoreOwnedMessages(ctx);
     const fresh = normalizeChatState({
         enabled: old.enabled,
-        autoSummarize: old.autoSummarize,
+        memoryMode: old.memoryMode,
         autoHide: old.autoHide,
         summaryMode: old.summaryMode,
         director: old.director,
@@ -1429,24 +1742,30 @@ async function rebuildFromStart() {
     await saveChat(ctx, { includeMessages: true });
     await applyInjection(ctx, fresh, getSettings(ctx));
     refreshUi();
-    notify('info', '已恢复原文并清空当前检查点。点击“立即总结”重新建立记忆。');
+    notify('info', '已恢复原文并清空当前检查点。点击“立即完整梳理”重新建立记忆。');
 }
 
 async function reconcileAndRefresh() {
     try {
         const ctx = getContext();
         const current = getChatState(ctx);
-        const result = await invalidateIfNeeded(ctx, current);
+        const checkpointResult = await invalidateIfNeeded(ctx, current);
+        const capsuleResult = await invalidateRoundCapsulesIfNeeded(ctx, checkpointResult.state);
+        const result = {
+            state: capsuleResult.state,
+            changed: checkpointResult.changed || capsuleResult.changed,
+            affected: Number(checkpointResult.affected || 0) + Number(capsuleResult.affected || 0),
+        };
         if (result.changed) {
             await saveChat(ctx);
             await applyInjection(ctx, result.state, getSettings(ctx));
-            notify('warning', `检测到已总结消息发生变化，已使 ${result.affected} 个检查点失效。`);
+            notify('warning', `检测到已记录消息发生变化，已撤销 ${result.affected} 个受影响的记忆记录。`);
         } else {
             await applyInjection(ctx, current, getSettings(ctx));
         }
         await updateDirectorInjection(ctx);
         refreshUi();
-        scheduleAutoSummary(1300);
+        scheduleLayeredMemory(1300);
     } catch (error) { console.warn(`[${DISPLAY_NAME}] 上下文同步失败`, error); }
 }
 
@@ -1461,9 +1780,51 @@ function renderCheckpointList(chatState) {
     return list.map(item => `
         <div class="gds-checkpoint">
             <div><span class="gds-dot ${item.status === 'dirty' ? 'dirty' : ''}"></span><strong>${escapeHtml(item.id)}</strong></div>
-            <small>消息 ${Number(item.range?.start ?? 0)}–${Number(item.range?.end ?? 0)} · ${escapeHtml(item.reason || 'auto')}</small>
+            <small>消息 ${Number(item.range?.start ?? 0)}–${Number(item.range?.end ?? 0)} · ${escapeHtml(item.reason || 'manual')}</small>
             <small>${item.hiddenCount ? `已隐藏 ${item.hiddenCount} 条` : '未自动隐藏'}</small>
         </div>`).join('');
+}
+
+function renderCapsuleList(chatState) {
+    const capsules = Array.isArray(chatState.roundCapsules) ? chatState.roundCapsules : [];
+    const archives = Array.isArray(chatState.memoryArchives) ? chatState.memoryArchives : [];
+    if (!capsules.length && !archives.length) return '<div class="gds-empty">还没有逐轮胶囊。</div>';
+    const capsuleHtml = [...capsules].reverse().map(item => {
+        const archived = Number(item?.sourceRange?.end ?? -1) <= chatState.lastProcessedIndex;
+        return `<article class="gds-capsule-card ${archived ? 'archived' : ''}"><div><strong>${escapeHtml(item.title || '本轮剧情')}</strong><span>${archived ? '已归档' : '待归档'} · 消息 ${Number(item?.sourceRange?.start ?? 0)}–${Number(item?.sourceRange?.end ?? 0)}</span></div><p>${escapeHtml(item.text || '')}</p></article>`;
+    }).join('');
+    const archiveHtml = [...archives].reverse().map(item => `<small>归档 ${escapeHtml(item.id)} · ${Number(item.capsuleIds?.length || 0)} 个胶囊 · 消息 ${Number(item.sourceRange?.start ?? 0)}–${Number(item.sourceRange?.end ?? 0)}</small>`).join('');
+    return `${archiveHtml ? `<div class="gds-capsule-archives">${archiveHtml}</div>` : ''}<div class="gds-capsule-list">${capsuleHtml}</div>`;
+}
+
+async function restoreLatestCapsuleArchive(ctx) {
+    if (runtime.busy || runtime.workflowActive || runtime.capsuleBusy) return null;
+    const current = getChatState(ctx);
+    const archive = current.memoryArchives.at(-1);
+    if (!archive) {
+        notify('info', '还没有可以恢复的滚动记忆归档。');
+        return null;
+    }
+    const checkpointIndex = current.checkpoints.findIndex(item => item.id === archive.id);
+    if (checkpointIndex < 0 || checkpointIndex !== current.checkpoints.length - 1) {
+        notify('warning', '这次归档之后还有新的总结检查点，不能单独回退。可以使用“恢复并重建”重新整理。');
+        return null;
+    }
+    const checkpoint = current.checkpoints[checkpointIndex];
+    if (!checkpoint.beforeSnapshot) throw new Error('最近归档缺少可恢复快照');
+    const confirmed = !globalThis.confirm || globalThis.confirm('恢复最近一次胶囊梳理吗？整理后的长期记忆会回退，原始胶囊会重新变为待归档。');
+    if (!confirmed) return null;
+    const restored = restoreSnapshot(current, checkpoint.beforeSnapshot);
+    restored.checkpoints = current.checkpoints.slice(0, checkpointIndex);
+    restored.pending = null;
+    setChatState(restored, ctx);
+    await applyInjection(ctx, restored, getSettings(ctx));
+    await saveChat(ctx);
+    runtime.lastError = '';
+    runtime.lastSuccess = '已恢复最近一次胶囊梳理前的记忆';
+    notify('success', runtime.lastSuccess);
+    refreshUi();
+    return restored;
 }
 
 function renderDirectorPlan(director) {
@@ -1968,16 +2329,24 @@ function refreshUi() {
     if (streamPreview && document.activeElement !== streamPreview) {
         streamPreview.value = runtime.streamText || chatState.pending?.partialText || '';
     }
-    if (preview) preview.value = compileInjection(chatState, { maxTokens: settings.injectionMaxTokens });
+    if (preview) preview.value = compileInjection({ ...chatState, memoryMode: settings.memoryMode }, {
+        maxTokens: settings.injectionMaxTokens,
+        recentStartIndex: Math.max(0, getMessages(ctx).length - settings.keepMessages),
+        capsuleLimit: Math.max(8, settings.keepRecentCapsules * 2),
+        query: recentQuery(getMessages(ctx)),
+        recallLimit: settings.recallLimit,
+    });
     const metrics = runtime.overlay.querySelector('[data-gds-metrics]');
     if (metrics) metrics.innerHTML = `
         <span>场景 ${chatState.sceneCards.length}</span>
         <span>事实 ${chatState.facts.length}</span>
         <span>未结 ${chatState.threads.filter(item => item.status === 'open').length}</span>
+        <span>待归档胶囊 ${activeRoundCapsules(chatState).length}</span>
+        <span>归档 ${chatState.memoryArchives.length}</span>
         <span>检查点 ${chatState.checkpoints.length}</span>
         <span>注入约 ${chatState.lastInjectionTokens || tokenEstimate(chatState.lastInjection || '')} Token</span>`;
     const status = runtime.overlay.querySelector('[data-gds-status]');
-    if (status && !runtime.busy && !runtime.workflowActive) {
+    if (status && !runtime.busy && !runtime.workflowActive && !runtime.capsuleBusy) {
         const hasCheckpoint = chatState.checkpoints.some(item => item.status === 'committed');
         const recapMissing = hasCheckpoint && !recap;
         const orphanOutput = Boolean(runtime.streamText.trim() && !hasCheckpoint && !chatState.pending);
@@ -1986,9 +2355,12 @@ function refreshUi() {
         else if (recapMissing) status.textContent = '检查点已保存，但当前总结成品为空，请点击“恢复并重建”';
         else if (orphanOutput) status.textContent = '收到模型文本，但尚未保存成记忆，请重新总结';
         else if (runtime.lastSuccess) status.textContent = runtime.lastSuccess;
-        else status.textContent = hasCheckpoint ? '记忆已保存并正在注入' : '尚未建立记忆，点击“立即总结”';
+        else if (settings.memoryMode === 'layered' && layeredNeedsInitialSummary(ctx, chatState, settings)) status.textContent = '旧正文尚未建立基础记忆，请先点击“立即完整梳理”';
+        else status.textContent = hasCheckpoint || chatState.roundCapsules.length ? '记忆已保存并正在注入' : '尚未建立记忆，点击“立即完整梳理”';
     }
     const summarize = runtime.overlay.querySelector('[data-gds-summarize]');
+    const consolidate = runtime.overlay.querySelector('[data-gds-consolidate]');
+    const restoreArchive = runtime.overlay.querySelector('[data-gds-restore-archive]');
     const resume = runtime.overlay.querySelector('[data-gds-continue]');
     const stop = runtime.overlay.querySelector('[data-gds-stop]');
     const directorStop = runtime.overlay.querySelector('[data-gds-director-stop]');
@@ -1998,8 +2370,10 @@ function refreshUi() {
     const replyStop = runtime.overlay.querySelector('[data-gds-reply-stop]');
     const rebuild = runtime.overlay.querySelector('[data-gds-rebuild]');
     const restore = runtime.overlay.querySelector('[data-gds-restore]');
-    const taskActive = runtime.busy || runtime.workflowActive || runtime.directorBusy || runtime.replyBusy;
+    const taskActive = runtime.busy || runtime.workflowActive || runtime.capsuleBusy || runtime.directorBusy || runtime.replyBusy;
     if (summarize) summarize.disabled = taskActive || Boolean(chatState.pending);
+    if (consolidate) consolidate.disabled = taskActive || settings.memoryMode !== 'layered' || !activeRoundCapsules(chatState).length;
+    if (restoreArchive) restoreArchive.disabled = taskActive || !chatState.memoryArchives.length;
     if (resume) {
         resume.hidden = taskActive || !chatState.pending;
         resume.disabled = taskActive;
@@ -2018,21 +2392,28 @@ function refreshUi() {
     if (restore) restore.disabled = taskActive;
     const list = runtime.overlay.querySelector('[data-gds-checkpoints]');
     if (list) list.innerHTML = renderCheckpointList(chatState);
-    const auto = runtime.overlay.querySelector('[data-gds-auto]');
+    const capsuleList = runtime.overlay.querySelector('[data-gds-capsules]');
+    if (capsuleList) capsuleList.innerHTML = renderCapsuleList(chatState);
     const hide = runtime.overlay.querySelector('[data-gds-hide]');
     const collapse = runtime.overlay.querySelector('[data-gds-collapse]');
     const stream = runtime.overlay.querySelector('[data-gds-stream]');
     const mode = runtime.overlay.querySelector('[data-gds-mode]');
     const summaryMode = runtime.overlay.querySelector('[data-gds-summary-mode]');
-    if (auto) auto.checked = Boolean(settings.autoSummarize);
+    const memoryMode = runtime.overlay.querySelector('[data-gds-memory-mode]');
+    const autoConsolidate = runtime.overlay.querySelector('[data-gds-capsule-auto]');
+    const layeredSettings = runtime.overlay.querySelector('[data-gds-layered-settings]');
     if (hide) hide.checked = Boolean(settings.autoHide);
     if (collapse) collapse.checked = Boolean(settings.collapseHidden);
     if (stream) stream.checked = settings.streamOutput !== false;
     if (mode) mode.value = 'balanced';
     if (summaryMode) summaryMode.value = chatState.summaryMode || settings.summaryMode;
+    if (memoryMode) memoryMode.value = settings.memoryMode;
+    if (autoConsolidate) autoConsolidate.checked = Boolean(settings.autoConsolidateCapsules);
+    if (layeredSettings) layeredSettings.hidden = settings.memoryMode !== 'layered';
     for (const [selector, value] of [
-        ['[data-gds-trigger]', settings.triggerTokens],
         ['[data-gds-keep]', settings.keepMessages],
+        ['[data-gds-capsule-threshold]', settings.capsuleConsolidationTokens],
+        ['[data-gds-capsule-keep]', settings.keepRecentCapsules],
         ['[data-gds-injection]', settings.injectionMaxTokens],
         ['[data-gds-words]', settings.targetWords],
     ]) {
@@ -2378,10 +2759,12 @@ function createUi() {
                         <button class="gds-home-card" data-gds-tab="connections"><strong>模型连接</strong><span>分别配置三个功能使用的酒馆连接或独立 API</span></button>
                     </div>
                 </section>
-            <div class="gds-status" data-gds-tab-panel="memory" data-gds-status>尚未建立记忆，点击“立即总结”</div>
+            <div class="gds-status" data-gds-tab-panel="memory" data-gds-status>尚未建立记忆，点击“立即完整梳理”</div>
             <div class="gds-metrics" data-gds-tab-panel="memory" data-gds-metrics></div>
             <div class="gds-actions" data-gds-tab-panel="memory">
-                <button class="gds-primary" data-gds-summarize>立即总结</button>
+                <button class="gds-primary" data-gds-summarize>立即完整梳理</button>
+                <button data-gds-consolidate>立即梳理滚动记忆</button>
+                <button data-gds-restore-archive>恢复最近一次胶囊梳理</button>
                 <button class="gds-primary" data-gds-continue hidden>继续</button>
                 <button class="gds-danger" data-gds-stop hidden>中断</button>
                 <button data-gds-rebuild>恢复并重建</button>
@@ -2389,22 +2772,33 @@ function createUi() {
             </div>
             <div class="gds-grid" data-gds-tab-panel="memory">
                 <label class="gds-field gds-wide gds-stream-field"><span>当前阶段原始返回（事实 → 草稿 → 润色，不代表已保存）</span><textarea rows="6" readonly data-gds-stream-preview placeholder="每个阶段会重新显示；正常批次会自动衔接，只有中断或失败后才需要点击继续"></textarea></label>
+                <label class="gds-field gds-wide"><span>记忆模式</span><select data-gds-memory-mode><option value="manual">手动完整梳理</option><option value="layered">分层滚动记忆</option></select></label>
                 <label class="gds-field gds-wide"><span>总结版本</span><select data-gds-summary-mode><option value="novel">小说版：全知视角与文学表达</option><option value="structured">结构化版：事实、状态和未结事项</option><option value="mixed">混合版：文学前情＋必要记忆锚点</option></select></label>
                 <label class="gds-field gds-wide"><span>当前总结成品（可编辑）</span><textarea rows="10" data-gds-summary placeholder="选择总结版本后，这里显示唯一会注入正文模型的记忆成品"></textarea><button data-gds-save-summary>保存当前总结</button></label>
                 <label class="gds-field gds-wide"><span>模型实际收到的记忆注入</span><textarea rows="10" readonly data-gds-preview></textarea></label>
             </div>
-            <details class="gds-details" data-gds-tab-panel="memory" open><summary>自动总结与上下文</summary>
+            <details class="gds-details" data-gds-tab-panel="memory" open><summary>记忆模式与上下文</summary>
                 <div class="gds-settings-grid">
-                    <label class="gds-toggle-row"><input type="checkbox" data-gds-auto><span>自动总结</span></label>
                     <label class="gds-toggle-row"><input type="checkbox" data-gds-hide><span>总结成功后自动隐藏旧正文</span></label>
                     <label class="gds-toggle-row"><input type="checkbox" data-gds-collapse><span>在界面折叠已隐藏范围</span></label>
                     <label class="gds-toggle-row"><input type="checkbox" data-gds-stream><span>流式生成与实时显示</span></label>
-                    <label>自动总结触发约 Token <input type="number" min="5000" step="5000" data-gds-trigger></label>
-                    <label>保留近期消息 <input type="number" min="4" step="1" data-gds-keep></label>
+                    <label>完整保留近期消息 <input type="number" min="1" step="1" data-gds-keep></label>
+                </div>
+                <div class="gds-settings-grid" data-gds-layered-settings hidden>
+                    <label class="gds-toggle-row"><input type="checkbox" data-gds-capsule-auto><span>达到阈值后自动梳理胶囊</span></label>
+                    <label>胶囊整理阈值 Token <input type="number" min="2000" step="1000" data-gds-capsule-threshold></label>
+                    <label>整理时保留最近胶囊 <input type="number" min="0" step="1" data-gds-capsule-keep></label>
+                </div>
+                <p class="gds-help">近期消息只按楼层完整保留，不受 Token 限制。手动梳理会一次处理此前全部旧正文；分层模式会在每轮完成后记录增量胶囊。</p>
+            </details>
+            <details class="gds-details" data-gds-tab-panel="memory"><summary>高级输出设置</summary>
+                <div class="gds-settings-grid">
                     <label>注入上限 Token <input type="number" min="160" step="100" data-gds-injection></label>
                     <label>前情目标字数 <input type="number" min="80" step="20" data-gds-words></label>
                 </div>
-                <p class="gds-help">手动总结会读取酒馆当前上下文容量：完整旧正文装得下就整段处理，只有装不下时才自适应拆批并在后台连续完成。自动总结仍以触发 Token 为准。只有主动中断或生成失败时才会出现“继续”。</p>
+            </details>
+            <details class="gds-details" data-gds-tab-panel="memory"><summary>逐轮胶囊与归档记录</summary>
+                <div data-gds-capsules></div>
             </details>
             <details class="gds-details" data-gds-tab-panel="connections"><summary>模型连接</summary>
                 <div class="gds-settings-grid gds-provider-grid">
@@ -2501,7 +2895,7 @@ function createUi() {
     bindFloatingDrag(floating);
 
     overlay.addEventListener('click', async event => {
-        const target = event.target.closest('[data-gds-tab],[data-gds-close],[data-gds-summarize],[data-gds-continue],[data-gds-stop],[data-gds-rebuild],[data-gds-restore],[data-gds-save-summary],[data-gds-api-save],[data-gds-api-test],[data-gds-director-longline],[data-gds-director-branch],[data-gds-director-foreshadow],[data-gds-director-save],[data-gds-director-lock],[data-gds-director-select-branch],[data-gds-director-stop],[data-gds-director-continue],[data-gds-director-restart],[data-gds-director-clear],[data-gds-calendar-add],[data-gds-calendar-remove],[data-gds-calendar-sync],[data-gds-reply-generate],[data-gds-reply-copy],[data-gds-reply-insert],[data-gds-reply-stop]');
+        const target = event.target.closest('[data-gds-tab],[data-gds-close],[data-gds-summarize],[data-gds-consolidate],[data-gds-restore-archive],[data-gds-continue],[data-gds-stop],[data-gds-rebuild],[data-gds-restore],[data-gds-save-summary],[data-gds-api-save],[data-gds-api-test],[data-gds-director-longline],[data-gds-director-branch],[data-gds-director-foreshadow],[data-gds-director-save],[data-gds-director-lock],[data-gds-director-select-branch],[data-gds-director-stop],[data-gds-director-continue],[data-gds-director-restart],[data-gds-director-clear],[data-gds-calendar-add],[data-gds-calendar-remove],[data-gds-calendar-sync],[data-gds-reply-generate],[data-gds-reply-copy],[data-gds-reply-insert],[data-gds-reply-stop]');
         if (!target) return;
         try {
             if (target.matches('[data-gds-tab]')) {
@@ -2510,6 +2904,8 @@ function createUi() {
             }
             if (target.matches('[data-gds-close]')) togglePanel(false);
             if (target.matches('[data-gds-summarize]')) await startSummary(true);
+            if (target.matches('[data-gds-consolidate]')) await consolidateRollingMemory(true);
+            if (target.matches('[data-gds-restore-archive]')) await restoreLatestCapsuleArchive(getContext());
             if (target.matches('[data-gds-continue]')) await continueSummary();
             if (target.matches('[data-gds-stop]')) stopSummary();
             if (target.matches('[data-gds-rebuild]')) await rebuildFromStart();
@@ -2600,18 +2996,28 @@ function createUi() {
         refreshUi();
     });
 
-    for (const input of overlay.querySelectorAll('input[data-gds-auto],input[data-gds-hide],input[data-gds-collapse],input[data-gds-stream],input[data-gds-trigger],input[data-gds-keep],input[data-gds-injection],input[data-gds-words],select[data-gds-summary-mode],select[data-gds-provider],select[data-gds-api-module],select[data-gds-api-model-select],input[data-gds-director-enabled],select[data-gds-director-preset],select[data-gds-director-pacing],input[data-gds-director-pacing-custom],input[data-gds-director-toggle],input[data-gds-calendar-enabled],input[data-gds-calendar-builtins],input[data-gds-calendar-auto-advance],input[data-gds-calendar-window],input[data-gds-calendar-world-date],input[data-gds-reply-follow],select[data-gds-reply-viewpoint],select[data-gds-reply-detail],select[data-gds-reply-length],select[data-gds-reply-initiative],input[data-gds-reply-tone]')) {
+    for (const input of overlay.querySelectorAll('input[data-gds-hide],input[data-gds-collapse],input[data-gds-stream],input[data-gds-keep],input[data-gds-capsule-auto],input[data-gds-capsule-threshold],input[data-gds-capsule-keep],input[data-gds-injection],input[data-gds-words],select[data-gds-memory-mode],select[data-gds-summary-mode],select[data-gds-provider],select[data-gds-api-module],select[data-gds-api-model-select],input[data-gds-director-enabled],select[data-gds-director-preset],select[data-gds-director-pacing],input[data-gds-director-pacing-custom],input[data-gds-director-toggle],input[data-gds-calendar-enabled],input[data-gds-calendar-builtins],input[data-gds-calendar-auto-advance],input[data-gds-calendar-window],input[data-gds-calendar-world-date],input[data-gds-reply-follow],select[data-gds-reply-viewpoint],select[data-gds-reply-detail],select[data-gds-reply-length],select[data-gds-reply-initiative],input[data-gds-reply-tone]')) {
         input.addEventListener('change', () => {
             const ctx = getContext();
             const settings = getSettings(ctx);
-            if (input.matches('[data-gds-auto]')) settings.autoSummarize = input.checked;
             if (input.matches('[data-gds-hide]')) settings.autoHide = input.checked;
             if (input.matches('[data-gds-collapse]')) settings.collapseHidden = input.checked;
             if (input.matches('[data-gds-stream]')) settings.streamOutput = input.checked;
-            if (input.matches('[data-gds-trigger]')) settings.triggerTokens = Math.max(5000, Number(input.value) || DEFAULT_SETTINGS.triggerTokens);
-            if (input.matches('[data-gds-keep]')) settings.keepMessages = Math.max(4, Number(input.value) || DEFAULT_SETTINGS.keepMessages);
+            if (input.matches('[data-gds-keep]')) settings.keepMessages = Math.max(1, Number(input.value) || DEFAULT_SETTINGS.keepMessages);
+            if (input.matches('[data-gds-capsule-auto]')) settings.autoConsolidateCapsules = input.checked;
+            if (input.matches('[data-gds-capsule-threshold]')) settings.capsuleConsolidationTokens = Math.max(2000, Number(input.value) || DEFAULT_SETTINGS.capsuleConsolidationTokens);
+            if (input.matches('[data-gds-capsule-keep]')) settings.keepRecentCapsules = Math.max(0, Number(input.value) || 0);
             if (input.matches('[data-gds-injection]')) settings.injectionMaxTokens = Math.max(160, Number(input.value) || DEFAULT_SETTINGS.injectionMaxTokens);
             if (input.matches('[data-gds-words]')) settings.targetWords = Math.max(80, Number(input.value) || DEFAULT_SETTINGS.targetWords);
+            if (input.matches('[data-gds-memory-mode]')) {
+                settings.memoryMode = ['manual', 'layered'].includes(input.value) ? input.value : 'manual';
+                const chatState = getChatState(ctx);
+                chatState.memoryMode = settings.memoryMode;
+                setChatState(chatState, ctx);
+                applyInjection(ctx, chatState, settings).catch(console.error);
+                saveChat(ctx).catch(console.error);
+                if (settings.memoryMode === 'layered') scheduleLayeredMemory(500);
+            }
             if (input.matches('[data-gds-summary-mode]')) {
                 const chatState = getChatState(ctx);
                 const mode = ['novel', 'structured', 'mixed'].includes(input.value) ? input.value : 'mixed';
@@ -2682,7 +3088,7 @@ function createSettingsEntry() {
                 <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
             </div>
             <div class="inline-drawer-content">
-                <p>自动压缩前情、保留剧情记忆，并在总结完成后让旧正文退出模型上下文。</p>
+                <p>完整梳理或逐轮记录前情，保留剧情记忆，并让已覆盖的旧正文安全退出模型上下文。</p>
                 <button class="menu_button gds-open-settings" type="button" data-gds-open-settings><img class="gds-entry-puppy" src="${escapeHtml(PANEL_LOGO_URL)}" alt="" aria-hidden="true"><span>打开${DISPLAY_NAME}</span></button>
                 <div class="gds-floating-settings">
                     <label class="gds-floating-size"><span>悬浮窗图标大小 <output data-gds-floating-size-value>62 px</output></span><input type="range" min="32" max="120" step="1" value="62" data-gds-floating-size></label>
@@ -2784,6 +3190,7 @@ function bindContextEvents() {
         // reliable completion boundary, so release the compatibility guard.
         runtime.generating = false;
         reconcileAndRefresh().catch(console.error);
+        scheduleLayeredMemory(1600);
     };
     const bindings = {
         CHAT_CHANGED: onChat,
@@ -2796,8 +3203,10 @@ function bindContextEvents() {
         GENERATION_ENDED: () => {
             runtime.generating = false;
             refreshUi();
-            trackDirectorProgress(ctx).catch(error => console.warn(`[${DISPLAY_NAME}] 导演进度跟踪失败`, error));
-            scheduleAutoSummary(1800);
+            if (!runtime.busy && !runtime.workflowActive && !runtime.capsuleBusy && !runtime.replyBusy && !runtime.directorBusy) {
+                trackDirectorProgress(ctx).catch(error => console.warn(`[${DISPLAY_NAME}] 导演进度跟踪失败`, error));
+            }
+            scheduleLayeredMemory(1800);
         },
         GENERATION_STOPPED: () => { runtime.generating = false; refreshUi(); },
         GENERATION_STARTED: () => { runtime.generating = true; },

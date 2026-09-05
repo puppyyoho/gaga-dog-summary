@@ -1,15 +1,21 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+    activeRoundCapsules,
+    appendRoundCapsule,
     assertMemoryPacket,
     compileInjection,
+    createRoundCapsule,
     makeSourceRange,
     mergeMemoryPacket,
     normalizeChatState,
+    nextRoundRange,
     parseModelPacket,
+    parseRoundCapsule,
     rangeForNewSummary,
     rangesForSummaryBacklog,
     rangeStillMatches,
+    roundCapsuleTokens,
     selectHideEnd,
     selectRelevantCapsules,
     selectStyleAnchors,
@@ -149,4 +155,52 @@ test('style anchors may include hidden source samples', () => {
     const hidden = [{ name: 'Char', mes: '这是一个足够长的叙述片段。'.repeat(40), is_system: true }];
     assert.equal(selectStyleAnchors(hidden, 2).length, 0);
     assert.equal(selectStyleAnchors(hidden, 2, { includeHidden: true }).length, 1);
+});
+
+test('creates one incremental capsule for a completed user and assistant round', () => {
+    const initial = normalizeChatState({ memoryMode: 'layered', lastProcessedIndex: 1, lastCapsuleIndex: 1 });
+    const range = nextRoundRange(messages, initial);
+    assert.deepEqual([range.start, range.end], [2, 3]);
+    const packet = parseRoundCapsule(JSON.stringify({
+        title: '军徽暴露',
+        text: '陆遥发现并拿走军徽，沈砚仍不知情；两人的秘密与信任出现新的张力。',
+        importance: 'high',
+        participants: ['陆遥', '沈砚'],
+        keywords: ['军徽', '秘密'],
+    }));
+    const capsule = createRoundCapsule(packet, range, 'cap_test');
+    const next = appendRoundCapsule(initial, capsule);
+    assert.equal(next.lastCapsuleIndex, 3);
+    assert.equal(activeRoundCapsules(next).length, 1);
+    assert.ok(roundCapsuleTokens(next) > 0);
+});
+
+test('layered injection omits capsules still covered by the complete recent floors', () => {
+    const first = createRoundCapsule({ title: '旧轮', text: '旧轮发生了关系变化。' }, makeSourceRange(messages, 0, 1), 'old');
+    const recent = createRoundCapsule({ title: '近轮', text: '近轮发生了新的变化。' }, makeSourceRange(messages, 2, 3), 'recent');
+    const state = normalizeChatState({
+        memoryMode: 'layered',
+        roundCapsules: [first, recent],
+        summaryArtifacts: { novel: '长期前情。', structured: '', mixed: '' },
+        summaryMode: 'novel',
+    });
+    const injection = compileInjection(state, { recentStartIndex: 2, maxTokens: 1000 });
+    assert.match(injection, /旧轮发生了关系变化/);
+    assert.doesNotMatch(injection, /近轮发生了新的变化/);
+});
+
+test('layered summary and capsule injection share one strict token budget', () => {
+    const capsules = Array.from({ length: 12 }, (_, index) => createRoundCapsule(
+        { title: `第${index}轮`, text: '情绪与关系变化'.repeat(80) },
+        makeSourceRange(messages, 0, 1),
+        `long_${index}`,
+    ));
+    const state = normalizeChatState({
+        memoryMode: 'layered',
+        summaryMode: 'novel',
+        summaryArtifacts: { novel: '长期前情'.repeat(500), structured: '', mixed: '' },
+        roundCapsules: capsules,
+    });
+    const injection = compileInjection(state, { recentStartIndex: 6, maxTokens: 240, capsuleLimit: 12 });
+    assert.ok(tokenEstimate(injection) <= 240);
 });

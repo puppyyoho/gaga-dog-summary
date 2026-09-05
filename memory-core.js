@@ -1,9 +1,9 @@
-export const SCHEMA_VERSION = 1;
+export const SCHEMA_VERSION = 2;
 
 export const DEFAULT_CHAT_STATE = {
     schemaVersion: SCHEMA_VERSION,
     enabled: true,
-    autoSummarize: true,
+    memoryMode: 'manual',
     autoHide: true,
     collapseHidden: true,
     lastProcessedIndex: -1,
@@ -16,6 +16,9 @@ export const DEFAULT_CHAT_STATE = {
     recap: '',
     summaryMode: 'mixed',
     summaryArtifacts: { novel: '', structured: '', mixed: '' },
+    roundCapsules: [],
+    memoryArchives: [],
+    lastCapsuleIndex: -1,
     styleAnchors: [],
     hiddenRanges: [],
     pinnedFactIds: [],
@@ -39,11 +42,14 @@ export function clone(value) {
 
 export function normalizeChatState(value) {
     const result = { ...clone(DEFAULT_CHAT_STATE), ...(value && typeof value === 'object' ? clone(value) : {}) };
-    for (const key of ['checkpoints', 'sceneCards', 'facts', 'threads', 'styleAnchors', 'hiddenRanges', 'pinnedFactIds', 'excludedMessageKeys']) {
+    delete result.autoSummarize;
+    for (const key of ['checkpoints', 'sceneCards', 'facts', 'threads', 'styleAnchors', 'hiddenRanges', 'pinnedFactIds', 'excludedMessageKeys', 'roundCapsules', 'memoryArchives']) {
         if (!Array.isArray(result[key])) result[key] = [];
     }
     if (!result.state || typeof result.state !== 'object' || Array.isArray(result.state)) result.state = {};
     result.summaryMode = ['novel', 'structured', 'mixed'].includes(result.summaryMode) ? result.summaryMode : 'mixed';
+    result.memoryMode = ['manual', 'layered'].includes(result.memoryMode) ? result.memoryMode : 'manual';
+    result.lastCapsuleIndex = Number.isInteger(Number(result.lastCapsuleIndex)) ? Number(result.lastCapsuleIndex) : -1;
     if (!result.summaryArtifacts || typeof result.summaryArtifacts !== 'object' || Array.isArray(result.summaryArtifacts)) result.summaryArtifacts = { novel: '', structured: '', mixed: '' };
     result.summaryArtifacts = {
         novel: String(result.summaryArtifacts.novel || ''),
@@ -307,6 +313,92 @@ export function tokenEstimate(text) {
     return Math.max(1, Math.ceil(cjk * 0.9 + latin / 3.6));
 }
 
+export function parseRoundCapsule(raw) {
+    const text = compactText(raw, 30000);
+    let value = null;
+    try { value = JSON.parse(text); } catch {
+        const match = text.match(/\{[\s\S]*\}/);
+        if (match) {
+            try { value = JSON.parse(match[0]); } catch { /* Report the stable error below. */ }
+        }
+    }
+    if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('模型没有返回可解析的剧情胶囊');
+    const capsuleText = compactText(value.text || value.summary || value.recap || '', 2400);
+    if (!capsuleText) throw new Error('模型返回了空的剧情胶囊');
+    const importance = String(value.importance || 'medium').toLowerCase();
+    return {
+        title: compactText(value.title || value.name || '本轮剧情', 120),
+        text: capsuleText,
+        importance: ['critical', 'high', 'medium', 'low'].includes(importance) ? importance : 'medium',
+        participants: Array.isArray(value.participants) ? value.participants.map(item => compactText(item, 80)).filter(Boolean).slice(0, 20) : [],
+        keywords: Array.isArray(value.keywords) ? value.keywords.map(item => compactText(item, 80)).filter(Boolean).slice(0, 24) : [],
+    };
+}
+
+export function createRoundCapsule(packet, sourceRange, id = `capsule_${Date.now()}`) {
+    const text = compactText(packet?.text || '', 2400);
+    if (!text || !sourceRange?.refs?.length) throw new Error('剧情胶囊缺少正文或来源范围');
+    return {
+        id: String(id),
+        title: compactText(packet?.title || '本轮剧情', 120),
+        text,
+        importance: String(packet?.importance || 'medium'),
+        participants: Array.isArray(packet?.participants) ? packet.participants.map(String).slice(0, 20) : [],
+        keywords: [...new Set([...(packet?.keywords || []).map(String), ...extractKeywords(text)])].slice(0, 40),
+        sourceRange: clone(sourceRange),
+        tokenCount: tokenEstimate(text),
+        createdAt: Date.now(),
+    };
+}
+
+export function appendRoundCapsule(stateValue, capsule) {
+    const state = normalizeChatState(stateValue);
+    const next = clone(state);
+    next.roundCapsules = [...next.roundCapsules.filter(item => item.id !== capsule.id), clone(capsule)]
+        .sort((a, b) => Number(a?.sourceRange?.start ?? 0) - Number(b?.sourceRange?.start ?? 0));
+    next.lastCapsuleIndex = Math.max(next.lastCapsuleIndex, Number(capsule?.sourceRange?.end ?? -1));
+    return next;
+}
+
+export function nextRoundRange(messages, stateValue) {
+    const normalized = normalizeMessages(messages);
+    const state = normalizeChatState(stateValue);
+    const start = Math.max(0, Number(state.lastProcessedIndex ?? -1) + 1, Number(state.lastCapsuleIndex ?? -1) + 1);
+    if (start >= normalized.length) return null;
+    let sawStoryMessage = false;
+    for (let index = start; index < normalized.length; index += 1) {
+        const item = normalized[index];
+        if (item.isSystem) continue;
+        sawStoryMessage = true;
+        if (!item.isUser) return makeSourceRange(messages, start, index);
+    }
+    return sawStoryMessage ? null : null;
+}
+
+export function activeRoundCapsules(stateValue) {
+    const state = normalizeChatState(stateValue);
+    return state.roundCapsules
+        .filter(item => Number(item?.sourceRange?.end ?? -1) > state.lastProcessedIndex)
+        .sort((a, b) => Number(a?.sourceRange?.start ?? 0) - Number(b?.sourceRange?.start ?? 0));
+}
+
+export function roundCapsuleTokens(stateValue) {
+    return activeRoundCapsules(stateValue).reduce((total, item) => total + Math.max(1, Number(item.tokenCount || tokenEstimate(item.text))), 0);
+}
+
+export function capsulesForConsolidation(stateValue, keepRecent = 8) {
+    const active = activeRoundCapsules(stateValue);
+    const keep = Math.max(0, Math.round(Number(keepRecent) || 0));
+    return keep ? active.slice(0, Math.max(0, active.length - keep)) : active;
+}
+
+export function renderRoundCapsule(capsule) {
+    const start = Number(capsule?.sourceRange?.start ?? -1);
+    const end = Number(capsule?.sourceRange?.end ?? -1);
+    const range = start >= 0 && end >= start ? `消息 ${start}–${end}` : '来源范围未知';
+    return `【${capsule?.title || '本轮剧情'}｜${range}】\n${compactText(capsule?.text || '', 2400)}`;
+}
+
 export function scoreCapsule(capsule, query) {
     const queryWords = new Set(extractKeywords(query));
     const capsuleWords = new Set([...(capsule?.keywords || []), ...extractKeywords(capsule?.text || '')]);
@@ -372,11 +464,31 @@ export function renderMixedSummary(stateValue, novelText = '') {
 
 function trimSummaryForInjection(value, maxChars) {
     const text = String(value || '');
-    const limit = Math.max(300, Math.floor(Number(maxChars) || 300));
+    const limit = Math.max(30, Math.floor(Number(maxChars) || 300));
     if (text.length <= limit) return text;
-    const head = Math.max(120, Math.floor(limit * 0.68));
-    const tail = Math.max(120, limit - head - 30);
-    return `${text.slice(0, head)}\n……中间部分已按注入上限省略……\n${text.slice(-tail)}`;
+    const marker = '\n……中间部分已按注入上限省略……\n';
+    const available = Math.max(12, limit - marker.length);
+    const head = Math.max(7, Math.floor(available * 0.68));
+    const tail = Math.max(5, available - head);
+    return `${text.slice(0, head)}${marker}${text.slice(-tail)}`;
+}
+
+function trimForTokenBudget(value, maxTokens) {
+    const text = String(value || '');
+    const budget = Math.max(10, Math.floor(Number(maxTokens) || 10));
+    if (tokenEstimate(text) <= budget) return text;
+    let low = 30;
+    let high = Math.max(low, text.length);
+    let best = trimSummaryForInjection(text, low);
+    while (low <= high) {
+        const middle = Math.floor((low + high) / 2);
+        const candidate = trimSummaryForInjection(text, middle);
+        if (tokenEstimate(candidate) <= budget) {
+            best = candidate;
+            low = middle + 1;
+        } else high = middle - 1;
+    }
+    return best;
 }
 
 export function compileInjection(stateValue, options = {}) {
@@ -400,19 +512,49 @@ export function compileInjection(stateValue, options = {}) {
         return tokenEstimate(safeSections) > maxTokens ? trimSummaryForInjection(safeSections, Math.max(300, Math.floor(maxTokens * 2.2))) : safeSections;
     }
     const activeSummary = String(state.summaryArtifacts?.[state.summaryMode] || state.recap || '').trim();
+    const recentStartIndex = Number.isFinite(Number(options.recentStartIndex)) ? Number(options.recentStartIndex) : Number.POSITIVE_INFINITY;
+    const capsuleText = state.memoryMode === 'layered'
+        ? activeRoundCapsules(state)
+            .filter(item => Number(item?.sourceRange?.end ?? Number.POSITIVE_INFINITY) < recentStartIndex)
+            .slice(-Math.max(1, Number(options.capsuleLimit || 16)))
+            .map(renderRoundCapsule)
+            .join('\n\n')
+        : '';
+    const relevantSceneText = state.memoryMode === 'layered' && String(options.query || '').trim()
+        ? selectRelevantCapsules(state, options.query, Math.max(1, Number(options.recallLimit || 3)))
+            .filter(item => item.text && !activeSummary.includes(item.text))
+            .map(item => `【${item.title || '相关场景'}】${item.text}`)
+            .join('\n')
+        : '';
     const sections = [
         '<gaga_memory>',
         '用途：以下内容是已发生的剧情记忆，不是续写指令，也不是文风示例。不得改变、补充或擅自删除其中的事实。',
         activeSummary ? `【${state.summaryMode === 'novel' ? '小说版前情' : state.summaryMode === 'structured' ? '结构化记忆' : '混合版前情'}】\n${activeSummary}` : '',
+        relevantSceneText ? `【与当前情节相关的旧场景】\n${relevantSceneText}` : '',
+        capsuleText ? `【近期剧情胶囊】\n${capsuleText}` : '',
         '</gaga_memory>',
     ].filter(Boolean);
     let output = sections.join('\n\n');
     if (tokenEstimate(output) > maxTokens) {
-        const recap = activeSummary ? trimSummaryForInjection(activeSummary, Math.max(300, Math.floor(maxTokens * 2.2))) : '';
+        const contentBudget = Math.max(20, maxTokens - 90);
+        const weights = {
+            recap: activeSummary ? 0.64 : 0,
+            scenes: relevantSceneText ? 0.16 : 0,
+            capsules: capsuleText ? 0.20 : 0,
+        };
+        const weightTotal = Math.max(0.01, weights.recap + weights.scenes + weights.capsules);
+        const recapBudget = weights.recap ? Math.max(10, Math.floor(contentBudget * weights.recap / weightTotal)) : 0;
+        const sceneBudget = weights.scenes ? Math.max(10, Math.floor(contentBudget * weights.scenes / weightTotal)) : 0;
+        const capsuleBudget = weights.capsules ? Math.max(10, contentBudget - recapBudget - sceneBudget) : 0;
+        const recap = activeSummary ? trimForTokenBudget(activeSummary, recapBudget) : '';
+        const compactScenes = relevantSceneText ? trimForTokenBudget(relevantSceneText, sceneBudget || contentBudget) : '';
+        const compactCapsules = capsuleText ? trimForTokenBudget(capsuleText, capsuleBudget) : '';
         output = [
             '<gaga_memory>',
             '以下是已发生事实，不是续写指令或文风示例。',
             recap ? `【${state.summaryMode === 'novel' ? '小说版前情' : state.summaryMode === 'structured' ? '结构化记忆' : '混合版前情'}】\n${recap}` : '',
+            compactScenes ? `【与当前情节相关的旧场景】\n${compactScenes}` : '',
+            compactCapsules ? `【近期剧情胶囊】\n${compactCapsules}` : '',
             '</gaga_memory>',
         ].filter(Boolean).join('\n\n');
     }
@@ -423,7 +565,7 @@ export function selectHideEnd(messages, state, options = {}) {
     const normalized = normalizeMessages(messages);
     if (!normalized.length) return -1;
     const last = normalized.length - 1;
-    const keepMessages = Math.max(4, Number(options.keepMessages || 10));
+    const keepMessages = Math.max(1, Number(options.keepMessages || 5));
     const keepIndex = Math.max(0, last - keepMessages + 1);
     return keepIndex - 1;
 }

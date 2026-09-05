@@ -31,7 +31,7 @@ test('settings use theme-resistant pink toggle switches', () => {
     assert.match(css, /grid-template-columns:\s*repeat\(2, minmax\(260px, 360px\)\)/);
     assert.match(css, /column-gap:\s*clamp\(70px, 9vw, 110px\)/);
     assert.match(css, /max-width:\s*820px/);
-    assert.match(js, /class="gds-toggle-row"><input type="checkbox" data-gds-auto><span>自动总结<\/span>/);
+    assert.match(js, /data-gds-capsule-auto><span>达到阈值后自动梳理胶囊<\/span>/);
 });
 
 test('opening the panel locks background scrolling and resets panel scroll', () => {
@@ -185,10 +185,20 @@ test('brands the extension as the workshop and exposes local floating icon contr
     assert.match(css, /@media \(max-width: 900px\)[\s\S]*?\.gds-floating-actions/);
 });
 
-test('uses 60000 Token only as the automatic trigger and adapts manual batches', () => {
-    assert.match(js, /triggerTokens:\s*60000/);
+test('uses manual full summaries and layered rolling memory without the old automatic trigger', () => {
+    assert.doesNotMatch(js, /triggerTokens:\s*60000/);
     assert.match(js, /FALLBACK_BATCH_TOKENS/);
-    assert.match(js, /自动总结触发约 Token/);
+    assert.doesNotMatch(js, /自动总结触发约 Token/);
+    assert.match(js, /memoryMode:\s*'manual'/);
+    assert.match(js, /keepMessages:\s*5/);
+    assert.match(js, /capsuleConsolidationTokens:\s*20000/);
+    assert.match(js, /data-gds-memory-mode/);
+    assert.match(js, /data-gds-consolidate/);
+    assert.match(js, /data-gds-capsules/);
+    assert.match(js, /data-gds-restore-archive/);
+    assert.match(js, /async function restoreLatestCapsuleArchive/);
+    assert.match(js, /async function buildNextRoundCapsule/);
+    assert.match(js, /async function consolidateRollingMemory/);
     assert.match(js, /function planEligibleRange\(ctx\)[\s\S]*?targetTokens:\s*0/);
     assert.match(js, /async function buildWorkflowBatchPlan\(ctx,[\s\S]*?chooseSummaryBatchPlan/);
     assert.match(js, /resolveContextWindowTokens\(ctx\)/);
@@ -196,7 +206,7 @@ test('uses 60000 Token only as the automatic trigger and adapts manual batches',
     assert.match(js, /async function runSummaryWorkflow\(ctx,[\s\S]*?while \(true\)[\s\S]*?await summarizeRange\(/);
     assert.match(js, /pending\.workflow = clone\(workflowInfo\)/);
     assert.doesNotMatch(js, /manualKeepMessages/);
-    assert.match(js, /完整旧正文装得下就整段处理，只有装不下时才自适应拆批/);
+    assert.match(js, /近期消息只按楼层完整保留，不受 Token 限制/);
 });
 
 test('floating dog can be dragged without accidentally opening the panel', () => {

@@ -1,4 +1,4 @@
-export const FALLBACK_BATCH_TOKENS = 60000;
+export const FALLBACK_BATCH_TOKENS = 48000;
 
 function positiveInteger(values, minimum = 1) {
     for (const value of values) {
@@ -43,17 +43,15 @@ export function resolveOutputReserveTokens(ctx = {}, doc = globalThis.document) 
 }
 
 export function chooseSummaryBatchPlan(options = {}) {
-    const reason = String(options.reason || 'manual');
     const contextTokens = Math.max(0, Number(options.contextTokens || 0));
     const sourceTokens = Math.max(1, Number(options.sourceTokens || 1));
     const promptTokens = Math.max(sourceTokens, Number(options.promptTokens || sourceTokens));
-    const autoTriggerTokens = Math.max(5000, Number(options.autoTriggerTokens || FALLBACK_BATCH_TOKENS));
     const fallbackTokens = Math.max(5000, Number(options.fallbackTokens || FALLBACK_BATCH_TOKENS));
 
     if (!contextTokens) {
         return {
             strategy: 'fallback',
-            batchTokens: reason === 'auto' ? Math.min(autoTriggerTokens, fallbackTokens) : fallbackTokens,
+            batchTokens: fallbackTokens,
             contextTokens: 0,
             sourceTokens,
             promptTokens,
@@ -68,7 +66,7 @@ export function chooseSummaryBatchPlan(options = {}) {
     const promptOverhead = Math.max(1000, promptTokens - sourceTokens);
     const safeSourceTokens = Math.max(5000, Math.floor((usablePromptTokens - promptOverhead) * 0.9));
 
-    if (reason !== 'auto' && promptTokens <= usablePromptTokens) {
+    if (promptTokens <= usablePromptTokens) {
         return {
             strategy: 'single',
             batchTokens: 0,
@@ -80,8 +78,8 @@ export function chooseSummaryBatchPlan(options = {}) {
     }
 
     return {
-        strategy: reason === 'auto' ? 'auto-threshold' : 'adaptive-split',
-        batchTokens: Math.max(5000, Math.min(reason === 'auto' ? autoTriggerTokens : safeSourceTokens, safeSourceTokens)),
+        strategy: 'adaptive-split',
+        batchTokens: safeSourceTokens,
         contextTokens,
         sourceTokens,
         promptTokens,

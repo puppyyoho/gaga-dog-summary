@@ -44,17 +44,16 @@ test('manual summary adapts the batch size only when the prompt cannot fit', () 
     assert.ok(plan.batchTokens < 128000);
 });
 
-test('automatic summary still follows its configured trigger threshold', () => {
+test('there is no separate automatic-trigger batching path', () => {
     const plan = chooseSummaryBatchPlan({
         reason: 'auto',
         contextTokens: 200000,
         outputTokens: 8192,
         sourceTokens: 140000,
         promptTokens: 143000,
-        autoTriggerTokens: 60000,
     });
-    assert.equal(plan.strategy, 'auto-threshold');
-    assert.equal(plan.batchTokens, 60000);
+    assert.equal(plan.strategy, 'single');
+    assert.equal(plan.batchTokens, 0);
 });
 
 test('unknown context falls back to a conservative manual batch', () => {
@@ -65,5 +64,5 @@ test('unknown context falls back to a conservative manual batch', () => {
         promptTokens: 183000,
     });
     assert.equal(plan.strategy, 'fallback');
-    assert.equal(plan.batchTokens, 60000);
+    assert.equal(plan.batchTokens, 48000);
 });
