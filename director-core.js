@@ -327,6 +327,7 @@ export function buildExecutionCard({ directorState, memoryState, recentText = ''
     const sections = [
         '<gaga_director>',
         '【强制执行规则】这是当前正文生成必须遵循的幕后导演执行卡。正文不得提及执行卡；未来计划不得伪装成回忆；已发生事实与人物认知边界始终优先。',
+        '【全局标点规则】本轮生成的正文、对白和标题严禁使用任何破折号。需要停顿、转折或补充说明时，必须改用逗号、句号、冒号、分号或括号。',
         '本轮只能推进当前阶段与当前节拍。不得擅自跳到后续阶段、提前完成禁做事项、改写已确认主线，或用突发事件绕开当前节拍。若一轮无法自然完成，只推进其中一个合理步骤并保留余韵。',
         director.toggles.mainline && director.mainPlan ? `【${confirmedMainline ? '已确认主线，必须遵循' : '主线草案，按当前设置执行'}】\n${director.mainPlan.title}\n${director.mainPlan.premise}` : '',
         director.toggles.mainline && arc ? `【当前阶段】\n${arc.title}\n目标：${arc.goal}\n冲突：${arc.conflict}` : '',

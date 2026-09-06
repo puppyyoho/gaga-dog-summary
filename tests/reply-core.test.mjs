@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildReplyPrompt, normalizeReplyState, parseReplyCandidates } from '../reply-core.js';
+import { buildRecentStoryText, buildReplyPrompt, normalizeReplyState, parseReplyCandidates } from '../reply-core.js';
 
 test('reply prompt carries viewpoint, detail, initiative and director context', () => {
     const preferences = normalizeReplyState({ viewpoint: 'third', detail: 'full', length: 'long', initiative: 'active', tone: '嘴硬但心软', followDirector: true, customInstruction: '不要替用户承认秘密。' });
@@ -12,6 +12,19 @@ test('reply prompt carries viewpoint, detail, initiative and director context', 
     assert.match(request.systemPrompt, /文风/);
     assert.match(request.systemPrompt, /破折号/);
     assert.match(request.prompt, /正文段落之间只保留一个换行/);
+    assert.match(request.prompt, /最后一条消息是本次代写的唯一续写起点/);
+});
+
+test('recent story context always keeps the newest正文 and excludes system messages', () => {
+    const messages = [
+        { name: '旧角色', mes: '很长的旧正文'.repeat(800), is_user: false },
+        { name: '系统', mes: '不应进入代写上下文', is_system: true },
+        { name: '角色', mes: '这是必须直接回应的最新正文。', is_user: false },
+    ];
+    const recent = buildRecentStoryText(messages, { count: 10, maxChars: 1000 });
+    assert.match(recent, /这是必须直接回应的最新正文/);
+    assert.doesNotMatch(recent, /不应进入代写上下文/);
+    assert.doesNotMatch(recent, /很长的旧正文/);
 });
 
 test('parses up to five selectable candidate replies', () => {

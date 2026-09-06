@@ -48,6 +48,35 @@ export function normalizeReplyState(value) {
     return result;
 }
 
+export function buildRecentStoryText(messages, { count = 10, maxChars = 60000 } = {}) {
+    const source = Array.isArray(messages) ? messages : [];
+    const limit = Math.max(1, Number(count) || 10);
+    const budget = Math.max(1000, Number(maxChars) || 60000);
+    const rows = [];
+    for (let index = source.length - 1; index >= 0 && rows.length < limit; index -= 1) {
+        const message = source[index];
+        if (!message || message.is_system || message.extra?.is_system || message.extra?.gagaDogHiddenBy) continue;
+        const content = compactText(message.mes ?? message.content ?? '', 300000);
+        if (!content) continue;
+        const name = String(message.name ?? message.sender ?? (message.is_user ? 'User' : 'Character'));
+        rows.unshift(`[消息 ${index}｜${name}]\n${content}`);
+    }
+    if (!rows.length) return '';
+
+    // The newest real story message is non-negotiable. Earlier messages are
+    // added backwards only while they fit, so long context cannot evict the
+    // actual reply target from the prompt.
+    const selected = [rows.at(-1)];
+    let used = selected[0].length;
+    for (let index = rows.length - 2; index >= 0; index -= 1) {
+        const row = rows[index];
+        if (used + row.length + 2 > budget) break;
+        selected.unshift(row);
+        used += row.length + 2;
+    }
+    return selected.join('\n\n');
+}
+
 function formatMemory(memory) {
     const state = normalizeChatState(memory);
     const current = Object.values(state.state).filter(item => item.status !== 'resolved' && item.value).slice(-30);
@@ -67,7 +96,7 @@ export function buildReplyPrompt({ recentText = '', memory, directorCard = '', u
     const detail = REPLY_DETAIL_LEVELS.find(item => item.id === settings.detail)?.name || '对白＋简单动作';
     return {
         systemPrompt: `你是“嘎嘎小狗”的用户回复代写助手。你只生成用户可以选择的回复草稿，不替用户发送消息。\n\n必须遵守用户角色已经知道的内容，不得让用户角色凭空知道角色秘密。五个候选必须代表不同的行动意图，而不是同一句话的五种同义改写。${REPLY_STYLE_GUIDANCE}\n\n输出合法 JSON，不要输出 Markdown。`,
-        prompt: `<代写任务>\n请根据当前正文，生成 ${settings.candidateCount} 个真正不同的用户回复候选。\n\n<写作设置>\n用户名称：${userName}\n用户人设：${compactText(userPersona, 12000) || '无'}\n视角：${viewpoint}\n描写密度：${detail}\n长度：${settings.length}\n情绪倾向：${settings.tone}\n主动程度：${settings.initiative}\n自定义要求：${settings.customInstruction || '无'}\n</写作设置>\n\n<已发生记忆>\n${formatMemory(memory) || '无'}\n</已发生记忆>\n\n${settings.followDirector && directorCard ? `<当前导演执行卡>\n${compactText(directorCard, 10000)}\n</当前导演执行卡>` : ''}\n\n<最近正文>\n${compactText(recentText, 30000) || '无'}\n</最近正文>\n\n<输出格式>\n{\"candidates\":[{\"title\":\"候选名称\",\"intent\":\"行动意图\",\"text\":\"实际可发送的回复正文\",\"possibleEffect\":\"可能后果\"}]}\n</输出格式>\n${REPLY_STYLE_GUIDANCE}\n只输出一个完整 JSON 对象，不要 Markdown 代码围栏或解释。JSON 字符串中的换行必须写成 \\n，正文对话中的双引号必须写成 \\\"；不要输出未转义的控制字符。当前角色名：${characterName}。候选正文不得包含标题、解释或 JSON 以外的内容。`,
+        prompt: `<代写任务>\n请根据当前正文，生成 ${settings.candidateCount} 个真正不同的用户回复候选。每个候选都必须直接承接“最近正文”的最后一条消息，不能从更早的情节另起话题。\n\n<写作设置>\n用户名称：${userName}\n用户人设：${compactText(userPersona, 12000) || '无'}\n视角：${viewpoint}\n描写密度：${detail}\n长度：${settings.length}\n情绪倾向：${settings.tone}\n主动程度：${settings.initiative}\n自定义要求：${settings.customInstruction || '无'}\n</写作设置>\n\n<已发生记忆>\n${formatMemory(memory) || '无'}\n</已发生记忆>\n\n${settings.followDirector && directorCard ? `<当前导演执行卡>\n${compactText(directorCard, 10000)}\n</当前导演执行卡>` : ''}\n\n<最近正文，最后一条消息是本次代写的唯一续写起点>\n${String(recentText || '').trim() || '无'}\n</最近正文，最后一条消息是本次代写的唯一续写起点>\n\n<输出格式>\n{\"candidates\":[{\"title\":\"候选名称\",\"intent\":\"行动意图\",\"text\":\"实际可发送的回复正文\",\"possibleEffect\":\"可能后果\"}]}\n</输出格式>\n${REPLY_STYLE_GUIDANCE}\n只输出一个完整 JSON 对象，不要 Markdown 代码围栏或解释。JSON 字符串中的换行必须写成 \\n，正文对话中的双引号必须写成 \\\"；不要输出未转义的控制字符。当前角色名：${characterName}。候选正文不得包含标题、解释或 JSON 以外的内容。`,
     };
 }
 

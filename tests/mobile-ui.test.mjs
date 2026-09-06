@@ -192,6 +192,14 @@ test('clicking non-interactive page space cannot reset the internal scroll posit
     assert.match(js, /bindBlankAreaScrollGuard\(pageHost\)/);
 });
 
+test('director editors keep focus and scroll without being re-rendered', () => {
+    assert.match(js, /function bindDirectorEditorScrollGuard\(pageHost\)/);
+    assert.match(js, /editor\.focus\(\{ preventScroll: true \}\)/);
+    assert.match(js, /runtime\.directorEditorActive = true/);
+    assert.match(js, /!runtime\.directorEditorActive && !directorPlan\.contains\(document\.activeElement\)/);
+    assert.match(js, /bindDirectorEditorScrollGuard\(pageHost\)/);
+});
+
 test('reply candidates can be copied or inserted without auto-sending', () => {
     assert.doesNotMatch(js, /待写回复/);
     assert.match(js, /代写回复/);

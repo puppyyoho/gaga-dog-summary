@@ -1,4 +1,4 @@
-export const PROMPT_VERSION = 'gaga-summary-v4';
+export const PROMPT_VERSION = 'gaga-summary-v5';
 
 export const DEFAULT_PROMPTS = {
     factSystem: `你是“嘎嘎小狗工坊”的事实记忆编辑器。你只负责从故事材料中提取已经发生的内容，不负责续写、扮演角色或评价文笔。

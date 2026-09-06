@@ -1,5 +1,25 @@
 import { PROVIDER_CURRENT } from './provider-profiles.js';
 
+export const GLOBAL_OUTPUT_RULE = `【全局输出硬性规则】任何自然语言内容都严禁使用破折号，包括中文双线破折号、单线长破折号以及连续两个或更多短横线。需要停顿、转折或补充说明时，改用逗号、句号、冒号、分号或括号。此规则适用于正文、标题、提纲、摘要、对白、说明以及 JSON 的所有自然语言字段。输出前必须逐字段检查并改写。`;
+
+export function sanitizeForbiddenDashes(value) {
+    return String(value ?? '').replace(/(?:[\u2013\u2014\u2015\u2e3a\u2e3b\ufe58\ufe63\uff0d]|-{2,})+/g, '，');
+}
+
+export function applyGlobalOutputRule(options = {}) {
+    const systemPrompt = String(options.systemPrompt || '');
+    const onText = options.onText;
+    return {
+        ...options,
+        systemPrompt: systemPrompt.includes('【全局输出硬性规则】')
+            ? systemPrompt
+            : [systemPrompt, GLOBAL_OUTPUT_RULE].filter(Boolean).join('\n\n'),
+        onText: typeof onText === 'function'
+            ? (text, metadata) => onText(sanitizeForbiddenDashes(text), metadata)
+            : onText,
+    };
+}
+
 function cloneSettings(settings) {
     if (!settings || typeof settings !== 'object') return {};
     try {
@@ -410,13 +430,15 @@ export function readableGenerationError(error) {
     return [...new Set(details)].join(' · ') || String(error || '未知生成错误');
 }
 
-export async function generateStreaming(ctx, { systemPrompt, prompt, signal, onText, onStatus, providerProfile = null }) {
+export async function generateStreaming(ctx, options = {}) {
+    const { systemPrompt, prompt, signal, onText, onStatus, providerProfile = null } = applyGlobalOutputRule(options);
     if (providerProfile?.kind === 'openai-compatible') {
         const messages = [
             ...(systemPrompt ? [{ role: 'system', content: systemPrompt }] : []),
             { role: 'user', content: prompt },
         ];
-        return directCompletion(providerProfile, messages, signal, true, onText, onStatus);
+        const result = await directCompletion(providerProfile, messages, signal, true, onText, onStatus);
+        return { ...result, text: sanitizeForbiddenDashes(result.text) };
     }
     const api = providerProfile?.kind === 'connection' ? null : currentStreamingApi(ctx);
     const connection = providerProfile?.kind === 'connection'
@@ -484,7 +506,7 @@ export async function generateStreaming(ctx, { systemPrompt, prompt, signal, onT
     if (!text.trim()) throw new Error(`${source} 返回了空内容`);
     return {
         supported: true,
-        text,
+        text: sanitizeForbiddenDashes(text),
         source,
         chunks,
         updates,
@@ -494,6 +516,7 @@ export async function generateStreaming(ctx, { systemPrompt, prompt, signal, onT
 }
 
 async function generateBuffered(ctx, options) {
+    options = applyGlobalOutputRule(options);
     if (options.providerProfile?.kind === 'openai-compatible') {
         const messages = [
             ...(options.systemPrompt ? [{ role: 'system', content: options.systemPrompt }] : []),
@@ -556,6 +579,7 @@ async function generateBuffered(ctx, options) {
 }
 
 export async function generateWithFallback(ctx, options) {
+    options = applyGlobalOutputRule(options);
     let streamError = null;
     if (options.preferStream !== false) {
         try {
@@ -577,7 +601,7 @@ export async function generateWithFallback(ctx, options) {
     }
     if (options.signal?.aborted) throw options.signal.reason || new DOMException('已中断生成', 'AbortError');
     options.onText?.(buffered.text, { phase: 'received', source: buffered.source, chunks: 1, updates: 1, length: buffered.text.length });
-    return { supported: true, streamed: false, buffered: true, text: buffered.text, source: buffered.source, chunks: 1, updates: 1 };
+    return { supported: true, streamed: false, buffered: true, text: sanitizeForbiddenDashes(buffered.text), source: buffered.source, chunks: 1, updates: 1 };
 }
 
 /**

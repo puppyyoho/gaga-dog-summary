@@ -18,7 +18,7 @@ test('builds a separate fact-bounded literary polishing stage', () => {
         targetWords: 600,
         customPrompts: DEFAULT_PROMPTS,
     });
-    assert.equal(PROMPT_VERSION, 'gaga-summary-v4');
+    assert.equal(PROMPT_VERSION, 'gaga-summary-v5');
     assert.match(request.systemPrompt, /不得新增、删除或改变事件/);
     assert.match(request.prompt, /<前情草稿>/);
     assert.match(request.prompt, /谢怀璧接过了茶/);

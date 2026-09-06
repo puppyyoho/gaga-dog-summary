@@ -51,6 +51,7 @@ test('keeps future plans separate from factual memory and builds a bounded execu
     assert.match(card, /不要跨越未完成的节拍/);
     assert.match(card, /强制执行规则/);
     assert.match(card, /本轮只能推进当前阶段与当前节拍/);
+    assert.match(card, /严禁使用任何破折号/);
     assert.match(card, /旧钥匙/);
     assert.doesNotMatch(card, /未来计划是事实/);
 });

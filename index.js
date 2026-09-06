@@ -39,7 +39,7 @@ import {
     PROMPT_VERSION,
     renderFactsForProse,
 } from './prompts.js';
-import { generateDirectOnly, generateWithFallback, listConnectionModels, listDirectModels, readableGenerationError } from './generation-client.js';
+import { generateDirectOnly, generateWithFallback, GLOBAL_OUTPUT_RULE, listConnectionModels, listDirectModels, readableGenerationError } from './generation-client.js';
 import {
     chooseInjectionBudget,
     chooseSummaryBatchPlan,
@@ -76,6 +76,7 @@ import {
     normalizeCalendarState,
 } from './calendar-core.js';
 import {
+    buildRecentStoryText,
     buildReplyPrompt,
     createEmptyReplyState,
     normalizeReplyState,
@@ -98,7 +99,7 @@ const INJECTION_ID = `${EXTENSION_NAME}:memory`;
 const DIRECTOR_INJECTION_ID = `${EXTENSION_NAME}:director`;
 const PANEL_LOGO_URL = new URL('./assets/gaga-dog-logo.png', import.meta.url).href;
 const FLOATING_LOGO_URL = new URL('./assets/gaga-dog-floating.png', import.meta.url).href;
-const VERSION = '0.5.6';
+const VERSION = '0.5.7';
 const SETTINGS_VERSION = 10;
 
 const DEFAULT_SETTINGS = {
@@ -165,6 +166,7 @@ const runtime = {
     modelPullController: null,
     modelPullBusy: false,
     modelOptions: [],
+    directorEditorActive: false,
 };
 
 function getContext() {
@@ -915,13 +917,17 @@ async function applyInjection(ctx = getContext(), chatState = getChatState(ctx),
         contextTokens: resolveContextWindowTokens(ctx),
         configuredTokens: settings.injectionMaxTokens,
     });
-    const injection = compileInjection(chatState, {
+    const memoryInjection = compileInjection(chatState, {
         maxTokens: injectionBudget,
         recentStartIndex: Math.max(0, messages.length - settings.keepMessages),
         capsuleLimit: Math.max(8, settings.keepRecentCapsules * 2),
         query: recentQuery(messages),
         recallLimit: settings.recallLimit,
     });
+    const injection = [
+        memoryInjection,
+        `<gaga_output_rules>\n${GLOBAL_OUTPUT_RULE}\n</gaga_output_rules>`,
+    ].filter(Boolean).join('\n\n');
     chatState.lastInjection = injection;
     chatState.lastInjectionTokens = tokenEstimate(injection);
     if (typeof ctx.setExtensionPrompt === 'function') {
@@ -932,9 +938,7 @@ async function applyInjection(ctx = getContext(), chatState = getChatState(ctx),
 }
 
 function recentStoryText(ctx, count = 10) {
-    const messages = getMessages(ctx);
-    const start = Math.max(0, messages.length - Math.max(1, count));
-    return formatMessages(messages, start, messages.length - 1);
+    return buildRecentStoryText(getMessages(ctx), { count, maxChars: 60000 });
 }
 
 function userPersonaText(ctx) {
@@ -2772,6 +2776,37 @@ function bindBlankAreaScrollGuard(pageHost) {
     });
 }
 
+function bindDirectorEditorScrollGuard(pageHost) {
+    if (!pageHost || pageHost.dataset.gdsDirectorEditorGuard === 'true') return;
+    pageHost.dataset.gdsDirectorEditorGuard = 'true';
+    const editorSelector = '[data-gds-director-plan] input,[data-gds-director-plan] textarea,[data-gds-director-branches] input,[data-gds-director-branches] textarea,[data-gds-director-foreshadows] input,[data-gds-director-foreshadows] textarea';
+    let lockedScrollTop = 0;
+
+    pageHost.addEventListener('pointerdown', event => {
+        const editor = event.target.closest?.(editorSelector);
+        if (!editor) return;
+        lockedScrollTop = pageHost.scrollTop;
+        runtime.directorEditorActive = true;
+        // Establish focus before the browser's default pointer focus. The
+        // preventScroll option avoids jumping the nested panel to its start,
+        // while the later native action can still position the text caret.
+        try { editor.focus({ preventScroll: true }); } catch { /* Older WebViews focus normally. */ }
+        restorePageScrollAfterLayout(pageHost, lockedScrollTop);
+    }, true);
+
+    pageHost.addEventListener('focusin', event => {
+        if (!event.target.matches?.(editorSelector)) return;
+        runtime.directorEditorActive = true;
+        restorePageScrollAfterLayout(pageHost, lockedScrollTop || pageHost.scrollTop);
+    }, true);
+
+    pageHost.addEventListener('focusout', () => {
+        queueMicrotask(() => {
+            runtime.directorEditorActive = Boolean(pageHost.contains(document.activeElement) && document.activeElement?.matches?.(editorSelector));
+        });
+    }, true);
+}
+
 function updateDirectorFromUi(ctx) {
     const current = getDirectorState(ctx);
     const overlay = runtime.overlay;
@@ -3096,11 +3131,11 @@ function refreshUi() {
     const directorOutput = runtime.overlay.querySelector('[data-gds-director-output]');
     if (directorOutput && document.activeElement !== directorOutput) directorOutput.value = runtime.directorText || director.lastExecutionCard || '';
     const directorPlan = runtime.overlay.querySelector('[data-gds-director-plan]');
-    if (directorPlan && !directorPlan.contains(document.activeElement)) directorPlan.innerHTML = renderDirectorPlan(director);
+    if (directorPlan && !runtime.directorEditorActive && !directorPlan.contains(document.activeElement)) directorPlan.innerHTML = renderDirectorPlan(director);
     const branchList = runtime.overlay.querySelector('[data-gds-director-branches]');
-    if (branchList && !branchList.contains(document.activeElement)) branchList.innerHTML = renderDirectorBranches(director);
+    if (branchList && !runtime.directorEditorActive && !branchList.contains(document.activeElement)) branchList.innerHTML = renderDirectorBranches(director);
     const foreshadowList = runtime.overlay.querySelector('[data-gds-director-foreshadows]');
-    if (foreshadowList && !foreshadowList.contains(document.activeElement)) foreshadowList.innerHTML = renderDirectorForeshadows(director);
+    if (foreshadowList && !runtime.directorEditorActive && !foreshadowList.contains(document.activeElement)) foreshadowList.innerHTML = renderDirectorForeshadows(director);
     const calendarEnabled = runtime.overlay.querySelector('[data-gds-calendar-enabled]');
     const calendarBuiltins = runtime.overlay.querySelector('[data-gds-calendar-builtins]');
     const calendarAutoAdvance = runtime.overlay.querySelector('[data-gds-calendar-auto-advance]');
@@ -3640,6 +3675,7 @@ function createUi() {
     const pageHost = overlay.querySelector('.gds-page-host');
     bindStableDetailsScrolling(pageHost);
     bindBlankAreaScrollGuard(pageHost);
+    bindDirectorEditorScrollGuard(pageHost);
 
     const floating = document.createElement('button');
     floating.className = 'gds-floating';

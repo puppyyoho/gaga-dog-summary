@@ -3,8 +3,10 @@ import assert from 'node:assert/strict';
 import {
     extractGeneratedText,
     generateWithFallback,
+    GLOBAL_OUTPUT_RULE,
     listConnectionModels,
     mergeStreamText,
+    sanitizeForbiddenDashes,
 } from '../generation-client.js';
 
 test('reads common Tavern and OpenAI-compatible generation results', () => {
@@ -12,6 +14,22 @@ test('reads common Tavern and OpenAI-compatible generation results', () => {
     assert.equal(extractGeneratedText({ text: 'Tavern 文本' }), 'Tavern 文本');
     assert.equal(extractGeneratedText({ choices: [{ message: { content: '兼容端文本' } }] }), '兼容端文本');
     assert.equal(extractGeneratedText({ choices: [{ delta: { content: '流式增量' } }] }), '流式增量');
+});
+
+test('adds the global no-dash prompt and sanitizes violations in generated output', async () => {
+    const calls = [];
+    const ctx = {
+        generateQuietPrompt: async options => {
+            calls.push(options);
+            return '标题——补充—说明--结束';
+        },
+    };
+    const result = await generateWithFallback(ctx, { systemPrompt: '系统', prompt: '材料', preferStream: false });
+    assert.match(calls[0].quietPrompt, /全局输出硬性规则/);
+    assert.match(calls[0].quietPrompt, /严禁使用破折号/);
+    assert.equal(result.text, '标题，补充，说明，结束');
+    assert.equal(sanitizeForbiddenDashes('甲——乙—丙--丁'), '甲，乙，丙，丁');
+    assert.match(GLOBAL_OUTPUT_RULE, /所有自然语言字段/);
 });
 
 test('streams an independent OpenAI-compatible profile and can be aborted', async () => {
@@ -200,7 +218,8 @@ test('falls back to Tavern quiet generation only when no direct service exists',
     assert.equal(result.text, 'quiet-ok');
     assert.equal(calls.length, 1);
     assert.equal(calls[0][0], 'quiet');
-    assert.equal(calls[0][1].quietPrompt, '系统说明\n\n总结材料');
+    assert.match(calls[0][1].quietPrompt, /^系统说明\n\n【全局输出硬性规则】/);
+    assert.match(calls[0][1].quietPrompt, /总结材料$/);
 });
 
 test('an abort signal stops a live stream before applying later chunks', async () => {
