@@ -1,7 +1,7 @@
 import { compactText, extractKeywords, normalizeChatState, tokenEstimate } from './memory-core.js';
 import { createEmptyCalendarState, normalizeCalendarState } from './calendar-core.js';
 
-export const DIRECTOR_SCHEMA_VERSION = 2;
+export const DIRECTOR_SCHEMA_VERSION = 3;
 
 export const DIRECTOR_PRESETS = [
     {
@@ -93,7 +93,7 @@ export function createEmptyDirectorState() {
             foreshadow: true,
             newCharacters: true,
             sidePlots: true,
-            autoTrack: false,
+            autoTrack: true,
         },
         calendar: createEmptyCalendarState(),
         taskState: {
@@ -183,7 +183,7 @@ export function buildDirectorPrompt({ task = 'longline', memory, recentText = ''
                     : '请判断最近正文是否完成当前节拍，并只返回结构化的进度判断。';
     return {
         systemPrompt: `你是“嘎嘎小狗”的幕后情节导演。你只负责规划、检查和整理故事，不直接续写正文。\n\n已发生事实是不可修改的边界；未来计划、分支和伏笔都是“可能发生”，除非正文真正写出，否则不能称为已发生。人物只能依据自己已经知道的内容行动。\n\n输出必须是合法 JSON，不要输出 Markdown、解释或正文。`,
-        prompt: `<导演任务>\n${taskInstruction}\n${continuationMode ? `\n<续写模式>\n${continuationMode === 'draft' ? '上一轮生成曾被停止或失败。请参考下面的部分草稿，补全并返回一份完整合法 JSON，不要只重复草稿。' : '当前规划已经保存。请在不改写既有主线事实的前提下，继续设计下一段可执行规划。'}\n</续写模式>` : ''}\n\n<内置规划风格>\n名称：${preset.name}\n说明：${preset.description}\n规划规则：${preset.rules}\n节奏曲线：${preset.paceCurve}\n</内置规划风格>\n\n<用户自定义要求>\n${compactText(customBrief, 30000) || '无'}\n</用户自定义要求>\n\n<推进设置>\n模式：${pacingMode}\n自定义节奏：${compactText(pacingCustom, 10000) || '无'}\n主线：${director.toggles.mainline ? '启用' : '关闭'}\n分支：${director.toggles.branch ? '启用' : '关闭'}\n推进速度：${director.toggles.pacing ? '启用' : '关闭'}\n伏笔：${director.toggles.foreshadow ? '启用' : '关闭'}\n新角色：${director.toggles.newCharacters ? '允许' : '禁止'}\n额外支线：${director.toggles.sidePlots ? '允许' : '禁止'}\n</推进设置>\n\n<故事日历>\n${calendarContext?.cardText || '未启用或暂无日历提醒。'}\n日历日期只是创作参考；如果与正文因果、人物认知或角色卡冲突，以正文为准。\n</故事日历>\n\n<角色卡背景>\n${compactText(characterCard, 16000) || '无'}\n</角色卡背景>\n\n<已发生记忆>\n${stringifyState(memory) || '无'}\n</已发生记忆>\n\n<最近正文>\n${compactText(recentText, 30000) || '无'}\n</最近正文>\n\n<当前主线>\n${currentPlan}\n</当前主线>\n\n<当前分支>\n${branch}\n</当前分支>\n\n${continuationDraft ? `<上一轮部分草稿>\n${compactText(continuationDraft, 60000)}\n</上一轮部分草稿>\n` : ''}\n<输出字段>\nlongline：{title, premise, ending, arcs:[{id,title,goal,conflict,pacing,estimatedTurns,beats:[{id,goal,allowed,forbidden,completion,pace}]}], characterArcs, constraints}\nbranches：[{id,title,summary,reason,consequences,risks,estimatedTurns}]\nforeshadows：[{id,name,surface,meaning,signals,knowers,earliestReveal,targetArc,status}]\nprogress：{beatCompleted,completedGoals,remainingGoals,triggeredForeshadows,recommendedPace,confidence,nextBeatId}\n</输出字段>`,
+        prompt: `<导演任务>\n${taskInstruction}\n${continuationMode ? `\n<续写模式>\n${continuationMode === 'draft' ? '上一轮生成曾被停止或失败。请参考下面的部分草稿，补全并返回一份完整合法 JSON，不要只重复草稿。' : '当前规划已经保存。请在不改写既有主线事实的前提下，继续设计下一段可执行规划。'}\n</续写模式>` : ''}\n\n<内置规划风格>\n名称：${preset.name}\n说明：${preset.description}\n规划规则：${preset.rules}\n节奏曲线：${preset.paceCurve}\n</内置规划风格>\n\n<用户自定义要求>\n${compactText(customBrief, 30000) || '无'}\n</用户自定义要求>\n\n<推进设置>\n模式：${pacingMode}\n自定义节奏：${compactText(pacingCustom, 10000) || '无'}\n主线：${director.toggles.mainline ? '启用' : '关闭'}\n分支：${director.toggles.branch ? '启用' : '关闭'}\n推进速度：${director.toggles.pacing ? '启用' : '关闭'}\n伏笔：${director.toggles.foreshadow ? '启用' : '关闭'}\n新角色：${director.toggles.newCharacters ? '允许' : '禁止'}\n额外支线：${director.toggles.sidePlots ? '允许' : '禁止'}\n</推进设置>\n\n<故事日历>\n${calendarContext?.cardText || '未启用或暂无日历提醒。'}\n日历日期只是创作参考；如果与正文因果、人物认知或角色卡冲突，以正文为准。\n</故事日历>\n\n<角色卡背景>\n${compactText(characterCard, 16000) || '无'}\n</角色卡背景>\n\n<已发生记忆>\n${stringifyState(memory) || '无'}\n</已发生记忆>\n\n<最近正文>\n${compactText(recentText, 30000) || '无'}\n</最近正文>\n\n<当前主线>\n${currentPlan}\n</当前主线>\n\n<当前分支>\n${branch}\n</当前分支>\n\n${continuationDraft ? `<上一轮部分草稿>\n${compactText(continuationDraft, 60000)}\n</上一轮部分草稿>\n` : ''}\n<输出字段>\nlongline：{title, outline:["用一句话概括起点、发展、转折和结局方向，3到8条"], premise, ending, arcs:[{id,title,goal,conflict,pacing,estimatedTurns,beats:[{id,goal,allowed,forbidden,completion,pace}]}], characterArcs, constraints}\nbranches：[{id,title,summary,reason,consequences,risks,estimatedTurns}]\nforeshadows：[{id,name,surface,meaning,signals,knowers,earliestReveal,targetArc,status}]\nprogress：{beatCompleted,completedGoals,remainingGoals,triggeredForeshadows,recommendedPace,confidence,nextBeatId}\n</输出字段>`,
     };
 }
 
@@ -213,6 +213,9 @@ export function parseDirectorPacket(raw, task = 'longline') {
 
 export function normalizeMainPlan(value) {
     const plan = record(value);
+    const outlineSource = Array.isArray(plan.outline)
+        ? plan.outline
+        : String(plan.outline || plan.overview || '').split(/\r?\n/).map(item => item.replace(/^\s*(?:[-*•]|\d+[.、])\s*/, '')).filter(Boolean);
     const arcs = list(plan.arcs, 30).map((arc, index) => {
         const item = record(arc);
         return {
@@ -228,6 +231,7 @@ export function normalizeMainPlan(value) {
     return {
         id: String(plan.id || `plan_${Date.now()}`),
         title: compactText(plan.title || '未命名主线', 160),
+        outline: list(outlineSource, 12).map(item => compactText(typeof item === 'string' ? item : JSON.stringify(item), 600)).filter(Boolean),
         premise: compactText(plan.premise || '', 3000),
         ending: compactText(plan.ending || '', 1600),
         arcs,
@@ -319,19 +323,22 @@ export function buildExecutionCard({ directorState, memoryState, recentText = ''
     if (!director.enabled) return '';
     const { arc, beat } = activeBeat(director);
     const branch = selectedBranch(director);
+    const confirmedMainline = Boolean(director.mainPlan?.status === 'locked');
     const sections = [
         '<gaga_director>',
-        '这是幕后创作规划，不是已经发生的剧情。正文不得提及这份规划，不得把未来计划写成回忆。已发生事实和人物认知边界优先。',
-        director.toggles.mainline && director.mainPlan ? `【当前主线】\n${director.mainPlan.title}\n${director.mainPlan.premise}` : '',
+        '【强制执行规则】这是当前正文生成必须遵循的幕后导演执行卡。正文不得提及执行卡；未来计划不得伪装成回忆；已发生事实与人物认知边界始终优先。',
+        '本轮只能推进当前阶段与当前节拍。不得擅自跳到后续阶段、提前完成禁做事项、改写已确认主线，或用突发事件绕开当前节拍。若一轮无法自然完成，只推进其中一个合理步骤并保留余韵。',
+        director.toggles.mainline && director.mainPlan ? `【${confirmedMainline ? '已确认主线，必须遵循' : '主线草案，按当前设置执行'}】\n${director.mainPlan.title}\n${director.mainPlan.premise}` : '',
         director.toggles.mainline && arc ? `【当前阶段】\n${arc.title}\n目标：${arc.goal}\n冲突：${arc.conflict}` : '',
         director.toggles.pacing ? `【本轮推进】\n${pacingInstruction(director, arc, beat)}\n${beat ? `节拍目标：${beat.goal}\n允许：${beat.allowed.join('；') || '自然推进'}\n完成条件：${beat.completion.join('；') || '以正文实际发展为准'}\n禁止提前发生：${beat.forbidden.join('；') || '不要跨越未完成节拍'}` : '当前没有锁定节拍，请保持自然推进。'}` : '',
-        director.toggles.branch && branch ? `【当前分支】\n${branch.title}\n${branch.summary}\n预期后果：${branch.consequences.join('；') || '以正文实际发展为准'}` : '',
+        director.toggles.branch && branch ? `【已采用分支，必须遵循】\n${branch.title}\n${branch.summary}\n预期后果：${branch.consequences.join('；') || '以正文实际发展为准'}` : '',
         director.toggles.foreshadow ? `【本轮可使用的伏笔】\n${director.foreshadows.filter(item => ['planned', 'seeded', 'reinforced'].includes(item.status)).slice(0, 8).map(item => `- ${item.name}：${item.surface}${item.targetArc ? `（目标阶段：${item.targetArc}）` : ''}`).join('\n') || '无；不要凭空添加伏笔。'}` : '',
         calendarContext?.cardText ? `${calendarContext.cardText}\n日历事件只是可选的剧情背景或提醒，不是已发生事实；若不合适就忽略，不得强行触发。` : '',
         !director.toggles.newCharacters ? '【限制】本轮不得引入新角色。' : '',
         !director.toggles.sidePlots ? '【限制】本轮不得开启额外支线。' : '',
         memoryState?.recap ? `【记忆锚点】\n${compactText(memoryState.recap, 4000)}` : '',
         recentText ? `【最近正文仅供衔接】\n${compactText(recentText, 5000)}` : '',
+        '【生成前自检】确认正文只推进当前节拍，保留禁止事项，服从已确认主线与已采用分支，并延续最近正文；发现冲突时放慢推进，不得自行改线。',
         '</gaga_director>',
     ].filter(Boolean);
     return sections.join('\n\n');
@@ -339,12 +346,33 @@ export function buildExecutionCard({ directorState, memoryState, recentText = ''
 
 export function applyLonglineToDirector(state, packet) {
     const next = normalizeDirectorState(state);
-    const previousStatus = next.mainPlan?.status;
-    next.mainPlan = normalizeMainPlan(packet);
-    next.mainPlan.status = previousStatus === 'locked' ? 'locked' : 'draft';
-    next.currentArcId = next.mainPlan.arcs[0]?.id || '';
-    next.currentBeatId = next.mainPlan.arcs[0]?.beats[0]?.id || '';
-    next.turnsSpent = 0;
+    const incoming = normalizeMainPlan(packet);
+    if (next.mainPlan?.status === 'locked') {
+        const existingIds = new Set(next.mainPlan.arcs.map(item => item.id));
+        const appendedArcs = incoming.arcs.map((item, index) => existingIds.has(item.id)
+            ? { ...item, id: `${item.id}_continuation_${next.mainPlan.arcs.length + index + 1}` }
+            : item);
+        next.mainPlan = normalizeMainPlan({
+            ...next.mainPlan,
+            outline: [...new Set([...(next.mainPlan.outline || []), ...incoming.outline])],
+            ending: incoming.ending || next.mainPlan.ending,
+            arcs: [...next.mainPlan.arcs, ...appendedArcs],
+            status: 'locked',
+            createdAt: next.mainPlan.createdAt,
+        });
+        next.mainPlan.status = 'locked';
+        if (!next.currentArcId && appendedArcs.length) {
+            next.currentArcId = appendedArcs[0].id;
+            next.currentBeatId = appendedArcs[0].beats[0]?.id || '';
+            next.turnsSpent = 0;
+        }
+    } else {
+        next.mainPlan = incoming;
+        next.mainPlan.status = 'draft';
+        next.currentArcId = next.mainPlan.arcs[0]?.id || '';
+        next.currentBeatId = next.mainPlan.arcs[0]?.beats[0]?.id || '';
+        next.turnsSpent = 0;
+    }
     next.lastPlanAt = Date.now();
     return next;
 }
@@ -352,6 +380,12 @@ export function applyLonglineToDirector(state, packet) {
 export function lockMainline(state) {
     const next = normalizeDirectorState(state);
     if (next.mainPlan) next.mainPlan = { ...next.mainPlan, status: 'locked', updatedAt: Date.now() };
+    return next;
+}
+
+export function unlockMainline(state) {
+    const next = normalizeDirectorState(state);
+    if (next.mainPlan) next.mainPlan = { ...next.mainPlan, status: 'draft', updatedAt: Date.now() };
     return next;
 }
 
@@ -366,8 +400,47 @@ export function selectBranch(state, branchId) {
     const next = normalizeDirectorState(state);
     const id = String(branchId || '');
     next.activeBranchId = next.branchCandidates.some(item => item.id === id) ? id : '';
-    next.branchCandidates = next.branchCandidates.map(item => item.id === id ? { ...item, status: 'active' } : item);
+    next.branchCandidates = next.branchCandidates.map(item => item.id === id
+        ? { ...item, status: 'active' }
+        : { ...item, status: item.status === 'active' ? 'candidate' : item.status });
     return next;
+}
+
+export function clearActiveBranch(state) {
+    return selectBranch(state, '');
+}
+
+export function setCurrentDirectorBeat(state, arcId, beatId) {
+    const next = normalizeDirectorState(state);
+    const arc = next.mainPlan?.arcs?.find(item => item.id === String(arcId || ''));
+    const beat = arc?.beats?.find(item => item.id === String(beatId || ''));
+    if (!arc || !beat) return next;
+    next.currentArcId = arc.id;
+    next.currentBeatId = beat.id;
+    next.turnsSpent = 0;
+    return next;
+}
+
+export function directorProgressSnapshot(state) {
+    const director = normalizeDirectorState(state);
+    const { arc, beat } = activeBeat(director);
+    const arcs = director.mainPlan?.arcs || [];
+    const beats = arcs.flatMap(item => item.beats || []);
+    const lastProgress = director.progressLog.at(-1) || null;
+    return {
+        hasPlan: Boolean(director.mainPlan),
+        arc,
+        beat,
+        arcIndex: arc ? arcs.findIndex(item => item.id === arc.id) : -1,
+        arcTotal: arcs.length,
+        beatIndex: arc && beat ? arc.beats.findIndex(item => item.id === beat.id) : -1,
+        beatTotal: arc?.beats?.length || 0,
+        completedArcs: arcs.filter(item => item.status === 'completed').length,
+        completedBeats: beats.filter(item => item.status === 'completed').length,
+        totalBeats: beats.length,
+        turnsSpent: director.turnsSpent,
+        lastProgress,
+    };
 }
 
 export function applyForeshadowsToDirector(state, packet) {

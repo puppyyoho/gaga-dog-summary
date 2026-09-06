@@ -54,15 +54,20 @@ import {
     applyProgressToDirector,
     buildDirectorPrompt,
     buildExecutionCard,
+    clearActiveBranch,
     createEmptyDirectorState,
+    directorProgressSnapshot,
     getDirectorPreset,
     lockMainline,
     normalizeBranches,
     normalizeDirectorState,
     normalizeForeshadows,
+    normalizeMainPlan,
     PACING_OPTIONS,
     parseDirectorPacket,
     selectBranch,
+    setCurrentDirectorBeat,
+    unlockMainline,
 } from './director-core.js';
 import {
     buildCalendarContext,
@@ -93,10 +98,11 @@ const INJECTION_ID = `${EXTENSION_NAME}:memory`;
 const DIRECTOR_INJECTION_ID = `${EXTENSION_NAME}:director`;
 const PANEL_LOGO_URL = new URL('./assets/gaga-dog-logo.png', import.meta.url).href;
 const FLOATING_LOGO_URL = new URL('./assets/gaga-dog-floating.png', import.meta.url).href;
-const VERSION = '0.5.5';
-const SETTINGS_VERSION = 9;
+const VERSION = '0.5.6';
+const SETTINGS_VERSION = 10;
 
 const DEFAULT_SETTINGS = {
+    workshopEnabled: true,
     showFloatingButton: true,
     floatingIconSize: 62,
     floatingIconData: '',
@@ -245,6 +251,7 @@ function getSettings(ctx = getContext()) {
     delete result.autoSummarize;
     delete result.triggerTokens;
     result.settingsVersion = SETTINGS_VERSION;
+    result.workshopEnabled = result.workshopEnabled !== false;
     result.prompts = { ...DEFAULT_PROMPTS, ...(current?.prompts && typeof current.prompts === 'object' ? current.prompts : {}) };
     result.summaryMode = ['novel', 'structured', 'mixed'].includes(result.summaryMode) ? result.summaryMode : DEFAULT_SETTINGS.summaryMode;
     result.memoryMode = ['manual', 'layered'].includes(result.memoryMode) ? result.memoryMode : DEFAULT_SETTINGS.memoryMode;
@@ -900,7 +907,7 @@ async function summarizeRange(ctx, range, settings, reason = 'manual', resumeTas
 async function applyInjection(ctx = getContext(), chatState = getChatState(ctx), settings = getSettings(ctx)) {
     const messages = getMessages(ctx);
     chatState.memoryMode = settings.memoryMode;
-    if (!chatState.enabled) {
+    if (!settings.workshopEnabled || !chatState.enabled) {
         if (typeof ctx.setExtensionPrompt === 'function') await ctx.setExtensionPrompt(INJECTION_ID, '', 1, 0, false, 0);
         return '';
     }
@@ -1102,6 +1109,11 @@ async function clearDirectorAll(ctx) {
 }
 
 async function updateDirectorInjection(ctx = getContext()) {
+    const settings = getSettings(ctx);
+    if (!settings.workshopEnabled) {
+        if (typeof ctx.setExtensionPrompt === 'function') await ctx.setExtensionPrompt(DIRECTOR_INJECTION_ID, '', 1, 0, false, 0);
+        return '';
+    }
     const state = getChatState(ctx);
     const director = normalizeDirectorState(state.director || createEmptyDirectorState());
     const calendarContext = calendarContextFor(ctx, director, 8);
@@ -1124,7 +1136,7 @@ async function updateDirectorInjection(ctx = getContext()) {
 async function trackDirectorProgress(ctx = getContext()) {
     const settings = getSettings(ctx);
     const director = getDirectorState(ctx);
-    if (!director.enabled || !director.toggles.autoTrack || !director.currentBeatId || runtime.directorBusy) return null;
+    if (!settings.workshopEnabled || !director.enabled || !director.toggles.autoTrack || !director.currentBeatId || runtime.directorBusy) return null;
     const calendarContext = calendarContextFor(ctx, director, 6);
     const prompt = buildDirectorPrompt({
         task: 'progress',
@@ -1168,6 +1180,10 @@ async function trackDirectorProgress(ctx = getContext()) {
 async function prepareDirectorForGeneration(ctx, type, options, dryRun) {
     const ignored = new Set(['quiet', 'extension', 'command']);
     if (dryRun || ignored.has(String(type || '').toLowerCase())) return;
+    if (!getSettings(ctx).workshopEnabled) {
+        try { await ctx.setExtensionPrompt?.(DIRECTOR_INJECTION_ID, '', 1, 0, false, 0); } catch { /* Best effort cleanup. */ }
+        return;
+    }
     try {
         await updateDirectorInjection(ctx);
     } catch (error) {
@@ -1340,6 +1356,7 @@ function pauseLayeredAfterError(ctx, message) {
 async function startLayeredAuto() {
     const ctx = getContext();
     const settings = getSettings(ctx);
+    if (!settings.workshopEnabled) return;
     if (runtime.busy || runtime.workflowActive || runtime.capsuleBusy || runtime.directorBusy || runtime.replyBusy) {
         notify('info', '当前还有生成任务进行中，请稍后再启动自动记录。');
         return;
@@ -1719,7 +1736,7 @@ async function stopHistoricalBackfill() {
 async function processLayeredMemory() {
     const ctx = getContext();
     const settings = getSettings(ctx);
-    if (!settings.layeredAutoEnabled || runtime.layeredPausedByError || settings.memoryMode !== 'layered' || layeredTaskBlocked(ctx)) return;
+    if (!settings.workshopEnabled || !settings.layeredAutoEnabled || runtime.layeredPausedByError || settings.memoryMode !== 'layered' || layeredTaskBlocked(ctx)) return;
     const state = getChatState(ctx);
     if (layeredNeedsInitialSummary(ctx, state, settings)) return;
     const capsule = await buildNextRoundCapsule(ctx);
@@ -1737,10 +1754,11 @@ async function processLayeredMemory() {
 function scheduleLayeredMemory(delay = 1400) {
     let settings;
     try { settings = getSettings(); } catch { return; }
-    if (!settings.layeredAutoEnabled || runtime.layeredPausedByError || runtime.layeredTimer) return;
+    if (!settings.workshopEnabled || !settings.layeredAutoEnabled || runtime.layeredPausedByError || runtime.layeredTimer) return;
     runtime.layeredTimer = setTimeout(async () => {
         runtime.layeredTimer = null;
-        if (!getSettings().layeredAutoEnabled || runtime.layeredPausedByError) return;
+        const currentSettings = getSettings();
+        if (!currentSettings.workshopEnabled || !currentSettings.layeredAutoEnabled || runtime.layeredPausedByError) return;
         try {
             await processLayeredMemory();
         } catch (error) {
@@ -2095,6 +2113,12 @@ async function rebuildFromStart() {
 async function reconcileAndRefresh() {
     try {
         const ctx = getContext();
+        const settings = getSettings(ctx);
+        if (!settings.workshopEnabled) {
+            await clearWorkshopInjections(ctx);
+            refreshUi();
+            return;
+        }
         const current = getChatState(ctx);
         const checkpointResult = await invalidateIfNeeded(ctx, current);
         const capsuleResult = await invalidateRoundCapsulesIfNeeded(ctx, checkpointResult.state);
@@ -2105,10 +2129,10 @@ async function reconcileAndRefresh() {
         };
         if (result.changed) {
             await saveChat(ctx);
-            await applyInjection(ctx, result.state, getSettings(ctx));
+            await applyInjection(ctx, result.state, settings);
             notify('warning', `检测到已记录消息发生变化，已撤销 ${result.affected} 个受影响的记忆记录。`);
         } else {
-            await applyInjection(ctx, current, getSettings(ctx));
+            await applyInjection(ctx, current, settings);
         }
         await updateDirectorInjection(ctx);
         refreshUi();
@@ -2176,26 +2200,147 @@ async function restoreLatestCapsuleArchive(ctx) {
     return restored;
 }
 
+function renderDirectorProgress(director) {
+    const progress = directorProgressSnapshot(director);
+    if (!progress.hasPlan) return '<div class="gds-director-progress empty"><strong>当前阶段：尚未生成长线规划</strong><span>生成规划后会在这里显示推进位置。</span></div>';
+    if (!progress.arc) return `<div class="gds-director-progress completed"><strong>当前阶段：全部规划已完成</strong><span>已完成 ${progress.completedBeats}/${progress.totalBeats} 个节拍。</span></div>`;
+    const tracking = director.toggles?.autoTrack ? '自动跟踪已开启' : '自动跟踪已关闭，可手动指定节拍';
+    return `<div class="gds-director-progress">
+        <div><strong>当前阶段：第 ${progress.arcIndex + 1}/${progress.arcTotal} 幕 · ${escapeHtml(progress.arc.title)}</strong><span>${tracking}</span></div>
+        <p>当前节拍 ${progress.beatIndex + 1}/${progress.beatTotal}：${escapeHtml(progress.beat?.goal || '等待设置')}</p>
+        <small>本节拍已推进 ${progress.turnsSpent} 轮 · 全局完成 ${progress.completedBeats}/${progress.totalBeats} 个节拍${progress.lastProgress?.confidence ? ` · 最近判断置信度 ${escapeHtml(progress.lastProgress.confidence)}` : ''}</small>
+    </div>`;
+}
+
+function renderEditList(value) {
+    return escapeHtml((Array.isArray(value) ? value : []).join('\n'));
+}
+
 function renderDirectorPlan(director) {
     const plan = director?.mainPlan;
     if (!plan) return '<div class="gds-empty">还没有主线规划。输入要求后点击“生成长线规划”。</div>';
-    const arcs = (plan.arcs || []).map(arc => {
-        const beat = (arc.beats || []).find(item => item.id === director.currentBeatId) || (arc.beats || []).find(item => item.status !== 'completed');
-        return `<div class="gds-plan-arc"><strong>${escapeHtml(arc.title)}</strong><small>${escapeHtml(arc.pacing || 'balanced')} · 预计 ${Number(arc.estimatedTurns || 0)} 轮</small><p>${escapeHtml(arc.goal || '')}</p>${beat ? `<em>当前节拍：${escapeHtml(beat.goal || '')}</em>` : '<em>阶段已完成</em>'}</div>`;
+    const outline = plan.outline?.length ? plan.outline : (plan.arcs || []).map(arc => `${arc.title}：${arc.goal}`).filter(Boolean);
+    const arcs = (plan.arcs || []).map((arc, arcIndex) => {
+        const beats = (arc.beats || []).map((beat, beatIndex) => `<div class="gds-beat-editor ${beat.id === director.currentBeatId ? 'current' : ''}" data-gds-edit-beat="${escapeHtml(beat.id)}">
+            <div class="gds-edit-row"><strong>节拍 ${beatIndex + 1}${beat.id === director.currentBeatId ? ' · 当前' : ''}</strong><button type="button" data-gds-director-set-beat="${escapeHtml(beat.id)}" data-gds-director-set-arc="${escapeHtml(arc.id)}">设为当前节拍</button></div>
+            <label>节拍目标<textarea rows="2" data-gds-edit-beat-goal>${escapeHtml(beat.goal || '')}</textarea></label>
+            <div class="gds-edit-columns"><label>允许内容<textarea rows="2" data-gds-edit-beat-allowed>${renderEditList(beat.allowed)}</textarea></label><label>禁止提前发生<textarea rows="2" data-gds-edit-beat-forbidden>${renderEditList(beat.forbidden)}</textarea></label><label>完成条件<textarea rows="2" data-gds-edit-beat-completion>${renderEditList(beat.completion)}</textarea></label></div>
+        </div>`).join('');
+        return `<article class="gds-plan-arc ${arc.id === director.currentArcId ? 'current' : ''}" data-gds-edit-arc="${escapeHtml(arc.id)}">
+            <div class="gds-edit-row"><strong>第 ${arcIndex + 1} 幕</strong><small>${escapeHtml(arc.pacing || 'balanced')} · 预计 ${Number(arc.estimatedTurns || 0)} 轮</small></div>
+            <label>阶段标题<input type="text" data-gds-edit-arc-title value="${escapeHtml(arc.title)}"></label>
+            <div class="gds-edit-columns"><label>阶段目标<textarea rows="2" data-gds-edit-arc-goal>${escapeHtml(arc.goal || '')}</textarea></label><label>核心冲突<textarea rows="2" data-gds-edit-arc-conflict>${escapeHtml(arc.conflict || '')}</textarea></label></div>
+            <div class="gds-beat-list">${beats || '<span class="gds-empty">本阶段还没有节拍。</span>'}</div>
+        </article>`;
     }).join('');
-    return `<div class="gds-plan-head"><strong>${escapeHtml(plan.title)}</strong><span>${plan.status === 'locked' ? '已锁定' : '草案'}</span></div><p>${escapeHtml(plan.premise || '')}</p><div class="gds-plan-arcs">${arcs}</div><button data-gds-director-lock ${plan.status === 'locked' ? 'disabled' : ''}>${plan.status === 'locked' ? '主线已锁定' : '确认并锁定主线'}</button>`;
+    return `${renderDirectorProgress(director)}<div class="gds-plan-outline"><h5>简明剧情总纲</h5><textarea rows="5" data-gds-edit-outline>${renderEditList(outline)}</textarea></div>
+        <div class="gds-plan-editor" data-gds-edit-plan>
+            <div class="gds-plan-head"><input type="text" data-gds-edit-plan-title value="${escapeHtml(plan.title)}"><span>${plan.status === 'locked' ? '主线已确认' : '主线草案'}</span></div>
+            <div class="gds-edit-columns"><label>核心前提<textarea rows="3" data-gds-edit-plan-premise>${escapeHtml(plan.premise || '')}</textarea></label><label>结局方向<textarea rows="3" data-gds-edit-plan-ending>${escapeHtml(plan.ending || '')}</textarea></label></div>
+            <div class="gds-plan-arcs">${arcs}</div>
+            <div class="gds-plan-confirm">${plan.status === 'locked' ? '<button type="button" data-gds-director-unlock>取消确认主线</button>' : '<button type="button" data-gds-director-lock>确认并锁定主线</button>'}</div>
+        </div>`;
 }
 
 function renderDirectorBranches(director) {
     const branches = Array.isArray(director?.branchCandidates) ? director.branchCandidates : [];
     if (!branches.length) return '<div class="gds-empty">还没有分支候选。</div>';
-    return branches.map(branch => `<article class="gds-branch-card ${branch.id === director.activeBranchId ? 'active' : ''}"><strong>${escapeHtml(branch.title)}</strong><p>${escapeHtml(branch.summary)}</p><small>${escapeHtml(branch.reason || '')}</small><button data-gds-director-select-branch="${escapeHtml(branch.id)}">${branch.id === director.activeBranchId ? '当前执行中' : '采用此分支'}</button></article>`).join('');
+    return branches.map(branch => `<article class="gds-branch-card ${branch.id === director.activeBranchId ? 'active' : ''}" data-gds-edit-branch="${escapeHtml(branch.id)}">
+        <label>分支标题<input type="text" data-gds-edit-branch-title value="${escapeHtml(branch.title)}"></label>
+        <label>分支内容<textarea rows="3" data-gds-edit-branch-summary>${escapeHtml(branch.summary)}</textarea></label>
+        <label>采用理由<textarea rows="2" data-gds-edit-branch-reason>${escapeHtml(branch.reason || '')}</textarea></label>
+        <div class="gds-edit-columns"><label>预期后果<textarea rows="2" data-gds-edit-branch-consequences>${renderEditList(branch.consequences)}</textarea></label><label>风险<textarea rows="2" data-gds-edit-branch-risks>${renderEditList(branch.risks)}</textarea></label></div>
+        ${branch.id === director.activeBranchId ? '<button type="button" data-gds-director-clear-branch>取消采用当前分支</button>' : `<button type="button" data-gds-director-select-branch="${escapeHtml(branch.id)}">采用此分支</button>`}
+    </article>`).join('');
 }
 
 function renderDirectorForeshadows(director) {
     const items = Array.isArray(director?.foreshadows) ? director.foreshadows : [];
     if (!items.length) return '<div class="gds-empty">还没有伏笔方案。</div>';
-    return items.map(item => `<article class="gds-foreshadow-card"><strong>${escapeHtml(item.name)}</strong><span>${escapeHtml(item.status)}</span><p>${escapeHtml(item.surface)}</p><small>真实含义：${escapeHtml(item.meaning || '待补充')}</small></article>`).join('');
+    return items.map(item => `<article class="gds-foreshadow-card" data-gds-edit-foreshadow="${escapeHtml(item.id)}">
+        <div class="gds-edit-row"><label>伏笔名称<input type="text" data-gds-edit-foreshadow-name value="${escapeHtml(item.name)}"></label><label>状态<input type="text" data-gds-edit-foreshadow-status value="${escapeHtml(item.status)}"></label></div>
+        <label>表面信号<textarea rows="2" data-gds-edit-foreshadow-surface>${escapeHtml(item.surface)}</textarea></label>
+        <label>真实含义<textarea rows="2" data-gds-edit-foreshadow-meaning>${escapeHtml(item.meaning || '')}</textarea></label>
+        <div class="gds-edit-columns"><label>提示信号<textarea rows="2" data-gds-edit-foreshadow-signals>${renderEditList(item.signals)}</textarea></label><label>建议回收阶段<input type="text" data-gds-edit-foreshadow-target value="${escapeHtml(item.targetArc || '')}"></label></div>
+    </article>`).join('');
+}
+
+function parseDirectorEditLines(value, max = 30) {
+    return String(value || '').split(/\r?\n/).map(item => item.trim()).filter(Boolean).slice(0, max);
+}
+
+async function saveDirectorContentEdits(ctx) {
+    const current = getDirectorState(ctx);
+    const planRoot = runtime.overlay?.querySelector('[data-gds-edit-plan]');
+    let mainPlan = current.mainPlan;
+    if (mainPlan && planRoot) {
+        const arcs = [...planRoot.querySelectorAll('[data-gds-edit-arc]')].map(arcNode => {
+            const original = mainPlan.arcs.find(item => item.id === arcNode.dataset.gdsEditArc);
+            if (!original) return null;
+            const beats = [...arcNode.querySelectorAll('[data-gds-edit-beat]')].map(beatNode => {
+                const beat = original.beats.find(item => item.id === beatNode.dataset.gdsEditBeat);
+                if (!beat) return null;
+                return {
+                    ...beat,
+                    goal: beatNode.querySelector('[data-gds-edit-beat-goal]')?.value || '',
+                    allowed: parseDirectorEditLines(beatNode.querySelector('[data-gds-edit-beat-allowed]')?.value),
+                    forbidden: parseDirectorEditLines(beatNode.querySelector('[data-gds-edit-beat-forbidden]')?.value),
+                    completion: parseDirectorEditLines(beatNode.querySelector('[data-gds-edit-beat-completion]')?.value),
+                };
+            }).filter(Boolean);
+            return {
+                ...original,
+                title: arcNode.querySelector('[data-gds-edit-arc-title]')?.value || original.title,
+                goal: arcNode.querySelector('[data-gds-edit-arc-goal]')?.value || '',
+                conflict: arcNode.querySelector('[data-gds-edit-arc-conflict]')?.value || '',
+                beats,
+            };
+        }).filter(Boolean);
+        mainPlan = normalizeMainPlan({
+            ...mainPlan,
+            title: planRoot.querySelector('[data-gds-edit-plan-title]')?.value || mainPlan.title,
+            outline: parseDirectorEditLines(runtime.overlay.querySelector('[data-gds-edit-outline]')?.value, 12),
+            premise: planRoot.querySelector('[data-gds-edit-plan-premise]')?.value || '',
+            ending: planRoot.querySelector('[data-gds-edit-plan-ending]')?.value || '',
+            arcs,
+            status: mainPlan.status,
+            createdAt: mainPlan.createdAt,
+        });
+        mainPlan.status = current.mainPlan.status;
+    }
+
+    const branchNodes = [...(runtime.overlay?.querySelectorAll('[data-gds-edit-branch]') || [])];
+    const branchCandidates = branchNodes.length ? normalizeBranches(branchNodes.map(node => {
+        const original = current.branchCandidates.find(item => item.id === node.dataset.gdsEditBranch) || {};
+        return {
+            ...original,
+            title: node.querySelector('[data-gds-edit-branch-title]')?.value || original.title,
+            summary: node.querySelector('[data-gds-edit-branch-summary]')?.value || '',
+            reason: node.querySelector('[data-gds-edit-branch-reason]')?.value || '',
+            consequences: parseDirectorEditLines(node.querySelector('[data-gds-edit-branch-consequences]')?.value),
+            risks: parseDirectorEditLines(node.querySelector('[data-gds-edit-branch-risks]')?.value),
+        };
+    })) : current.branchCandidates;
+
+    const foreshadowNodes = [...(runtime.overlay?.querySelectorAll('[data-gds-edit-foreshadow]') || [])];
+    const foreshadows = foreshadowNodes.length ? normalizeForeshadows(foreshadowNodes.map(node => {
+        const original = current.foreshadows.find(item => item.id === node.dataset.gdsEditForeshadow) || {};
+        return {
+            ...original,
+            name: node.querySelector('[data-gds-edit-foreshadow-name]')?.value || original.name,
+            status: node.querySelector('[data-gds-edit-foreshadow-status]')?.value || original.status,
+            surface: node.querySelector('[data-gds-edit-foreshadow-surface]')?.value || '',
+            meaning: node.querySelector('[data-gds-edit-foreshadow-meaning]')?.value || '',
+            signals: parseDirectorEditLines(node.querySelector('[data-gds-edit-foreshadow-signals]')?.value),
+            targetArc: node.querySelector('[data-gds-edit-foreshadow-target]')?.value || '',
+        };
+    })) : current.foreshadows;
+
+    const next = normalizeDirectorState({ ...current, mainPlan, branchCandidates, foreshadows });
+    await saveChatStateAndRefresh(ctx, { ...getChatState(ctx), director: next });
+    await updateDirectorInjection(ctx);
+    notify('success', '导演方案的手动修改已保存并更新执行卡。');
+    return next;
 }
 
 function renderCalendarEvents(calendar, context) {
@@ -2743,7 +2888,7 @@ function refreshUi() {
     syncApiFormFromSelectedProvider(ctx);
     const activeApiModule = runtime.apiFormModule || 'director';
     const activeProvider = selectedProviderForModule(ctx, activeApiModule).profile;
-    if (activeProvider.kind === 'connection' || activeProvider.kind === 'openai-compatible') {
+    if (settings.workshopEnabled && (activeProvider.kind === 'connection' || activeProvider.kind === 'openai-compatible')) {
         pullModelsForProvider(ctx, activeApiModule).catch(error => console.warn(`[${DISPLAY_NAME}] 自动拉取模型失败`, error));
     }
     const chatState = getChatState(ctx);
@@ -2951,11 +3096,11 @@ function refreshUi() {
     const directorOutput = runtime.overlay.querySelector('[data-gds-director-output]');
     if (directorOutput && document.activeElement !== directorOutput) directorOutput.value = runtime.directorText || director.lastExecutionCard || '';
     const directorPlan = runtime.overlay.querySelector('[data-gds-director-plan]');
-    if (directorPlan) directorPlan.innerHTML = renderDirectorPlan(director);
+    if (directorPlan && !directorPlan.contains(document.activeElement)) directorPlan.innerHTML = renderDirectorPlan(director);
     const branchList = runtime.overlay.querySelector('[data-gds-director-branches]');
-    if (branchList) branchList.innerHTML = renderDirectorBranches(director);
+    if (branchList && !branchList.contains(document.activeElement)) branchList.innerHTML = renderDirectorBranches(director);
     const foreshadowList = runtime.overlay.querySelector('[data-gds-director-foreshadows]');
-    if (foreshadowList) foreshadowList.innerHTML = renderDirectorForeshadows(director);
+    if (foreshadowList && !foreshadowList.contains(document.activeElement)) foreshadowList.innerHTML = renderDirectorForeshadows(director);
     const calendarEnabled = runtime.overlay.querySelector('[data-gds-calendar-enabled]');
     const calendarBuiltins = runtime.overlay.querySelector('[data-gds-calendar-builtins]');
     const calendarAutoAdvance = runtime.overlay.querySelector('[data-gds-calendar-auto-advance]');
@@ -3039,6 +3184,7 @@ function applyFloatingPosition() {
 function applyFloatingAppearance() {
     if (!runtime.floating) return;
     const settings = getSettings();
+    runtime.floating.hidden = !settings.workshopEnabled || !settings.showFloatingButton;
     const size = settings.floatingIconSize;
     runtime.floating.style.width = `${size}px`;
     runtime.floating.style.height = `${size}px`;
@@ -3055,6 +3201,63 @@ function persistFloatingAppearance(mutator) {
     saveSettings(ctx);
     applyFloatingAppearance();
     refreshUi();
+}
+
+async function clearWorkshopInjections(ctx = getContext()) {
+    if (typeof ctx.setExtensionPrompt !== 'function') return;
+    const results = await Promise.allSettled([
+        ctx.setExtensionPrompt(INJECTION_ID, '', 1, 0, false, 0),
+        ctx.setExtensionPrompt(DIRECTOR_INJECTION_ID, '', 1, 0, false, 0),
+    ]);
+    for (const result of results) {
+        if (result.status === 'rejected') console.warn(`[${DISPLAY_NAME}] 关闭插件时撤销提示词失败`, result.reason);
+    }
+}
+
+function suspendWorkshopOperations(ctx = getContext()) {
+    clearLayeredTimer();
+    runtime.taskSerial += 1;
+    runtime.backfillStopRequested = true;
+    const activeGeneration = runtime.busy || runtime.workflowActive || runtime.capsuleBusy || runtime.backfillBusy || runtime.directorBusy || runtime.replyBusy;
+    const reason = new DOMException('嘎嘎小狗工坊已关闭', 'AbortError');
+    const controllers = new Set([
+        runtime.abortController,
+        runtime.capsuleController,
+        runtime.directorAbortController,
+        runtime.replyAbortController,
+        runtime.modelPullController,
+    ].filter(Boolean));
+    for (const controller of controllers) {
+        try { controller.abort(reason); } catch { /* The task may already be ending. */ }
+    }
+    if (activeGeneration) {
+        try { ctx.stopGeneration?.(); } catch (error) {
+            console.warn(`[${DISPLAY_NAME}] 关闭插件时停止生成失败`, error);
+        }
+    }
+}
+
+async function setWorkshopEnabled(enabled) {
+    const ctx = getContext();
+    const settings = getSettings(ctx);
+    settings.workshopEnabled = Boolean(enabled);
+    ctx.extensionSettings[SETTINGS_KEY] = settings;
+    saveSettings(ctx);
+
+    if (!settings.workshopEnabled) {
+        suspendWorkshopOperations(ctx);
+        runtime.open = false;
+        if (runtime.overlay) runtime.overlay.hidden = true;
+        document.body.classList.remove('gds-panel-open');
+        await clearWorkshopInjections(ctx);
+        refreshUi();
+        notify('info', '嘎嘎小狗工坊已关闭，数据和配置均已保留。');
+        return;
+    }
+
+    await reconcileAndRefresh();
+    if (settings.layeredAutoEnabled) scheduleLayeredMemory(600);
+    notify('success', '嘎嘎小狗工坊已开启。');
 }
 
 function readImageAsDataUrl(file) {
@@ -3391,7 +3594,7 @@ function createUi() {
                     <label class="gds-toggle-row"><input type="checkbox" data-gds-director-toggle="autoTrack"><span>自动判断节拍进度</span></label>
                 </div>
                 <label class="gds-field gds-wide"><span>自定义规划要求（可写题材、必做、禁用和结局）</span><textarea rows="6" data-gds-director-brief placeholder="例如：破镜重圆，过程酸涩慢热；中期引入一名知道秘密的新角色；结局 HE，不使用失忆推动。"></textarea></label>
-                <div class="gds-director-actions"><button class="gds-primary" data-gds-director-longline>生成长线规划</button><button data-gds-director-branch>生成当前分支</button><button data-gds-director-foreshadow>设计伏笔</button><button data-gds-director-save>保存导演设置</button></div>
+                <div class="gds-director-actions"><button class="gds-primary" data-gds-director-longline>生成长线规划</button><button data-gds-director-branch>生成当前分支</button><button data-gds-director-foreshadow>设计伏笔</button><button data-gds-director-progress>检查当前阶段</button><button data-gds-director-save>保存导演设置</button><button data-gds-director-save-content>保存手动修改</button></div>
                 <label class="gds-field gds-wide"><span>导演模型原始返回／当前执行卡</span><textarea rows="8" readonly data-gds-director-output></textarea></label>
                 <div class="gds-director-block"><h4>当前主线</h4><div data-gds-director-plan></div></div>
                 <div class="gds-director-block"><h4>分支候选</h4><div data-gds-director-branches></div></div>
@@ -3455,7 +3658,7 @@ function createUi() {
 
     overlay.addEventListener('click', async event => {
         event.stopPropagation();
-        const target = event.target.closest('[data-gds-tab],[data-gds-close],[data-gds-summarize],[data-gds-layered-start],[data-gds-layered-pause],[data-gds-layered-stop],[data-gds-backfill-start],[data-gds-backfill-continue],[data-gds-backfill-restart],[data-gds-backfill-stop],[data-gds-consolidate],[data-gds-restore-archive],[data-gds-continue],[data-gds-stop],[data-gds-rebuild],[data-gds-restore],[data-gds-save-summary],[data-gds-api-save],[data-gds-api-test],[data-gds-director-longline],[data-gds-director-branch],[data-gds-director-foreshadow],[data-gds-director-save],[data-gds-director-lock],[data-gds-director-select-branch],[data-gds-director-stop],[data-gds-director-continue],[data-gds-director-restart],[data-gds-director-clear],[data-gds-calendar-add],[data-gds-calendar-remove],[data-gds-calendar-sync],[data-gds-reply-generate],[data-gds-reply-copy],[data-gds-reply-insert],[data-gds-reply-stop]');
+        const target = event.target.closest('[data-gds-tab],[data-gds-close],[data-gds-summarize],[data-gds-layered-start],[data-gds-layered-pause],[data-gds-layered-stop],[data-gds-backfill-start],[data-gds-backfill-continue],[data-gds-backfill-restart],[data-gds-backfill-stop],[data-gds-consolidate],[data-gds-restore-archive],[data-gds-continue],[data-gds-stop],[data-gds-rebuild],[data-gds-restore],[data-gds-save-summary],[data-gds-api-save],[data-gds-api-test],[data-gds-director-longline],[data-gds-director-branch],[data-gds-director-foreshadow],[data-gds-director-progress],[data-gds-director-save],[data-gds-director-save-content],[data-gds-director-lock],[data-gds-director-unlock],[data-gds-director-select-branch],[data-gds-director-clear-branch],[data-gds-director-set-beat],[data-gds-director-stop],[data-gds-director-continue],[data-gds-director-restart],[data-gds-director-clear],[data-gds-calendar-add],[data-gds-calendar-remove],[data-gds-calendar-sync],[data-gds-reply-generate],[data-gds-reply-copy],[data-gds-reply-insert],[data-gds-reply-stop]');
         if (!target) return;
         try {
             if (target.matches('[data-gds-tab]')) {
@@ -3500,6 +3703,7 @@ function createUi() {
                 await updateDirectorInjection(ctx);
                 notify('success', '导演设置已保存。');
             }
+            if (target.matches('[data-gds-director-save-content]')) await saveDirectorContentEdits(getContext());
             if (target.matches('[data-gds-director-longline],[data-gds-director-branch],[data-gds-director-foreshadow]')) {
                 const ctx = getContext();
                 updateDirectorFromUi(ctx);
@@ -3507,6 +3711,7 @@ function createUi() {
                 const task = target.matches('[data-gds-director-longline]') ? 'longline' : target.matches('[data-gds-director-branch]') ? 'branch' : 'foreshadow';
                 await runDirectorTask(ctx, task);
             }
+            if (target.matches('[data-gds-director-progress]')) await runDirectorTask(getContext(), 'progress');
             if (target.matches('[data-gds-director-lock]')) {
                 const ctx = getContext();
                 const next = lockMainline(getDirectorState(ctx));
@@ -3514,12 +3719,36 @@ function createUi() {
                 await updateDirectorInjection(ctx);
                 notify('success', '主线已锁定。');
             }
+            if (target.matches('[data-gds-director-unlock]')) {
+                const ctx = getContext();
+                const confirmed = !globalThis.confirm || globalThis.confirm('确定取消主线确认吗？取消后仍会保留全部规划内容，但可以重新生成或修改主线。');
+                if (confirmed) {
+                    const next = unlockMainline(getDirectorState(ctx));
+                    await saveChatStateAndRefresh(ctx, { ...getChatState(ctx), director: next });
+                    await updateDirectorInjection(ctx);
+                    notify('info', '已取消主线确认。');
+                }
+            }
             if (target.matches('[data-gds-director-select-branch]')) {
                 const ctx = getContext();
                 const next = selectBranch(getDirectorState(ctx), target.dataset.gdsDirectorSelectBranch);
                 await saveChatStateAndRefresh(ctx, { ...getChatState(ctx), director: next });
                 await updateDirectorInjection(ctx);
                 notify('success', '当前分支已采用。');
+            }
+            if (target.matches('[data-gds-director-clear-branch]')) {
+                const ctx = getContext();
+                const next = clearActiveBranch(getDirectorState(ctx));
+                await saveChatStateAndRefresh(ctx, { ...getChatState(ctx), director: next });
+                await updateDirectorInjection(ctx);
+                notify('info', '已取消采用当前分支。');
+            }
+            if (target.matches('[data-gds-director-set-beat]')) {
+                const ctx = getContext();
+                const next = setCurrentDirectorBeat(getDirectorState(ctx), target.dataset.gdsDirectorSetArc, target.dataset.gdsDirectorSetBeat);
+                await saveChatStateAndRefresh(ctx, { ...getChatState(ctx), director: next });
+                await updateDirectorInjection(ctx);
+                notify('success', '当前剧情阶段已更新。');
             }
             if (target.matches('[data-gds-director-stop]')) stopDirectorTask();
             if (target.matches('[data-gds-director-continue]')) await continueDirectorTask(getContext());
@@ -3658,6 +3887,10 @@ function createSettingsEntry() {
             </div>
             <div class="inline-drawer-content">
                 <p>完整梳理或逐轮记录前情，保留剧情记忆，并让已覆盖的旧正文安全退出模型上下文。</p>
+                <label class="gds-master-switch">
+                    <span><strong>启用嘎嘎小狗工坊</strong><small data-gds-workshop-status>关闭后暂停运行并撤销提示词注入</small></span>
+                    <input type="checkbox" data-gds-workshop-enabled aria-label="启用嘎嘎小狗工坊">
+                </label>
                 <button class="menu_button gds-open-settings" type="button" data-gds-open-settings><img class="gds-entry-puppy" src="${escapeHtml(PANEL_LOGO_URL)}" alt="" aria-hidden="true"><span>打开${DISPLAY_NAME}</span></button>
                 <div class="gds-floating-settings">
                     <label class="gds-floating-size"><span>悬浮窗图标大小 <output data-gds-floating-size-value>62 px</output></span><input type="range" min="32" max="120" step="1" value="62" data-gds-floating-size></label>
@@ -3672,6 +3905,19 @@ function createSettingsEntry() {
         </div>`;
     host.appendChild(entry);
     entry.querySelector('[data-gds-open-settings]').addEventListener('click', () => togglePanel(true));
+    const enabledInput = entry.querySelector('[data-gds-workshop-enabled]');
+    enabledInput?.addEventListener('change', async () => {
+        enabledInput.disabled = true;
+        try {
+            await setWorkshopEnabled(enabledInput.checked);
+        } catch (error) {
+            console.error(`[${DISPLAY_NAME}] 切换插件状态失败`, error);
+            notify('error', `切换插件状态失败：${readableGenerationError(error)}`);
+        } finally {
+            enabledInput.disabled = false;
+            refreshSettingsEntry();
+        }
+    });
     const sizeInput = entry.querySelector('[data-gds-floating-size]');
     const sizeOutput = entry.querySelector('[data-gds-floating-size-value]');
     sizeInput?.addEventListener('input', () => {
@@ -3696,6 +3942,15 @@ function refreshSettingsEntry() {
     if (!entry) return;
     let settings;
     try { settings = getSettings(); } catch { return; }
+    const enabledInput = entry.querySelector('[data-gds-workshop-enabled]');
+    const enabledStatus = entry.querySelector('[data-gds-workshop-status]');
+    const openButton = entry.querySelector('[data-gds-open-settings]');
+    if (enabledInput && !enabledInput.disabled) enabledInput.checked = settings.workshopEnabled;
+    if (enabledStatus) enabledStatus.textContent = settings.workshopEnabled
+        ? '运行中 · 点击可暂停插件与提示词注入'
+        : '已关闭 · 记忆、图标和模型配置均已保留';
+    if (openButton) openButton.disabled = !settings.workshopEnabled;
+    entry.classList.toggle('gds-workshop-disabled', !settings.workshopEnabled);
     const sizeInput = entry.querySelector('[data-gds-floating-size]');
     const sizeOutput = entry.querySelector('[data-gds-floating-size-value]');
     if (sizeInput && document.activeElement !== sizeInput) sizeInput.value = String(settings.floatingIconSize);
@@ -3706,6 +3961,10 @@ function refreshSettingsEntry() {
 }
 
 function togglePanel(open) {
+    if (open && !getSettings().workshopEnabled) {
+        notify('info', '请先开启嘎嘎小狗工坊。');
+        return;
+    }
     createUi();
     runtime.open = Boolean(open);
     runtime.overlay.hidden = !runtime.open;
@@ -3795,8 +4054,7 @@ export async function init() {
         globalThis.addEventListener?.('resize', handleViewportChange);
         globalThis.addEventListener?.('orientationchange', handleViewportChange);
         await reconcileAndRefresh();
-        const settings = getSettings(ctx);
-        if (runtime.floating) runtime.floating.hidden = !settings.showFloatingButton;
+        applyFloatingAppearance();
         console.info(`[${DISPLAY_NAME}] v${VERSION} 已加载`);
     } catch (error) {
         console.error(`[${DISPLAY_NAME}] 初始化失败`, error);

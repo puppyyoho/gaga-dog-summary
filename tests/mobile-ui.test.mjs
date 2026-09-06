@@ -106,6 +106,30 @@ test('director exposes pacing, branch, foreshadow and toggle controls', () => {
     assert.match(js, /buildExecutionCard/);
 });
 
+test('director plans are editable, track their current stage and can be unconfirmed', () => {
+    assert.match(js, /data-gds-director-save-content/);
+    assert.match(js, /data-gds-edit-outline/);
+    assert.match(js, /data-gds-edit-plan-title/);
+    assert.match(js, /data-gds-edit-branch-summary/);
+    assert.match(js, /data-gds-edit-foreshadow-meaning/);
+    assert.match(js, /data-gds-director-progress/);
+    assert.match(js, /data-gds-director-set-beat/);
+    assert.match(js, /data-gds-director-unlock/);
+    assert.match(js, /data-gds-director-clear-branch/);
+    assert.match(js, /function saveDirectorContentEdits/);
+    assert.match(css, /\.gds-director-progress/);
+});
+
+test('extension settings expose a master switch that removes both prompt injections', () => {
+    assert.match(js, /workshopEnabled:\s*true/);
+    assert.match(js, /data-gds-workshop-enabled/);
+    assert.match(js, /async function setWorkshopEnabled/);
+    assert.match(js, /async function clearWorkshopInjections/);
+    assert.match(js, /ctx\.setExtensionPrompt\(INJECTION_ID, ''/);
+    assert.match(js, /ctx\.setExtensionPrompt\(DIRECTOR_INJECTION_ID, ''/);
+    assert.match(css, /\.gds-master-switch/);
+});
+
 test('director exposes a story calendar with built-ins, custom events and date sync', () => {
     assert.match(js, /data-gds-calendar-enabled/);
     assert.match(js, /data-gds-calendar-builtins/);
@@ -257,7 +281,7 @@ test('rolling memory stops cleanly and pauses itself after an error', () => {
     assert.match(js, /function stopLayeredAuto/);
     assert.match(js, /runtime\.capsuleController\.abort/);
     assert.match(js, /runtime\.activeOperation === 'layered-consolidation'/);
-    assert.match(js, /if \(!settings\.layeredAutoEnabled \|\| runtime\.layeredPausedByError \|\| runtime\.layeredTimer\) return/);
+    assert.match(js, /if \(!settings\.workshopEnabled \|\| !settings\.layeredAutoEnabled \|\| runtime\.layeredPausedByError \|\| runtime\.layeredTimer\) return/);
     assert.match(js, /自动记录出错后会立即暂停，不会自行反复重试/);
 });
 

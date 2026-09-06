@@ -7,12 +7,16 @@ import {
     applyProgressToDirector,
     buildDirectorPrompt,
     buildExecutionCard,
+    clearActiveBranch,
     createEmptyDirectorState,
     DIRECTOR_PRESETS,
+    directorProgressSnapshot,
     lockMainline,
     normalizeDirectorState,
     parseDirectorPacket,
     selectBranch,
+    setCurrentDirectorBeat,
+    unlockMainline,
 } from '../director-core.js';
 
 test('ships built-in director styles and embeds custom pacing requirements', () => {
@@ -45,6 +49,8 @@ test('keeps future plans separate from factual memory and builds a bounded execu
     const card = buildExecutionCard({ directorState: state, memoryState: { recap: '已发生的重逢', facts: [], state: {}, threads: [] }, recentText: '两人约定下次见面。' });
     assert.match(card, /<gaga_director>/);
     assert.match(card, /不要跨越未完成的节拍/);
+    assert.match(card, /强制执行规则/);
+    assert.match(card, /本轮只能推进当前阶段与当前节拍/);
     assert.match(card, /旧钥匙/);
     assert.doesNotMatch(card, /未来计划是事实/);
 });
@@ -78,9 +84,16 @@ test('normalizes, locks, selects branches and advances beats without mutating fa
     });
     state = lockMainline(state);
     assert.equal(state.mainPlan.status, 'locked');
+    state = unlockMainline(state);
+    assert.equal(state.mainPlan.status, 'draft');
+    state = lockMainline(state);
     state = applyBranchesToDirector(state, { branches: [{ id: 'x', title: '分支', summary: '转向', consequences: ['改变关系'] }] });
     state = selectBranch(state, 'x');
     assert.equal(state.activeBranchId, 'x');
+    state = clearActiveBranch(state);
+    assert.equal(state.activeBranchId, '');
+    assert.equal(state.branchCandidates[0].status, 'candidate');
+    state = selectBranch(state, 'x');
     state = applyForeshadowsToDirector(state, { foreshadows: [{ id: 'f', name: '线索', surface: '一闪而过' }] });
     const next = applyProgressToDirector(state, { beatCompleted: true, completedGoals: ['节拍'], remainingGoals: [] });
     assert.equal(next.mainPlan.arcs[0].beats[0].status, 'completed');
@@ -92,6 +105,22 @@ test('preserves a locked mainline when a later director plan is applied', () => 
     state = lockMainline(state);
     const next = applyLonglineToDirector(state, { title: '续写草案', premise: '补充', arcs: [{ id: 'b', title: '后续', goal: '后续目标', beats: [] }] });
     assert.equal(next.mainPlan.status, 'locked');
+    assert.equal(next.mainPlan.title, '旧主线');
+    assert.equal(next.mainPlan.arcs.length, 2);
+});
+
+test('normalizes a concise outline and exposes the current director stage', () => {
+    let state = applyLonglineToDirector(createEmptyDirectorState(), {
+        title: '长线',
+        outline: ['相遇', '试探', '确认关系'],
+        arcs: [{ id: 'a', title: '第一幕', goal: '靠近', beats: [{ id: 'b1', goal: '再次见面' }, { id: 'b2', goal: '交换秘密' }] }],
+    });
+    assert.deepEqual(state.mainPlan.outline, ['相遇', '试探', '确认关系']);
+    state = setCurrentDirectorBeat(state, 'a', 'b2');
+    const progress = directorProgressSnapshot(state);
+    assert.equal(progress.arcIndex, 0);
+    assert.equal(progress.beatIndex, 1);
+    assert.equal(progress.beat.goal, '交换秘密');
 });
 
 test('parses fenced and wrapped director JSON', () => {

@@ -215,6 +215,14 @@ body.gds-panel-open { overflow: hidden !important; }
 .gds-reply-card .gds-primary { border-color: var(--gds-pink-deep); background: var(--gds-pink-deep); color: white; }
 .gds-director-block { margin: 16px 0 0; border-top: 1px solid var(--gds-line); padding-top: 12px; }
 .gds-director-block h4 { margin: 0 0 8px; color: var(--gds-pink-deep); font-size: 14px; }
+.gds-director-progress { margin: 0 0 10px; padding: 11px 13px; border: 1px solid #e7b5ce; border-radius: 11px; background: linear-gradient(135deg, #fff0f7, #fffafd); }
+.gds-director-progress > div { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 4px 12px; align-items: baseline; }
+.gds-director-progress strong { color: var(--gds-pink-deep); font-size: 14px; }
+.gds-director-progress span, .gds-director-progress small { color: var(--gds-muted); font-size: 11px; }
+.gds-director-progress p { margin: 6px 0 3px; color: var(--gds-ink); font-size: 13px; }
+.gds-director-progress.empty, .gds-director-progress.completed { background: rgba(255, 255, 255, .65); }
+.gds-plan-outline { margin: 0 0 10px; padding: 10px 12px; border: 1px solid var(--gds-line); border-radius: 11px; background: rgba(255, 255, 255, .58); }
+.gds-plan-outline h5 { margin: 0 0 6px; color: var(--gds-pink-deep); font-size: 13px; }
 .gds-plan-head { display: flex; justify-content: space-between; gap: 8px; align-items: baseline; }
 .gds-plan-head strong { font-size: 15px; }
 .gds-plan-head span { color: var(--gds-muted); font-size: 11px; }
@@ -233,6 +241,19 @@ body.gds-panel-open { overflow: hidden !important; }
 .gds-branch-card button { margin-top: 5px; }
 .gds-branch-card p, .gds-foreshadow-card p { margin: 6px 0; }
 .gds-foreshadow-card small { display: block; color: var(--gds-muted); line-height: 1.45; }
+.gds-plan-editor, .gds-branch-card, .gds-foreshadow-card { display: grid; gap: 8px; }
+.gds-plan-editor label, .gds-plan-arc label, .gds-beat-editor label, .gds-branch-card label, .gds-foreshadow-card label { display: flex; flex-direction: column; gap: 4px; min-width: 0; color: var(--gds-muted); font-size: 11px; }
+.gds-plan-editor input, .gds-plan-editor textarea, .gds-plan-outline textarea, .gds-branch-card input, .gds-branch-card textarea, .gds-foreshadow-card input, .gds-foreshadow-card textarea { box-sizing: border-box; width: 100%; min-width: 0; border: 1px solid var(--gds-line); border-radius: 7px; padding: 6px 8px; background: #fff; color: var(--gds-ink); font: inherit; font-size: 12px; line-height: 1.45; resize: vertical; }
+.gds-plan-editor input:focus, .gds-plan-editor textarea:focus, .gds-plan-outline textarea:focus, .gds-branch-card input:focus, .gds-branch-card textarea:focus, .gds-foreshadow-card input:focus, .gds-foreshadow-card textarea:focus { outline: 2px solid rgba(255, 130, 179, .28); border-color: var(--gds-pink); }
+.gds-plan-head input { flex: 1 1 auto; font-size: 15px; font-weight: 700; }
+.gds-edit-columns { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.gds-edit-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.gds-edit-row > label { flex: 1 1 0; }
+.gds-plan-arc.current, .gds-beat-editor.current { border-color: var(--gds-pink); box-shadow: 0 0 0 2px rgba(220, 77, 136, .08); }
+.gds-beat-list { display: grid; gap: 7px; margin-top: 2px; }
+.gds-beat-editor { display: grid; gap: 6px; padding: 8px; border: 1px dashed var(--gds-line); border-radius: 8px; background: #fffafd; }
+.gds-beat-editor .gds-edit-columns { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.gds-plan-confirm { display: flex; justify-content: flex-start; gap: 8px; margin-top: 2px; }
 .gds-reply-list { display: grid; gap: 7px; }
 .gds-reply-card-head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
 .gds-reply-card { padding: 8px 10px; font-size: 13px; }
@@ -439,6 +460,14 @@ body.gds-panel-open { overflow: hidden !important; }
 .gds-settings-entry { display: block; box-sizing: border-box; width: 100%; min-width: 0; padding: 0; }
 .gds-settings-entry .inline-drawer-content { min-width: 0; }
 .gds-settings-entry p { margin: 8px 0 10px; color: var(--gds-muted); line-height: 1.5; }
+.gds-master-switch { box-sizing: border-box; display: flex; align-items: center; justify-content: space-between; gap: 12px; width: 100%; margin: 0 0 10px; padding: 10px 12px; border: 1px solid var(--gds-line); border-radius: 11px; background: rgba(255, 255, 255, .7); color: var(--gds-ink); cursor: pointer; }
+.gds-master-switch > span { display: flex; flex-direction: column; min-width: 0; gap: 2px; }
+.gds-master-switch strong { color: var(--gds-pink-deep); font-size: 13px; }
+.gds-master-switch small { color: var(--gds-muted); font-size: 10px; line-height: 1.35; }
+.gds-master-switch input[type="checkbox"] { appearance: none !important; -webkit-appearance: none !important; flex: 0 0 38px !important; width: 38px !important; height: 21px !important; margin: 0 !important; padding: 0 !important; border: 1px solid #d9bdca !important; border-radius: 999px !important; background: #eadfe5 radial-gradient(circle at 9px 50%, #fff 0 7px, transparent 7.5px) no-repeat !important; cursor: pointer !important; transition: .18s ease !important; }
+.gds-master-switch input[type="checkbox"]:checked { border-color: var(--gds-pink-deep) !important; background: var(--gds-pink-deep) radial-gradient(circle at 28px 50%, #fff 0 7px, transparent 7.5px) no-repeat !important; box-shadow: 0 2px 7px rgba(220, 77, 136, .25) !important; }
+.gds-master-switch input[type="checkbox"]::before, .gds-master-switch input[type="checkbox"]::after { content: none !important; display: none !important; }
+.gds-settings-entry.gds-workshop-disabled .gds-open-settings { opacity: .5; cursor: not-allowed; }
 .gds-settings-entry .gds-open-settings {
     box-sizing: border-box;
     display: inline-flex !important;
@@ -639,6 +668,9 @@ body.gds-panel-open { overflow: hidden !important; }
     .gds-provider-grid select, .gds-api-form input, .gds-api-form select { max-width: none; }
     .gds-director-actions { display: grid; grid-template-columns: 1fr; }
     .gds-director-actions button, .gds-api-form button { width: 100%; min-height: 40px; }
+    .gds-edit-columns, .gds-beat-editor .gds-edit-columns { grid-template-columns: 1fr; }
+    .gds-edit-row { align-items: stretch; flex-direction: column; }
+    .gds-edit-row button, .gds-plan-confirm button, .gds-branch-card > button { width: 100%; min-height: 38px; }
     .gds-director-task-actions { justify-content: stretch; margin-top: 9px; }
     .gds-director-task-actions button { flex: 1 1 0; min-height: 38px; }
     .gds-calendar-block .gds-section-title { display: block; }
