@@ -120,6 +120,18 @@ test('director plans are editable, track their current stage and can be unconfir
     assert.match(css, /\.gds-director-progress/);
 });
 
+test('director revisions are previewed before apply and can be discarded or undone', () => {
+    assert.match(js, /data-gds-director-revision-scope/);
+    assert.match(js, /data-gds-director-revision-instruction/);
+    assert.match(js, /data-gds-director-revise/);
+    assert.match(js, /data-gds-director-apply-revision/);
+    assert.match(js, /data-gds-director-discard-revision/);
+    assert.match(js, /data-gds-director-undo-revision/);
+    assert.match(js, /runDirectorRevision/);
+    assert.match(js, /renderDirectorRevisionPreview/);
+    assert.match(css, /\.gds-revision-preview/);
+});
+
 test('extension settings expose a master switch that removes both prompt injections', () => {
     assert.match(js, /workshopEnabled:\s*true/);
     assert.match(js, /data-gds-workshop-enabled/);
@@ -179,7 +191,7 @@ test('opening lower detail sections preserves the internal scroll anchor', () =>
     assert.match(js, /const lockedScrollTop = pageHost\.scrollTop/);
     assert.match(js, /details\.open = !details\.open/);
     assert.match(js, /restorePageScrollAfterLayout\(pageHost, lockedScrollTop\)/);
-    assert.match(js, /const preservedScrollTop = Number\(pageHost\?\.scrollTop \|\| 0\)/);
+    assert.match(js, /const preservedScrollTop = activeTab === 'director'/);
     assert.match(js, /bindStableDetailsScrolling\(pageHost\)/);
 });
 
@@ -196,6 +208,9 @@ test('director editors keep focus and scroll without being re-rendered', () => {
     assert.match(js, /function bindDirectorEditorScrollGuard\(pageHost\)/);
     assert.match(js, /editor\.focus\(\{ preventScroll: true \}\)/);
     assert.match(js, /runtime\.directorEditorActive = true/);
+    assert.match(js, /runtime\.directorScrollLock = \{ token, top, until:/);
+    assert.match(js, /for \(const delay of \[40, 120, 280, 520, duration\]\)/);
+    assert.match(js, /pageHost\.addEventListener\('scroll'/);
     assert.match(js, /!runtime\.directorEditorActive && !directorPlan\.contains\(document\.activeElement\)/);
     assert.match(js, /bindDirectorEditorScrollGuard\(pageHost\)/);
 });

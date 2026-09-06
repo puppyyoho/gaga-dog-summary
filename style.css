@@ -215,6 +215,20 @@ body.gds-panel-open { overflow: hidden !important; }
 .gds-reply-card .gds-primary { border-color: var(--gds-pink-deep); background: var(--gds-pink-deep); color: white; }
 .gds-director-block { margin: 16px 0 0; border-top: 1px solid var(--gds-line); padding-top: 12px; }
 .gds-director-block h4 { margin: 0 0 8px; color: var(--gds-pink-deep); font-size: 14px; }
+.gds-revision-block > p { margin: 0 0 10px; color: var(--gds-muted); font-size: 12px; }
+.gds-revision-form { display: grid; grid-template-columns: minmax(180px, .42fr) minmax(0, 1fr); gap: 10px; align-items: start; }
+.gds-revision-form label { display: flex; flex-direction: column; gap: 5px; min-width: 0; color: var(--gds-muted); font-size: 11px; }
+.gds-revision-form select, .gds-revision-form textarea { box-sizing: border-box; width: 100%; min-width: 0; border: 1px solid var(--gds-line); border-radius: 8px; padding: 7px 8px; background: #fff; color: var(--gds-ink); font: inherit; font-size: 12px; line-height: 1.45; }
+.gds-revision-form textarea { resize: vertical; }
+.gds-revision-form select:focus, .gds-revision-form textarea:focus { outline: 2px solid rgba(255, 130, 179, .28); border-color: var(--gds-pink); }
+.gds-revision-preview { padding: 10px 12px; border: 1px solid #e7b5ce; border-radius: 11px; background: linear-gradient(135deg, #fff0f7, #fffafd); }
+.gds-revision-preview > div { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 6px 12px; }
+.gds-revision-preview strong { color: var(--gds-pink-deep); font-size: 13px; }
+.gds-revision-preview small { color: var(--gds-muted); font-size: 11px; }
+.gds-revision-preview p, .gds-revision-preview ul, .gds-revision-preview ol { margin: 7px 0 0; font-size: 12px; line-height: 1.5; }
+.gds-revision-preview ul, .gds-revision-preview ol { padding-left: 20px; }
+.gds-revision-preview-list { display: block !important; margin-top: 9px; padding-top: 8px; border-top: 1px dashed var(--gds-line); }
+.gds-revision-preview-list strong { color: var(--gds-ink); font-size: 12px; }
 .gds-director-progress { margin: 0 0 10px; padding: 11px 13px; border: 1px solid #e7b5ce; border-radius: 11px; background: linear-gradient(135deg, #fff0f7, #fffafd); }
 .gds-director-progress > div { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 4px 12px; align-items: baseline; }
 .gds-director-progress strong { color: var(--gds-pink-deep); font-size: 14px; }
@@ -667,6 +681,7 @@ body.gds-panel-open { overflow: hidden !important; }
     .gds-provider-grid, .gds-api-form .gds-settings-grid { grid-template-columns: 1fr; }
     .gds-provider-grid select, .gds-api-form input, .gds-api-form select { max-width: none; }
     .gds-director-actions { display: grid; grid-template-columns: 1fr; }
+    .gds-revision-form { grid-template-columns: 1fr; }
     .gds-director-actions button, .gds-api-form button { width: 100%; min-height: 40px; }
     .gds-edit-columns, .gds-beat-editor .gds-edit-columns { grid-template-columns: 1fr; }
     .gds-edit-row { align-items: stretch; flex-direction: column; }

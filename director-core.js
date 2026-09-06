@@ -1,7 +1,15 @@
 import { compactText, extractKeywords, normalizeChatState, tokenEstimate } from './memory-core.js';
 import { createEmptyCalendarState, normalizeCalendarState } from './calendar-core.js';
 
-export const DIRECTOR_SCHEMA_VERSION = 3;
+export const DIRECTOR_SCHEMA_VERSION = 4;
+
+export const DIRECTOR_REVISION_SCOPES = [
+    { id: 'outline', name: '只修订简明总纲' },
+    { id: 'mainline', name: '修订完整主线' },
+    { id: 'branches', name: '修订分支候选' },
+    { id: 'foreshadows', name: '修订伏笔方案' },
+    { id: 'all', name: '整体修订全部导演方案' },
+];
 
 export const DIRECTOR_PRESETS = [
     {
@@ -113,6 +121,12 @@ export function createEmptyDirectorState() {
         lastExecutionCard: '',
         lastPlanAt: 0,
         lastProgressAt: 0,
+        revisionRequest: {
+            scope: 'all',
+            instruction: '',
+        },
+        revisionDraft: null,
+        revisionHistory: [],
     };
 }
 
@@ -134,6 +148,12 @@ export function normalizeDirectorState(value) {
         branchCandidates: list(input.branchCandidates),
         foreshadows: list(input.foreshadows),
         progressLog: list(input.progressLog, 100),
+        revisionRequest: {
+            scope: DIRECTOR_REVISION_SCOPES.some(item => item.id === input.revisionRequest?.scope) ? input.revisionRequest.scope : 'all',
+            instruction: compactText(input.revisionRequest?.instruction || '', 12000),
+        },
+        revisionDraft: input.revisionDraft && typeof input.revisionDraft === 'object' ? input.revisionDraft : null,
+        revisionHistory: list(input.revisionHistory, 10),
     };
     result.schemaVersion = DIRECTOR_SCHEMA_VERSION;
     for (const key of Object.keys(defaults.toggles)) result.toggles[key] = result.toggles[key] !== false && result.toggles[key] !== 'false';
@@ -187,6 +207,34 @@ export function buildDirectorPrompt({ task = 'longline', memory, recentText = ''
     };
 }
 
+export function buildDirectorRevisionPrompt({ state = {}, scope = 'all', instruction = '', memory, recentText = '', characterCard = '', calendarContext = null, continuationDraft = '' }) {
+    const director = normalizeDirectorState(state);
+    const safeScope = DIRECTOR_REVISION_SCOPES.some(item => item.id === scope) ? scope : 'all';
+    const scopeLabel = DIRECTOR_REVISION_SCOPES.find(item => item.id === safeScope)?.name || '整体修订全部导演方案';
+    const currentContent = {
+        mainPlan: director.mainPlan,
+        branches: director.branchCandidates,
+        foreshadows: director.foreshadows,
+        currentArcId: director.currentArcId,
+        currentBeatId: director.currentBeatId,
+        activeBranchId: director.activeBranchId,
+    };
+    const outputShape = {
+        changeSummary: ['具体说明修改了什么，1到8条'],
+        mainPlan: safeScope === 'outline'
+            ? { outline: ['修订后的完整总纲'] }
+            : ['mainline', 'all'].includes(safeScope)
+                ? { title: '标题', outline: [], premise: '核心前提', ending: '结局方向', arcs: [], characterArcs: [], constraints: [] }
+                : null,
+        branches: ['branches', 'all'].includes(safeScope) ? [] : null,
+        foreshadows: ['foreshadows', 'all'].includes(safeScope) ? [] : null,
+    };
+    return {
+        systemPrompt: `你是“嘎嘎小狗”的剧情方案修订编辑。你只修改导演规划，不续写正文，也不能改写已经发生的剧情事实。输出必须是合法 JSON，不要输出 Markdown 或解释。`,
+        prompt: `<修订任务>\n范围：${scopeLabel}\n用户要求：${compactText(instruction, 12000) || '在不改变已发生事实的前提下，提高规划的连贯性和可执行性。'}\n</修订任务>\n\n<修订硬规则>\n1. 已发生事实、人物认知边界和角色卡设定不可修改。\n2. 只修改指定范围。未指定的部分必须保持原样，不要在返回中擅自重写。\n3. 保留仍然适用的 arc、beat、branch 和 foreshadow 的 id。当前阶段、已完成状态和已采用分支不得因措辞润色而丢失。\n4. 主线即使已经确认，也只生成待确认的修订预览，不能把修改描述成已经生效。\n5. 规划仍属于未来建议，不能写成已经发生的正文。\n6. 需要修订完整主线时，mainPlan 必须返回全部字段和全部阶段；需要修订分支或伏笔时，相应数组必须返回修订后的完整列表。\n</修订硬规则>\n\n<角色卡背景>\n${compactText(characterCard, 16000) || '无'}\n</角色卡背景>\n\n<已发生记忆>\n${stringifyState(memory) || '无'}\n</已发生记忆>\n\n<最近正文>\n${compactText(recentText, 30000) || '无'}\n</最近正文>\n\n<故事日历>\n${calendarContext?.cardText || '无'}\n</故事日历>\n\n<当前导演方案>\n${JSON.stringify(currentContent, null, 2)}\n</当前导演方案>\n\n${continuationDraft ? `<上一轮未完成草稿>\n${compactText(continuationDraft, 60000)}\n</上一轮未完成草稿>\n\n` : ''}<返回格式>\n严格按以下 JSON 结构返回，用真正的对象和数组替换示例内容：\n${JSON.stringify(outputShape, null, 2)}\n</返回格式>`,
+    };
+}
+
 function extractJsonCandidates(text) {
     const value = String(text || '').replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
     const candidates = [value, value.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '')];
@@ -209,6 +257,18 @@ export function parseDirectorPacket(raw, task = 'longline') {
         } catch { /* Try the next bounded JSON candidate. */ }
     }
     throw new Error('导演模型没有返回合法 JSON。');
+}
+
+export function parseDirectorRevision(raw) {
+    for (const candidate of extractJsonCandidates(raw)) {
+        try {
+            const parsed = JSON.parse(candidate);
+            if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) continue;
+            const packet = parsed.revision && typeof parsed.revision === 'object' ? parsed.revision : parsed;
+            if (packet.mainPlan || Array.isArray(packet.branches) || Array.isArray(packet.foreshadows)) return packet;
+        } catch { /* Try the next bounded JSON candidate. */ }
+    }
+    throw new Error('导演修订模型没有返回合法的修订 JSON。');
 }
 
 export function normalizeMainPlan(value) {
@@ -476,6 +536,132 @@ export function applyProgressToDirector(state, progress) {
         next.turnsSpent += 1;
     }
     return next;
+}
+
+function copyDirectorValue(value) {
+    return value == null ? value : JSON.parse(JSON.stringify(value));
+}
+
+function directorContentSnapshot(state) {
+    const director = normalizeDirectorState(state);
+    return {
+        mainPlan: copyDirectorValue(director.mainPlan),
+        branchCandidates: copyDirectorValue(director.branchCandidates),
+        activeBranchId: director.activeBranchId,
+        foreshadows: copyDirectorValue(director.foreshadows),
+        currentArcId: director.currentArcId,
+        currentBeatId: director.currentBeatId,
+        turnsSpent: director.turnsSpent,
+    };
+}
+
+function mergePlanRevision(currentPlan, incomingPlan, scope) {
+    if (!currentPlan || !incomingPlan) return currentPlan;
+    if (scope === 'outline') {
+        const outline = Array.isArray(incomingPlan.outline) ? incomingPlan.outline : [];
+        const revised = normalizeMainPlan({ ...currentPlan, outline, status: currentPlan.status, createdAt: currentPlan.createdAt });
+        revised.status = currentPlan.status;
+        return revised;
+    }
+    const incomingArcs = Array.isArray(incomingPlan.arcs) ? incomingPlan.arcs : currentPlan.arcs;
+    const preparedArcs = list(incomingArcs, 30).map((incomingArc, arcIndex) => {
+        const oldArc = currentPlan.arcs?.find(item => item.id === incomingArc?.id) || currentPlan.arcs?.[arcIndex];
+        return {
+            ...incomingArc,
+            id: incomingArc?.id || oldArc?.id,
+            status: oldArc?.status || incomingArc?.status,
+            beats: list(incomingArc?.beats, 80).map((incomingBeat, beatIndex) => {
+                const oldBeat = oldArc?.beats?.find(item => item.id === incomingBeat?.id) || oldArc?.beats?.[beatIndex];
+                return {
+                    ...incomingBeat,
+                    id: incomingBeat?.id || oldBeat?.id,
+                    status: oldBeat?.status || incomingBeat?.status,
+                };
+            }),
+        };
+    });
+    const revised = normalizeMainPlan({ ...currentPlan, ...incomingPlan, arcs: preparedArcs, status: currentPlan.status, createdAt: currentPlan.createdAt });
+    revised.status = currentPlan.status;
+    return revised;
+}
+
+export function stageDirectorRevision(state, packet, scope = 'all', instruction = '') {
+    const next = normalizeDirectorState(state);
+    const safeScope = DIRECTOR_REVISION_SCOPES.some(item => item.id === scope) ? scope : 'all';
+    const source = record(packet);
+    const draft = {
+        id: `revision_${Date.now()}`,
+        scope: safeScope,
+        instruction: compactText(instruction, 12000),
+        changeSummary: list(source.changeSummary, 8).map(item => compactText(item, 800)).filter(Boolean),
+        mainPlan: null,
+        branchCandidates: null,
+        foreshadows: null,
+        createdAt: Date.now(),
+    };
+    if (['outline', 'mainline', 'all'].includes(safeScope) && source.mainPlan) {
+        draft.mainPlan = mergePlanRevision(next.mainPlan, source.mainPlan, safeScope);
+    }
+    if (['branches', 'all'].includes(safeScope) && Array.isArray(source.branches)) draft.branchCandidates = normalizeBranches(source.branches);
+    if (['foreshadows', 'all'].includes(safeScope) && Array.isArray(source.foreshadows)) draft.foreshadows = normalizeForeshadows(source.foreshadows);
+    if (!draft.mainPlan && !draft.branchCandidates && !draft.foreshadows) throw new Error('修订结果没有包含所选范围的有效内容。');
+    next.revisionRequest = { scope: safeScope, instruction: draft.instruction };
+    next.revisionDraft = draft;
+    return next;
+}
+
+export function applyDirectorRevision(state) {
+    const next = normalizeDirectorState(state);
+    const draft = next.revisionDraft;
+    if (!draft) return next;
+    const before = directorContentSnapshot(next);
+    if (draft.mainPlan) next.mainPlan = copyDirectorValue(draft.mainPlan);
+    if (Array.isArray(draft.branchCandidates)) next.branchCandidates = copyDirectorValue(draft.branchCandidates);
+    if (Array.isArray(draft.foreshadows)) next.foreshadows = copyDirectorValue(draft.foreshadows);
+
+    const currentArc = next.mainPlan?.arcs?.find(item => item.id === before.currentArcId);
+    const currentBeat = currentArc?.beats?.find(item => item.id === before.currentBeatId);
+    if (currentArc && currentBeat) {
+        next.currentArcId = currentArc.id;
+        next.currentBeatId = currentBeat.id;
+        next.turnsSpent = before.turnsSpent;
+    } else {
+        const fallbackArc = next.mainPlan?.arcs?.find(item => item.status !== 'completed') || next.mainPlan?.arcs?.[0];
+        const fallbackBeat = fallbackArc?.beats?.find(item => item.status !== 'completed') || fallbackArc?.beats?.[0];
+        next.currentArcId = fallbackArc?.id || '';
+        next.currentBeatId = fallbackBeat?.id || '';
+        next.turnsSpent = 0;
+    }
+    next.activeBranchId = next.branchCandidates.some(item => item.id === before.activeBranchId) ? before.activeBranchId : '';
+    next.revisionHistory = [...next.revisionHistory, {
+        id: draft.id,
+        scope: draft.scope,
+        instruction: draft.instruction,
+        changeSummary: copyDirectorValue(draft.changeSummary),
+        before,
+        createdAt: Date.now(),
+    }].slice(-10);
+    next.revisionDraft = null;
+    next.lastPlanAt = Date.now();
+    return normalizeDirectorState(next);
+}
+
+export function discardDirectorRevision(state) {
+    return normalizeDirectorState({ ...normalizeDirectorState(state), revisionDraft: null });
+}
+
+export function undoDirectorRevision(state) {
+    const next = normalizeDirectorState(state);
+    const last = next.revisionHistory.at(-1);
+    if (!last?.before) return next;
+    const restored = record(last.before);
+    return normalizeDirectorState({
+        ...next,
+        ...copyDirectorValue(restored),
+        revisionDraft: null,
+        revisionHistory: next.revisionHistory.slice(0, -1),
+        lastPlanAt: Date.now(),
+    });
 }
 
 export function directorTokenEstimate(state) {

@@ -1,21 +1,27 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+    applyDirectorRevision,
     applyBranchesToDirector,
     applyForeshadowsToDirector,
     applyLonglineToDirector,
     applyProgressToDirector,
     buildDirectorPrompt,
+    buildDirectorRevisionPrompt,
     buildExecutionCard,
     clearActiveBranch,
     createEmptyDirectorState,
     DIRECTOR_PRESETS,
     directorProgressSnapshot,
+    discardDirectorRevision,
     lockMainline,
     normalizeDirectorState,
     parseDirectorPacket,
+    parseDirectorRevision,
     selectBranch,
     setCurrentDirectorBeat,
+    stageDirectorRevision,
+    undoDirectorRevision,
     unlockMainline,
 } from '../director-core.js';
 
@@ -127,4 +133,43 @@ test('normalizes a concise outline and exposes the current director stage', () =
 test('parses fenced and wrapped director JSON', () => {
     const packet = parseDirectorPacket('```json\n{"branches":[{"title":"A","summary":"测试"}]}\n```', 'branch');
     assert.equal(packet.branches[0].title, 'A');
+});
+
+test('stages director revisions as previews and only applies them after confirmation', () => {
+    let state = applyLonglineToDirector(createEmptyDirectorState(), {
+        title: '原主线', outline: ['相遇', '靠近'], premise: '原前提',
+        arcs: [{ id: 'a', title: '第一幕', goal: '靠近', beats: [{ id: 'b', goal: '第一次约会' }] }],
+    });
+    state = lockMainline(state);
+    const prompt = buildDirectorRevisionPrompt({
+        state,
+        scope: 'outline',
+        instruction: '让第二步更酸涩。',
+        memory: { recap: '两人已经相遇。', facts: [], state: {}, threads: [] },
+    });
+    assert.match(prompt.prompt, /只修订简明总纲/);
+    assert.match(prompt.prompt, /让第二步更酸涩/);
+    const packet = parseDirectorRevision('{"changeSummary":["加强拉扯"],"mainPlan":{"outline":["相遇","误解后仍旧靠近"]},"branches":null,"foreshadows":null}');
+    const staged = stageDirectorRevision(state, packet, 'outline', '让第二步更酸涩。');
+    assert.deepEqual(staged.mainPlan.outline, ['相遇', '靠近']);
+    assert.deepEqual(staged.revisionDraft.mainPlan.outline, ['相遇', '误解后仍旧靠近']);
+    const applied = applyDirectorRevision(staged);
+    assert.deepEqual(applied.mainPlan.outline, ['相遇', '误解后仍旧靠近']);
+    assert.equal(applied.mainPlan.status, 'locked');
+    assert.equal(applied.currentArcId, 'a');
+    assert.equal(applied.currentBeatId, 'b');
+    assert.equal(applied.revisionHistory.length, 1);
+    const undone = undoDirectorRevision(applied);
+    assert.deepEqual(undone.mainPlan.outline, ['相遇', '靠近']);
+    assert.equal(undone.mainPlan.status, 'locked');
+});
+
+test('can discard a director revision without changing the current plan', () => {
+    let state = applyLonglineToDirector(createEmptyDirectorState(), {
+        title: '原主线', outline: ['原总纲'], arcs: [{ id: 'a', title: '第一幕', beats: [] }],
+    });
+    state = stageDirectorRevision(state, { mainPlan: { outline: ['新总纲'] } }, 'outline', '重写');
+    const discarded = discardDirectorRevision(state);
+    assert.equal(discarded.revisionDraft, null);
+    assert.deepEqual(discarded.mainPlan.outline, ['原总纲']);
 });

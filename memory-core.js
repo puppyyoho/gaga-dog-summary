@@ -120,6 +120,15 @@ export function normalizeMessages(messages) {
     return (Array.isArray(messages) ? messages : []).map((message, index) => normalizeMessage(message, index));
 }
 
+export function summaryMessageIndexes(messages, start = 0, end = Number.POSITIVE_INFINITY) {
+    const normalized = normalizeMessages(messages);
+    const safeStart = Math.max(0, Number.isFinite(Number(start)) ? Number(start) : 0);
+    const safeEnd = Number.isFinite(Number(end)) ? Number(end) : normalized.length - 1;
+    return normalized
+        .filter(item => item.index >= safeStart && item.index <= safeEnd && !item.isSystem && item.content.trim())
+        .map(item => item.index);
+}
+
 export function extractKeywords(text) {
     const value = compactText(text, 20000);
     const words = value.match(/[\p{L}\p{N}_]{2,}/gu) || [];
@@ -127,11 +136,14 @@ export function extractKeywords(text) {
     return [...new Set([...words, ...cjk].map(item => item.toLowerCase()).filter(item => !STOP_WORDS.has(item)))].slice(0, 80);
 }
 
-export function makeSourceRange(messages, start, end) {
+export function makeSourceRangeFromIndexes(messages, indexes) {
     const normalized = normalizeMessages(messages);
-    const safeStart = Math.max(0, Math.min(Number(start) || 0, Math.max(0, normalized.length - 1)));
-    const safeEnd = Math.max(safeStart, Math.min(Number(end) || safeStart, Math.max(0, normalized.length - 1)));
-    const refs = normalized.slice(safeStart, safeEnd + 1).map(item => {
+    const selectedIndexes = [...new Set((Array.isArray(indexes) ? indexes : [])
+        .map(Number)
+        .filter(index => Number.isInteger(index) && index >= 0 && index < normalized.length))]
+        .sort((a, b) => a - b);
+    if (!selectedIndexes.length) return null;
+    const refs = selectedIndexes.map(index => normalized[index]).map(item => {
         const raw = messages[item.index];
         const fullContent = compactText(raw?.mes ?? raw?.content ?? '', 300000);
         return {
@@ -143,11 +155,19 @@ export function makeSourceRange(messages, start, end) {
         };
     });
     return {
-        start: safeStart,
-        end: safeEnd,
+        start: selectedIndexes[0],
+        end: selectedIndexes.at(-1),
         refs,
         rangeHash: simpleHash(refs.map(item => `${item.key}:${item.hash}`).join('|')),
     };
+}
+
+export function makeSourceRange(messages, start, end) {
+    const normalized = normalizeMessages(messages);
+    if (!normalized.length) return null;
+    const safeStart = Math.max(0, Math.min(Number(start) || 0, normalized.length - 1));
+    const safeEnd = Math.max(safeStart, Math.min(Number(end) || safeStart, normalized.length - 1));
+    return makeSourceRangeFromIndexes(messages, normalized.slice(safeStart, safeEnd + 1).map(item => item.index));
 }
 
 export function rangeStillMatches(messages, range) {
@@ -788,12 +808,11 @@ export function compileInjection(stateValue, options = {}) {
 }
 
 export function selectHideEnd(messages, state, options = {}) {
-    const normalized = normalizeMessages(messages);
-    if (!normalized.length) return -1;
-    const last = normalized.length - 1;
+    const visibleIndexes = summaryMessageIndexes(messages);
+    if (!visibleIndexes.length) return -1;
     const keepMessages = Math.max(1, Number(options.keepMessages || 5));
-    const keepIndex = Math.max(0, last - keepMessages + 1);
-    return keepIndex - 1;
+    if (visibleIndexes.length <= keepMessages) return -1;
+    return visibleIndexes[visibleIndexes.length - keepMessages - 1];
 }
 
 export function rangesForSummaryBacklog(messages, state, options = {}) {
@@ -802,24 +821,27 @@ export function rangesForSummaryBacklog(messages, state, options = {}) {
     const start = Math.max(0, Number(state?.lastProcessedIndex ?? -1) + 1);
     const availableEnd = selectHideEnd(messages, state, options);
     if (availableEnd < start) return [];
+    const eligibleIndexes = summaryMessageIndexes(messages, start, availableEnd);
+    if (!eligibleIndexes.length) return [];
     const targetTokens = Math.max(0, Number(options.targetTokens || 0));
-    if (targetTokens <= 0) return [makeSourceRange(messages, start, availableEnd)];
+    if (targetTokens <= 0) return [makeSourceRangeFromIndexes(messages, eligibleIndexes)];
 
     const ranges = [];
-    let cursor = start;
-    while (cursor <= availableEnd) {
+    let cursor = 0;
+    while (cursor < eligibleIndexes.length) {
         let accumulated = 0;
-        let end = cursor;
-        for (let index = cursor; index <= availableEnd; index += 1) {
+        const batchIndexes = [];
+        for (let offset = cursor; offset < eligibleIndexes.length; offset += 1) {
+            const index = eligibleIndexes[offset];
             const item = normalized[index];
             const raw = messages[index];
             const fullContent = compactText(raw?.mes ?? raw?.content ?? '', 300000);
             accumulated += tokenEstimate(`[消息 ${index}｜${item.name}]\n${fullContent}\n\n`);
-            end = index;
+            batchIndexes.push(index);
             if (accumulated >= targetTokens) break;
         }
-        ranges.push(makeSourceRange(messages, cursor, end));
-        cursor = end + 1;
+        ranges.push(makeSourceRangeFromIndexes(messages, batchIndexes));
+        cursor += batchIndexes.length;
     }
     return ranges;
 }

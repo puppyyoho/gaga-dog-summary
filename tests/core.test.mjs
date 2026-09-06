@@ -7,6 +7,7 @@ import {
     compileInjection,
     createRoundCapsule,
     makeSourceRange,
+    makeSourceRangeFromIndexes,
     mergeMemoryPacket,
     normalizeChatState,
     nextRoundRange,
@@ -18,6 +19,7 @@ import {
     rangeStillMatches,
     roundCapsuleTokens,
     selectHideEnd,
+    summaryMessageIndexes,
     selectRelevantCapsules,
     selectStyleAnchors,
     tokenEstimate,
@@ -87,6 +89,28 @@ test('plans a range while protecting recent messages', () => {
     assert.equal(range.start, 0);
     assert.equal(range.end, 1);
     assert.equal(selectHideEnd(messages, state, { keepMessages: 4 }), 1);
+});
+
+test('full summary ignores hidden floors and keeps the newest visible floors', () => {
+    const mixedVisibility = Array.from({ length: 10 }, (_, index) => ({
+        name: index % 2 ? 'Char' : 'User',
+        is_user: index % 2 === 0,
+        is_system: [0, 3, 8].includes(index),
+        mes: `第${index + 1}楼剧情`,
+        send_date: String(index),
+    }));
+    const state = normalizeChatState({ lastProcessedIndex: -1 });
+    const ranges = rangesForSummaryBacklog(mixedVisibility, state, { keepMessages: 3, targetTokens: 0 });
+    assert.equal(selectHideEnd(mixedVisibility, state, { keepMessages: 3 }), 5);
+    assert.deepEqual(summaryMessageIndexes(mixedVisibility), [1, 2, 4, 5, 6, 7, 9]);
+    assert.deepEqual(ranges[0].refs.map(ref => ref.index), [1, 2, 4, 5]);
+    assert.deepEqual([ranges[0].start, ranges[0].end], [1, 5]);
+});
+
+test('source ranges made from selected indexes do not re-add hidden gaps', () => {
+    const selected = makeSourceRangeFromIndexes(messages, [0, 2, 3]);
+    assert.deepEqual(selected.refs.map(ref => ref.index), [0, 2, 3]);
+    assert.deepEqual([selected.start, selected.end], [0, 3]);
 });
 
 test('splits a large backlog into approximately token-sized summary batches', () => {

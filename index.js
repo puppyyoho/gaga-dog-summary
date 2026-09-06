@@ -9,6 +9,7 @@ import {
     createRoundCapsule,
     DEFAULT_CHAT_STATE,
     makeSourceRange,
+    makeSourceRangeFromIndexes,
     mergeMemoryPacket,
     normalizeChatState,
     normalizeMessages,
@@ -23,6 +24,7 @@ import {
     roundCapsuleTokens,
     selectStyleAnchors,
     simpleHash,
+    summaryMessageIndexes,
     tokenEstimate,
     renderMixedSummary,
     renderStructuredSummary,
@@ -48,14 +50,17 @@ import {
     resolveOutputReserveTokens,
 } from './context-budget.js';
 import {
+    applyDirectorRevision,
     applyBranchesToDirector,
     applyForeshadowsToDirector,
     applyLonglineToDirector,
     applyProgressToDirector,
     buildDirectorPrompt,
+    buildDirectorRevisionPrompt,
     buildExecutionCard,
     clearActiveBranch,
     createEmptyDirectorState,
+    DIRECTOR_REVISION_SCOPES,
     directorProgressSnapshot,
     getDirectorPreset,
     lockMainline,
@@ -65,8 +70,12 @@ import {
     normalizeMainPlan,
     PACING_OPTIONS,
     parseDirectorPacket,
+    parseDirectorRevision,
     selectBranch,
     setCurrentDirectorBeat,
+    stageDirectorRevision,
+    discardDirectorRevision,
+    undoDirectorRevision,
     unlockMainline,
 } from './director-core.js';
 import {
@@ -99,7 +108,7 @@ const INJECTION_ID = `${EXTENSION_NAME}:memory`;
 const DIRECTOR_INJECTION_ID = `${EXTENSION_NAME}:director`;
 const PANEL_LOGO_URL = new URL('./assets/gaga-dog-logo.png', import.meta.url).href;
 const FLOATING_LOGO_URL = new URL('./assets/gaga-dog-floating.png', import.meta.url).href;
-const VERSION = '0.5.7';
+const VERSION = '0.5.9';
 const SETTINGS_VERSION = 10;
 
 const DEFAULT_SETTINGS = {
@@ -167,6 +176,8 @@ const runtime = {
     modelPullBusy: false,
     modelOptions: [],
     directorEditorActive: false,
+    directorScrollLock: null,
+    pageScrollByTab: {},
 };
 
 function getContext() {
@@ -359,10 +370,11 @@ async function saveChat(ctx = getContext(), options = {}) {
 }
 
 function formatMessages(messages, start = 0, end = messages.length - 1) {
-    return messages.slice(start, end + 1).map((message, offset) => {
+    return summaryMessageIndexes(messages, start, end).map(index => {
+        const message = messages[index];
         const [item] = normalizeMessages([message]);
         const content = compactText(message?.mes ?? message?.content ?? '', 300000);
-        return `[消息 ${offset + start}｜${item.name}]\n${content}`;
+        return `[消息 ${index}｜${item.name}]\n${content}`;
     }).join('\n\n');
 }
 
@@ -794,7 +806,7 @@ async function summarizeRange(ctx, range, settings, reason = 'manual', resumeTas
         }
 
         const draft = mergeMemoryPacket(before, packet, range, checkpointId);
-        const styleAnchors = selectStyleAnchors(messages, 3, { includeHidden: true });
+        const styleAnchors = selectStyleAnchors(messages, 3);
         let polishedProse = '';
         if (summaryMode !== 'structured') {
             const factsForProse = renderFactsForProse(draft);
@@ -974,7 +986,7 @@ async function saveChatStateAndRefresh(ctx, state) {
 }
 
 function directorTaskLabel(task) {
-    return task === 'longline' ? '长线规划' : task === 'branch' ? '当前分支' : task === 'foreshadow' ? '伏笔方案' : '推进判断';
+    return task === 'longline' ? '长线规划' : task === 'branch' ? '当前分支' : task === 'foreshadow' ? '伏笔方案' : task === 'revision' ? '导演修订预览' : '推进判断';
 }
 
 async function persistDirectorTaskState(ctx, task, status, partial = '') {
@@ -1063,6 +1075,101 @@ async function runDirectorTask(ctx, task, options = {}) {
     }
 }
 
+async function runDirectorRevision(ctx, options = {}) {
+    reconcileGeneratingFlag(ctx);
+    if (runtime.directorBusy || runtime.busy || runtime.workflowActive || hostGenerationActive(ctx)) {
+        notify('info', '当前还有生成任务进行中，请稍后再修订导演方案。');
+        return null;
+    }
+    const settings = getSettings(ctx);
+    let previous = collectDirectorContentEdits(ctx);
+    if (!previous.mainPlan && !previous.branchCandidates.length && !previous.foreshadows.length) {
+        notify('info', '还没有可修订的导演方案，请先生成长线规划、分支或伏笔。');
+        return null;
+    }
+    const scopeInput = runtime.overlay?.querySelector('[data-gds-director-revision-scope]');
+    const instructionInput = runtime.overlay?.querySelector('[data-gds-director-revision-instruction]');
+    const scope = DIRECTOR_REVISION_SCOPES.some(item => item.id === scopeInput?.value)
+        ? scopeInput.value
+        : previous.revisionRequest?.scope || 'all';
+    const instruction = String(instructionInput?.value || previous.revisionRequest?.instruction || '').trim();
+    if (!instruction) {
+        notify('info', '请先写明希望模型怎样修订。');
+        instructionInput?.focus?.({ preventScroll: true });
+        return null;
+    }
+    if (['outline', 'mainline'].includes(scope) && !previous.mainPlan) {
+        notify('info', '当前还没有主线，请先生成长线规划，或改选已有内容的修订范围。');
+        return null;
+    }
+    if (scope === 'branches' && !previous.branchCandidates.length) {
+        notify('info', '当前还没有分支候选，请先生成当前分支。');
+        return null;
+    }
+    if (scope === 'foreshadows' && !previous.foreshadows.length) {
+        notify('info', '当前还没有伏笔方案，请先设计伏笔。');
+        return null;
+    }
+    previous = normalizeDirectorState({ ...previous, revisionRequest: { scope, instruction } });
+    setChatState({ ...getChatState(ctx), director: previous }, ctx);
+    await saveChat(ctx);
+    await updateDirectorInjection(ctx);
+
+    const previousTask = previous.taskState || {};
+    const continuationDraft = options.continueFromDraft && previousTask.task === 'revision' ? previousTask.partial : '';
+    const prompt = buildDirectorRevisionPrompt({
+        state: previous,
+        scope,
+        instruction,
+        memory: getChatState(ctx),
+        recentText: recentStoryText(ctx, 18),
+        characterCard: characterCardText(ctx),
+        calendarContext: calendarContextFor(ctx, previous, 18),
+        continuationDraft,
+    });
+    const controller = new AbortController();
+    runtime.directorBusy = true;
+    runtime.directorAbortController = controller;
+    runtime.directorText = continuationDraft;
+    setStatus(`情节导演正在生成修订预览${continuationDraft ? '（续写）' : ''}……`);
+    await persistDirectorTaskState(ctx, 'revision', 'running', continuationDraft);
+    refreshUi();
+    try {
+        const result = await generateWithFallback(ctx, {
+            ...prompt,
+            providerProfile: moduleProvider(ctx, 'director'),
+            preferStream: settings.streamOutput !== false,
+            signal: controller.signal,
+            onText: text => {
+                runtime.directorText = String(text || '');
+                refreshUi();
+            },
+            onStatus: meta => {
+                if (meta?.phase === 'connecting') setStatus(`情节导演连接${meta.source || '模型'}……`);
+            },
+        });
+        const packet = parseDirectorRevision(result.text);
+        let next = stageDirectorRevision(previous, packet, scope, instruction);
+        next = normalizeDirectorState({ ...next, taskState: { task: 'revision', status: 'completed', partial: '', updatedAt: Date.now() } });
+        await saveChatStateAndRefresh(ctx, { ...getChatState(ctx), director: next });
+        notify('success', '修订预览已生成。确认内容后再点击“应用修订”。');
+        return next;
+    } catch (error) {
+        const stopped = controller.signal.aborted;
+        await persistDirectorTaskState(ctx, 'revision', stopped ? 'stopped' : 'error', runtime.directorText);
+        if (stopped) notify('info', '导演修订已停止，草稿已保留。');
+        else {
+            console.error(`[${DISPLAY_NAME}] 导演修订失败`, error);
+            notify('error', `导演修订失败：${readableGenerationError(error)}`);
+        }
+        return null;
+    } finally {
+        if (runtime.directorAbortController === controller) runtime.directorAbortController = null;
+        runtime.directorBusy = false;
+        refreshUi();
+    }
+}
+
 function stopDirectorTask() {
     runtime.directorAbortController?.abort(new DOMException('已中断导演生成', 'AbortError'));
 }
@@ -1074,7 +1181,9 @@ async function continueDirectorTask(ctx) {
         notify('info', '还没有可续写的导演任务，请先生成一次长线规划。');
         return null;
     }
-    return runDirectorTask(ctx, task, { continueFromDraft: true });
+    return task === 'revision'
+        ? runDirectorRevision(ctx, { continueFromDraft: true })
+        : runDirectorTask(ctx, task, { continueFromDraft: true });
 }
 
 async function restartDirectorTask(ctx) {
@@ -1092,7 +1201,9 @@ async function restartDirectorTask(ctx) {
     runtime.directorText = '';
     const reset = normalizeDirectorState({ ...director, taskState: { task, status: 'idle', partial: '', updatedAt: Date.now() } });
     await saveChatStateAndRefresh(ctx, { ...getChatState(ctx), director: reset });
-    return runDirectorTask(ctx, task, { restart: true });
+    return task === 'revision'
+        ? runDirectorRevision(ctx, { restart: true })
+        : runDirectorTask(ctx, task, { restart: true });
 }
 
 async function clearDirectorAll(ctx) {
@@ -1296,9 +1407,10 @@ function planBatchRanges(ctx, goalEnd = Number.POSITIVE_INFINITY, batchTokens = 
     return rangesForSummaryBacklog(messages, chatState, {
         keepMessages: settings.keepMessages,
         targetTokens: Math.max(0, Number(batchTokens || 0)),
-    }).filter(range => range.start <= goalEnd).map(range => (
-        range.end > goalEnd ? makeSourceRange(messages, range.start, goalEnd) : range
-    ));
+    }).filter(range => range.start <= goalEnd).map(range => {
+        if (range.end <= goalEnd) return range;
+        return makeSourceRangeFromIndexes(messages, range.refs.map(ref => ref.index).filter(index => index <= goalEnd));
+    }).filter(Boolean);
 }
 
 async function countTokensForPlan(ctx, text) {
@@ -2002,7 +2114,9 @@ async function runSummaryWorkflow(ctx, options = {}) {
             const planned = planBatchRanges(ctx, goalEnd, batchTokens);
             let range = pending?.range || planned[0] || null;
             if (!range || range.start > goalEnd) break;
-            if (range.end > goalEnd) range = makeSourceRange(getMessages(ctx), range.start, goalEnd);
+            if (range.end > goalEnd) {
+                range = makeSourceRangeFromIndexes(getMessages(ctx), range.refs.map(ref => ref.index).filter(index => index <= goalEnd));
+            }
             totalBatches = Math.max(totalBatches, batchIndex + Math.max(1, planned.length));
             const workflowInfo = {
                 id: workflowId,
@@ -2269,11 +2383,38 @@ function renderDirectorForeshadows(director) {
     </article>`).join('');
 }
 
+function renderDirectorRevisionPreview(director) {
+    const draft = director?.revisionDraft;
+    if (!draft) return '<div class="gds-empty">还没有待确认的修订。模型生成后会先显示预览，不会直接覆盖当前方案。</div>';
+    const scopeName = DIRECTOR_REVISION_SCOPES.find(item => item.id === draft.scope)?.name || '导演方案';
+    const summaries = Array.isArray(draft.changeSummary) && draft.changeSummary.length
+        ? `<ul>${draft.changeSummary.map(item => `<li>${escapeHtml(item)}</li>`).join('')}</ul>`
+        : '<p>模型未附修改说明，请核对下方范围后再决定是否应用。</p>';
+    const details = [
+        draft.mainPlan ? `主线：${escapeHtml(draft.mainPlan.title || '未命名')}，${Number(draft.mainPlan.arcs?.length || 0)} 幕` : '',
+        Array.isArray(draft.branchCandidates) ? `分支：${draft.branchCandidates.length} 条` : '',
+        Array.isArray(draft.foreshadows) ? `伏笔：${draft.foreshadows.length} 条` : '',
+    ].filter(Boolean).join(' · ');
+    const outline = draft.mainPlan?.outline?.length
+        ? `<ol>${draft.mainPlan.outline.map(item => `<li>${escapeHtml(item)}</li>`).join('')}</ol>`
+        : '';
+    const planDetails = draft.mainPlan && draft.scope !== 'outline'
+        ? `<div class="gds-revision-preview-list"><strong>${escapeHtml(draft.mainPlan.premise || '')}</strong>${(draft.mainPlan.arcs || []).map((arc, index) => `<p>第 ${index + 1} 幕 · ${escapeHtml(arc.title)}：${escapeHtml(arc.goal || '')}</p>`).join('')}</div>`
+        : '';
+    const branchDetails = Array.isArray(draft.branchCandidates)
+        ? `<div class="gds-revision-preview-list">${draft.branchCandidates.map(item => `<p><strong>${escapeHtml(item.title)}</strong>：${escapeHtml(item.summary || '')}</p>`).join('') || '<p>修订后不保留分支候选。</p>'}</div>`
+        : '';
+    const foreshadowDetails = Array.isArray(draft.foreshadows)
+        ? `<div class="gds-revision-preview-list">${draft.foreshadows.map(item => `<p><strong>${escapeHtml(item.name)}</strong>：${escapeHtml(item.surface || '')}</p>`).join('') || '<p>修订后不保留伏笔方案。</p>'}</div>`
+        : '';
+    return `<article class="gds-revision-preview"><div><strong>${escapeHtml(scopeName)}</strong><small>待确认，不会自动覆盖</small></div>${summaries}${details ? `<p>${details}</p>` : ''}${outline}${planDetails}${branchDetails}${foreshadowDetails}</article>`;
+}
+
 function parseDirectorEditLines(value, max = 30) {
     return String(value || '').split(/\r?\n/).map(item => item.trim()).filter(Boolean).slice(0, max);
 }
 
-async function saveDirectorContentEdits(ctx) {
+function collectDirectorContentEdits(ctx) {
     const current = getDirectorState(ctx);
     const planRoot = runtime.overlay?.querySelector('[data-gds-edit-plan]');
     let mainPlan = current.mainPlan;
@@ -2340,10 +2481,18 @@ async function saveDirectorContentEdits(ctx) {
         };
     })) : current.foreshadows;
 
-    const next = normalizeDirectorState({ ...current, mainPlan, branchCandidates, foreshadows });
-    await saveChatStateAndRefresh(ctx, { ...getChatState(ctx), director: next });
+    return normalizeDirectorState({ ...current, mainPlan, branchCandidates, foreshadows });
+}
+
+async function saveDirectorContentEdits(ctx, { notifyUser = true, refresh = true } = {}) {
+    const next = collectDirectorContentEdits(ctx);
+    if (refresh) await saveChatStateAndRefresh(ctx, { ...getChatState(ctx), director: next });
+    else {
+        setChatState({ ...getChatState(ctx), director: next }, ctx);
+        await saveChat(ctx);
+    }
     await updateDirectorInjection(ctx);
-    notify('success', '导演方案的手动修改已保存并更新执行卡。');
+    if (notifyUser) notify('success', '导演方案的手动修改已保存并更新执行卡。');
     return next;
 }
 
@@ -2685,7 +2834,11 @@ function setActiveTab(tab = 'home') {
     const navigation = windowNode.querySelector('.gds-tabs');
     if (navigation) navigation.hidden = active === 'home';
     const pageHost = windowNode.querySelector('.gds-page-host');
-    if (pageHost) pageHost.scrollTop = 0;
+    if (pageHost) {
+        runtime.directorScrollLock = null;
+        runtime.pageScrollByTab[active] = 0;
+        pageHost.scrollTop = 0;
+    }
     const title = windowNode.querySelector('[data-gds-page-title]');
     const subtitles = {
         home: ['嘎嘎小狗工坊', '选择一个功能开始'],
@@ -2779,25 +2932,53 @@ function bindBlankAreaScrollGuard(pageHost) {
 function bindDirectorEditorScrollGuard(pageHost) {
     if (!pageHost || pageHost.dataset.gdsDirectorEditorGuard === 'true') return;
     pageHost.dataset.gdsDirectorEditorGuard = 'true';
-    const editorSelector = '[data-gds-director-plan] input,[data-gds-director-plan] textarea,[data-gds-director-branches] input,[data-gds-director-branches] textarea,[data-gds-director-foreshadows] input,[data-gds-director-foreshadows] textarea';
-    let lockedScrollTop = 0;
+    const editorSelector = '[data-gds-director-plan] input,[data-gds-director-plan] textarea,[data-gds-director-branches] input,[data-gds-director-branches] textarea,[data-gds-director-foreshadows] input,[data-gds-director-foreshadows] textarea,[data-gds-director-revision] input,[data-gds-director-revision] textarea,[data-gds-director-revision] select';
+
+    const tabName = () => pageHost.closest('.gds-window')?.dataset.gdsTab || '';
+    const lockScroll = (scrollTop, duration = 900) => {
+        const top = Math.max(0, Number(scrollTop) || 0);
+        const token = Symbol('director-scroll-lock');
+        runtime.directorScrollLock = { token, top, until: Date.now() + duration };
+        runtime.pageScrollByTab.director = top;
+        const restore = () => {
+            const lock = runtime.directorScrollLock;
+            if (!pageHost.isConnected || lock?.token !== token) return;
+            pageHost.scrollTop = top;
+        };
+        restorePageScrollAfterLayout(pageHost, top);
+        for (const delay of [40, 120, 280, 520, duration]) setTimeout(restore, delay);
+    };
+
+    pageHost.addEventListener('scroll', () => {
+        const lock = runtime.directorScrollLock;
+        if (tabName() === 'director' && lock && Date.now() <= lock.until) {
+            if (Math.abs(pageHost.scrollTop - lock.top) > 0.5) pageHost.scrollTop = lock.top;
+            return;
+        }
+        runtime.pageScrollByTab[tabName()] = pageHost.scrollTop;
+        if (lock && Date.now() > lock.until) runtime.directorScrollLock = null;
+    }, { passive: true });
 
     pageHost.addEventListener('pointerdown', event => {
         const editor = event.target.closest?.(editorSelector);
         if (!editor) return;
-        lockedScrollTop = pageHost.scrollTop;
+        const lockedScrollTop = pageHost.scrollTop;
         runtime.directorEditorActive = true;
         // Establish focus before the browser's default pointer focus. The
         // preventScroll option avoids jumping the nested panel to its start,
         // while the later native action can still position the text caret.
         try { editor.focus({ preventScroll: true }); } catch { /* Older WebViews focus normally. */ }
-        restorePageScrollAfterLayout(pageHost, lockedScrollTop);
+        lockScroll(lockedScrollTop);
     }, true);
 
     pageHost.addEventListener('focusin', event => {
         if (!event.target.matches?.(editorSelector)) return;
         runtime.directorEditorActive = true;
-        restorePageScrollAfterLayout(pageHost, lockedScrollTop || pageHost.scrollTop);
+        const activeLock = runtime.directorScrollLock;
+        const stableTop = activeLock && Date.now() <= activeLock.until
+            ? activeLock.top
+            : Number(runtime.pageScrollByTab.director ?? pageHost.scrollTop);
+        lockScroll(stableTop);
     }, true);
 
     pageHost.addEventListener('focusout', () => {
@@ -2915,7 +3096,12 @@ function savedRecap(chatState) {
 function refreshUi() {
     if (!runtime.overlay) return;
     const pageHost = runtime.overlay.querySelector('.gds-page-host');
-    const preservedScrollTop = Number(pageHost?.scrollTop || 0);
+    const activeTab = runtime.overlay.querySelector('.gds-window')?.dataset.gdsTab || '';
+    const activeScrollLock = runtime.directorScrollLock;
+    const preservedScrollTop = activeTab === 'director' && activeScrollLock && Date.now() <= activeScrollLock.until
+        ? activeScrollLock.top
+        : Number(pageHost?.scrollTop || 0);
+    runtime.pageScrollByTab[activeTab] = preservedScrollTop;
     const ctx = getContext();
     reconcileGeneratingFlag(ctx);
     const settings = getSettings(ctx);
@@ -3015,6 +3201,10 @@ function refreshUi() {
     const directorContinue = runtime.overlay.querySelector('[data-gds-director-continue]');
     const directorRestart = runtime.overlay.querySelector('[data-gds-director-restart]');
     const directorClear = runtime.overlay.querySelector('[data-gds-director-clear]');
+    const directorRevise = runtime.overlay.querySelector('[data-gds-director-revise]');
+    const directorApplyRevision = runtime.overlay.querySelector('[data-gds-director-apply-revision]');
+    const directorDiscardRevision = runtime.overlay.querySelector('[data-gds-director-discard-revision]');
+    const directorUndoRevision = runtime.overlay.querySelector('[data-gds-director-undo-revision]');
     const replyStop = runtime.overlay.querySelector('[data-gds-reply-stop]');
     const rebuild = runtime.overlay.querySelector('[data-gds-rebuild]');
     const restore = runtime.overlay.querySelector('[data-gds-restore]');
@@ -3071,6 +3261,10 @@ function refreshUi() {
     }
     if (directorRestart) directorRestart.disabled = taskActive;
     if (directorClear) directorClear.disabled = taskActive;
+    if (directorRevise) directorRevise.disabled = taskActive || (!director.mainPlan && !director.branchCandidates.length && !director.foreshadows.length);
+    if (directorApplyRevision) directorApplyRevision.disabled = taskActive || !director.revisionDraft;
+    if (directorDiscardRevision) directorDiscardRevision.disabled = taskActive || !director.revisionDraft;
+    if (directorUndoRevision) directorUndoRevision.disabled = taskActive || !director.revisionHistory.length;
     if (replyStop) replyStop.hidden = !(runtime.replyBusy && runtime.replyAbortController);
     if (rebuild) rebuild.disabled = taskActive;
     if (restore) restore.disabled = taskActive;
@@ -3119,11 +3313,15 @@ function refreshUi() {
     const directorPacing = runtime.overlay.querySelector('[data-gds-director-pacing]');
     const directorPacingCustom = runtime.overlay.querySelector('[data-gds-director-pacing-custom]');
     const directorBrief = runtime.overlay.querySelector('[data-gds-director-brief]');
+    const directorRevisionScope = runtime.overlay.querySelector('[data-gds-director-revision-scope]');
+    const directorRevisionInstruction = runtime.overlay.querySelector('[data-gds-director-revision-instruction]');
     if (directorEnabled) directorEnabled.checked = Boolean(director.enabled);
     if (directorPreset) directorPreset.value = director.presetId;
     if (directorPacing) directorPacing.value = director.pacingMode;
     if (directorPacingCustom && document.activeElement !== directorPacingCustom) directorPacingCustom.value = director.pacingCustom || '';
     if (directorBrief && document.activeElement !== directorBrief) directorBrief.value = director.customBrief;
+    if (directorRevisionScope && document.activeElement !== directorRevisionScope) directorRevisionScope.value = director.revisionRequest?.scope || 'all';
+    if (directorRevisionInstruction && document.activeElement !== directorRevisionInstruction) directorRevisionInstruction.value = director.revisionRequest?.instruction || '';
     for (const [selector, value] of Object.entries(director.toggles || {})) {
         const input = runtime.overlay.querySelector(`[data-gds-director-toggle="${selector}"]`);
         if (input) input.checked = Boolean(value);
@@ -3136,6 +3334,8 @@ function refreshUi() {
     if (branchList && !runtime.directorEditorActive && !branchList.contains(document.activeElement)) branchList.innerHTML = renderDirectorBranches(director);
     const foreshadowList = runtime.overlay.querySelector('[data-gds-director-foreshadows]');
     if (foreshadowList && !runtime.directorEditorActive && !foreshadowList.contains(document.activeElement)) foreshadowList.innerHTML = renderDirectorForeshadows(director);
+    const directorRevisionPreview = runtime.overlay.querySelector('[data-gds-director-revision-preview]');
+    if (directorRevisionPreview) directorRevisionPreview.innerHTML = renderDirectorRevisionPreview(director);
     const calendarEnabled = runtime.overlay.querySelector('[data-gds-calendar-enabled]');
     const calendarBuiltins = runtime.overlay.querySelector('[data-gds-calendar-builtins]');
     const calendarAutoAdvance = runtime.overlay.querySelector('[data-gds-calendar-auto-advance]');
@@ -3631,6 +3831,11 @@ function createUi() {
                 <label class="gds-field gds-wide"><span>自定义规划要求（可写题材、必做、禁用和结局）</span><textarea rows="6" data-gds-director-brief placeholder="例如：破镜重圆，过程酸涩慢热；中期引入一名知道秘密的新角色；结局 HE，不使用失忆推动。"></textarea></label>
                 <div class="gds-director-actions"><button class="gds-primary" data-gds-director-longline>生成长线规划</button><button data-gds-director-branch>生成当前分支</button><button data-gds-director-foreshadow>设计伏笔</button><button data-gds-director-progress>检查当前阶段</button><button data-gds-director-save>保存导演设置</button><button data-gds-director-save-content>保存手动修改</button></div>
                 <label class="gds-field gds-wide"><span>导演模型原始返回／当前执行卡</span><textarea rows="8" readonly data-gds-director-output></textarea></label>
+                <div class="gds-director-block gds-revision-block" data-gds-director-revision><h4>AI 修订导演方案</h4><p>写明修改要求，模型会先生成预览；只有点击“应用修订”后才会更新执行卡。</p>
+                    <div class="gds-revision-form"><label>修订范围 <select data-gds-director-revision-scope>${DIRECTOR_REVISION_SCOPES.map(item => `<option value="${item.id}">${item.name}</option>`).join('')}</select></label><label>修订要求 <textarea rows="4" data-gds-director-revision-instruction placeholder="例如：保留当前阶段不动，把第三幕冲突改得更酸涩；伏笔提前出现，但推迟回收。"></textarea></label></div>
+                    <div class="gds-director-actions"><button class="gds-primary" data-gds-director-revise>生成修订预览</button><button data-gds-director-apply-revision>应用修订</button><button data-gds-director-discard-revision>放弃预览</button><button data-gds-director-undo-revision>撤销上次修订</button></div>
+                    <div data-gds-director-revision-preview></div>
+                </div>
                 <div class="gds-director-block"><h4>当前主线</h4><div data-gds-director-plan></div></div>
                 <div class="gds-director-block"><h4>分支候选</h4><div data-gds-director-branches></div></div>
                 <div class="gds-director-block"><h4>伏笔管理</h4><div data-gds-director-foreshadows></div></div>
@@ -3694,7 +3899,7 @@ function createUi() {
 
     overlay.addEventListener('click', async event => {
         event.stopPropagation();
-        const target = event.target.closest('[data-gds-tab],[data-gds-close],[data-gds-summarize],[data-gds-layered-start],[data-gds-layered-pause],[data-gds-layered-stop],[data-gds-backfill-start],[data-gds-backfill-continue],[data-gds-backfill-restart],[data-gds-backfill-stop],[data-gds-consolidate],[data-gds-restore-archive],[data-gds-continue],[data-gds-stop],[data-gds-rebuild],[data-gds-restore],[data-gds-save-summary],[data-gds-api-save],[data-gds-api-test],[data-gds-director-longline],[data-gds-director-branch],[data-gds-director-foreshadow],[data-gds-director-progress],[data-gds-director-save],[data-gds-director-save-content],[data-gds-director-lock],[data-gds-director-unlock],[data-gds-director-select-branch],[data-gds-director-clear-branch],[data-gds-director-set-beat],[data-gds-director-stop],[data-gds-director-continue],[data-gds-director-restart],[data-gds-director-clear],[data-gds-calendar-add],[data-gds-calendar-remove],[data-gds-calendar-sync],[data-gds-reply-generate],[data-gds-reply-copy],[data-gds-reply-insert],[data-gds-reply-stop]');
+        const target = event.target.closest('[data-gds-tab],[data-gds-close],[data-gds-summarize],[data-gds-layered-start],[data-gds-layered-pause],[data-gds-layered-stop],[data-gds-backfill-start],[data-gds-backfill-continue],[data-gds-backfill-restart],[data-gds-backfill-stop],[data-gds-consolidate],[data-gds-restore-archive],[data-gds-continue],[data-gds-stop],[data-gds-rebuild],[data-gds-restore],[data-gds-save-summary],[data-gds-api-save],[data-gds-api-test],[data-gds-director-longline],[data-gds-director-branch],[data-gds-director-foreshadow],[data-gds-director-progress],[data-gds-director-save],[data-gds-director-save-content],[data-gds-director-revise],[data-gds-director-apply-revision],[data-gds-director-discard-revision],[data-gds-director-undo-revision],[data-gds-director-lock],[data-gds-director-unlock],[data-gds-director-select-branch],[data-gds-director-clear-branch],[data-gds-director-set-beat],[data-gds-director-stop],[data-gds-director-continue],[data-gds-director-restart],[data-gds-director-clear],[data-gds-calendar-add],[data-gds-calendar-remove],[data-gds-calendar-sync],[data-gds-reply-generate],[data-gds-reply-copy],[data-gds-reply-insert],[data-gds-reply-stop]');
         if (!target) return;
         try {
             if (target.matches('[data-gds-tab]')) {
@@ -3740,6 +3945,27 @@ function createUi() {
                 notify('success', '导演设置已保存。');
             }
             if (target.matches('[data-gds-director-save-content]')) await saveDirectorContentEdits(getContext());
+            if (target.matches('[data-gds-director-revise]')) await runDirectorRevision(getContext());
+            if (target.matches('[data-gds-director-apply-revision]')) {
+                const ctx = getContext();
+                const next = applyDirectorRevision(getDirectorState(ctx));
+                await saveChatStateAndRefresh(ctx, { ...getChatState(ctx), director: next });
+                await updateDirectorInjection(ctx);
+                notify('success', '导演修订已应用，执行卡已同步更新。');
+            }
+            if (target.matches('[data-gds-director-discard-revision]')) {
+                const ctx = getContext();
+                const next = discardDirectorRevision(getDirectorState(ctx));
+                await saveChatStateAndRefresh(ctx, { ...getChatState(ctx), director: next });
+                notify('info', '修订预览已放弃，当前导演方案没有改变。');
+            }
+            if (target.matches('[data-gds-director-undo-revision]')) {
+                const ctx = getContext();
+                const next = undoDirectorRevision(getDirectorState(ctx));
+                await saveChatStateAndRefresh(ctx, { ...getChatState(ctx), director: next });
+                await updateDirectorInjection(ctx);
+                notify('success', '已撤销上次应用的导演修订。');
+            }
             if (target.matches('[data-gds-director-longline],[data-gds-director-branch],[data-gds-director-foreshadow]')) {
                 const ctx = getContext();
                 updateDirectorFromUi(ctx);
