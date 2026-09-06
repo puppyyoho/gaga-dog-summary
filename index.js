@@ -93,7 +93,7 @@ const INJECTION_ID = `${EXTENSION_NAME}:memory`;
 const DIRECTOR_INJECTION_ID = `${EXTENSION_NAME}:director`;
 const PANEL_LOGO_URL = new URL('./assets/gaga-dog-logo.png', import.meta.url).href;
 const FLOATING_LOGO_URL = new URL('./assets/gaga-dog-floating.png', import.meta.url).href;
-const VERSION = '0.5.4';
+const VERSION = '0.5.5';
 const SETTINGS_VERSION = 9;
 
 const DEFAULT_SETTINGS = {
@@ -2566,16 +2566,65 @@ function bindStableDetailsScrolling(pageHost) {
         event.preventDefault();
         const lockedScrollTop = pageHost.scrollTop;
         details.open = !details.open;
-        const restore = () => {
-            if (pageHost.isConnected) pageHost.scrollTop = lockedScrollTop;
-        };
-        restore();
-        queueMicrotask(restore);
-        requestAnimationFrame(() => {
-            restore();
-            requestAnimationFrame(restore);
-        });
+        restorePageScrollAfterLayout(pageHost, lockedScrollTop);
     }, true);
+}
+
+function restorePageScrollAfterLayout(pageHost, scrollTop) {
+    const restore = () => {
+        if (pageHost?.isConnected) pageHost.scrollTop = scrollTop;
+    };
+    restore();
+    queueMicrotask(restore);
+    requestAnimationFrame(() => {
+        restore();
+        requestAnimationFrame(restore);
+    });
+}
+
+function bindBlankAreaScrollGuard(pageHost) {
+    if (!pageHost || pageHost.dataset.gdsBlankScrollGuard === 'true') return;
+    pageHost.dataset.gdsBlankScrollGuard = 'true';
+    const actionableSelector = 'button,a,input,select,textarea,summary,[contenteditable="true"],[role="button"]';
+    let pointerStart = null;
+
+    pageHost.addEventListener('pointerdown', event => {
+        if (event.button !== undefined && event.button !== 0) return;
+        if (event.target.closest?.(actionableSelector)) {
+            pointerStart = null;
+            return;
+        }
+        pointerStart = {
+            pointerId: event.pointerId,
+            x: event.clientX,
+            y: event.clientY,
+            scrollTop: pageHost.scrollTop,
+            tab: pageHost.closest('.gds-window')?.dataset.gdsTab || '',
+            moved: false,
+        };
+    }, true);
+
+    pageHost.addEventListener('pointermove', event => {
+        if (!pointerStart || event.pointerId !== pointerStart.pointerId) return;
+        if (Math.hypot(event.clientX - pointerStart.x, event.clientY - pointerStart.y) >= 6) pointerStart.moved = true;
+    }, true);
+
+    pageHost.addEventListener('pointercancel', () => { pointerStart = null; }, true);
+    pageHost.addEventListener('click', event => {
+        if (event.target.closest?.(actionableSelector)) {
+            pointerStart = null;
+            return;
+        }
+
+        // Keep Tavern's document-level click handlers from treating empty
+        // workbench space as a click on the page behind the modal.
+        event.stopPropagation();
+        const locked = pointerStart;
+        pointerStart = null;
+        if (!locked?.moved && locked.tab === (pageHost.closest('.gds-window')?.dataset.gdsTab || '')) {
+            restorePageScrollAfterLayout(pageHost, locked.scrollTop);
+        }
+    });
 }
 
 function updateDirectorFromUi(ctx) {
@@ -3385,7 +3434,9 @@ function createUi() {
     const windowNode = overlay.querySelector('.gds-window');
     const headerNode = overlay.querySelector('.gds-header');
     if (windowNode && headerNode) bindPanelDrag(windowNode, headerNode);
-    bindStableDetailsScrolling(overlay.querySelector('.gds-page-host'));
+    const pageHost = overlay.querySelector('.gds-page-host');
+    bindStableDetailsScrolling(pageHost);
+    bindBlankAreaScrollGuard(pageHost);
 
     const floating = document.createElement('button');
     floating.className = 'gds-floating';
@@ -3396,7 +3447,14 @@ function createUi() {
     applyFloatingAppearance();
     bindFloatingDrag(floating);
 
+    // The host page uses delegated pointer handlers. Do not let interactions
+    // inside the modal leak through and mutate the page or its scroll state.
+    for (const eventName of ['pointerdown', 'mousedown', 'mouseup']) {
+        overlay.addEventListener(eventName, event => event.stopPropagation());
+    }
+
     overlay.addEventListener('click', async event => {
+        event.stopPropagation();
         const target = event.target.closest('[data-gds-tab],[data-gds-close],[data-gds-summarize],[data-gds-layered-start],[data-gds-layered-pause],[data-gds-layered-stop],[data-gds-backfill-start],[data-gds-backfill-continue],[data-gds-backfill-restart],[data-gds-backfill-stop],[data-gds-consolidate],[data-gds-restore-archive],[data-gds-continue],[data-gds-stop],[data-gds-rebuild],[data-gds-restore],[data-gds-save-summary],[data-gds-api-save],[data-gds-api-test],[data-gds-director-longline],[data-gds-director-branch],[data-gds-director-foreshadow],[data-gds-director-save],[data-gds-director-lock],[data-gds-director-select-branch],[data-gds-director-stop],[data-gds-director-continue],[data-gds-director-restart],[data-gds-director-clear],[data-gds-calendar-add],[data-gds-calendar-remove],[data-gds-calendar-sync],[data-gds-reply-generate],[data-gds-reply-copy],[data-gds-reply-insert],[data-gds-reply-stop]');
         if (!target) return;
         try {

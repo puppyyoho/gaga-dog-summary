@@ -154,9 +154,18 @@ test('opening lower detail sections preserves the internal scroll anchor', () =>
     assert.match(js, /event\.preventDefault\(\)/);
     assert.match(js, /const lockedScrollTop = pageHost\.scrollTop/);
     assert.match(js, /details\.open = !details\.open/);
-    assert.match(js, /pageHost\.scrollTop = lockedScrollTop/);
+    assert.match(js, /restorePageScrollAfterLayout\(pageHost, lockedScrollTop\)/);
     assert.match(js, /const preservedScrollTop = Number\(pageHost\?\.scrollTop \|\| 0\)/);
-    assert.match(js, /bindStableDetailsScrolling\(overlay\.querySelector\('\.gds-page-host'\)\)/);
+    assert.match(js, /bindStableDetailsScrolling\(pageHost\)/);
+});
+
+test('clicking non-interactive page space cannot reset the internal scroll position', () => {
+    assert.match(js, /function bindBlankAreaScrollGuard\(pageHost\)/);
+    assert.match(js, /gdsBlankScrollGuard/);
+    assert.match(js, /scrollTop: pageHost\.scrollTop/);
+    assert.match(js, /event\.stopPropagation\(\)/);
+    assert.match(js, /restorePageScrollAfterLayout\(pageHost, locked\.scrollTop\)/);
+    assert.match(js, /bindBlankAreaScrollGuard\(pageHost\)/);
 });
 
 test('reply candidates can be copied or inserted without auto-sending', () => {
