@@ -206,12 +206,16 @@ test('clicking non-interactive page space cannot reset the internal scroll posit
 
 test('director editors keep focus and scroll without being re-rendered', () => {
     assert.match(js, /function bindDirectorEditorScrollGuard\(pageHost\)/);
-    assert.match(js, /editor\.focus\(\{ preventScroll: true \}\)/);
+    assert.doesNotMatch(js, /editor\.focus\(\{ preventScroll: true \}\)/);
     assert.match(js, /runtime\.directorEditorActive = true/);
     assert.match(js, /runtime\.directorScrollLock = \{ token, top, until:/);
-    assert.match(js, /for \(const delay of \[40, 120, 280, 520, duration\]\)/);
+    assert.match(js, /pageHost\.addEventListener\('mousedown', rememberPointerFocus/);
+    assert.match(js, /pageHost\.addEventListener\('touchstart', rememberPointerFocus/);
+    assert.match(js, /for \(const delay of \[40, 100, 220, 480, 900, duration\]\)/);
     assert.match(js, /pageHost\.addEventListener\('scroll'/);
-    assert.match(js, /!runtime\.directorEditorActive && !directorPlan\.contains\(document\.activeElement\)/);
+    assert.match(js, /function refreshDirectorEditorRegion\(node, html, key\)/);
+    assert.match(js, /runtime\.directorRenderSignatures\[key\] === signature/);
+    assert.match(js, /refreshDirectorEditorRegion\(directorPlan, renderDirectorPlan\(director\), 'plan'\)/);
     assert.match(js, /bindDirectorEditorScrollGuard\(pageHost\)/);
 });
 

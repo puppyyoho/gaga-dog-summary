@@ -108,7 +108,7 @@ const INJECTION_ID = `${EXTENSION_NAME}:memory`;
 const DIRECTOR_INJECTION_ID = `${EXTENSION_NAME}:director`;
 const PANEL_LOGO_URL = new URL('./assets/gaga-dog-logo.png', import.meta.url).href;
 const FLOATING_LOGO_URL = new URL('./assets/gaga-dog-floating.png', import.meta.url).href;
-const VERSION = '0.5.9';
+const VERSION = '0.5.10';
 const SETTINGS_VERSION = 10;
 
 const DEFAULT_SETTINGS = {
@@ -178,6 +178,7 @@ const runtime = {
     directorEditorActive: false,
     directorScrollLock: null,
     pageScrollByTab: {},
+    directorRenderSignatures: { plan: '', branches: '', foreshadows: '' },
 };
 
 function getContext() {
@@ -2933,9 +2934,10 @@ function bindDirectorEditorScrollGuard(pageHost) {
     if (!pageHost || pageHost.dataset.gdsDirectorEditorGuard === 'true') return;
     pageHost.dataset.gdsDirectorEditorGuard = 'true';
     const editorSelector = '[data-gds-director-plan] input,[data-gds-director-plan] textarea,[data-gds-director-branches] input,[data-gds-director-branches] textarea,[data-gds-director-foreshadows] input,[data-gds-director-foreshadows] textarea,[data-gds-director-revision] input,[data-gds-director-revision] textarea,[data-gds-director-revision] select';
+    let pointerFocus = null;
 
     const tabName = () => pageHost.closest('.gds-window')?.dataset.gdsTab || '';
-    const lockScroll = (scrollTop, duration = 900) => {
+    const lockScroll = (scrollTop, duration = 1600) => {
         const top = Math.max(0, Number(scrollTop) || 0);
         const token = Symbol('director-scroll-lock');
         runtime.directorScrollLock = { token, top, until: Date.now() + duration };
@@ -2946,7 +2948,23 @@ function bindDirectorEditorScrollGuard(pageHost) {
             pageHost.scrollTop = top;
         };
         restorePageScrollAfterLayout(pageHost, top);
-        for (const delay of [40, 120, 280, 520, duration]) setTimeout(restore, delay);
+        for (const delay of [40, 100, 220, 480, 900, duration]) setTimeout(restore, delay);
+    };
+
+    const rememberPointerFocus = event => {
+        const editor = event.target.closest?.(editorSelector);
+        if (!editor) {
+            pointerFocus = null;
+            runtime.directorScrollLock = null;
+            return;
+        }
+        pointerFocus = {
+            editor,
+            top: pageHost.scrollTop,
+            at: Date.now(),
+        };
+        runtime.directorEditorActive = true;
+        lockScroll(pointerFocus.top);
     };
 
     pageHost.addEventListener('scroll', () => {
@@ -2959,33 +2977,46 @@ function bindDirectorEditorScrollGuard(pageHost) {
         if (lock && Date.now() > lock.until) runtime.directorScrollLock = null;
     }, { passive: true });
 
-    pageHost.addEventListener('pointerdown', event => {
-        const editor = event.target.closest?.(editorSelector);
-        if (!editor) return;
-        const lockedScrollTop = pageHost.scrollTop;
-        runtime.directorEditorActive = true;
-        // Establish focus before the browser's default pointer focus. The
-        // preventScroll option avoids jumping the nested panel to its start,
-        // while the later native action can still position the text caret.
-        try { editor.focus({ preventScroll: true }); } catch { /* Older WebViews focus normally. */ }
-        lockScroll(lockedScrollTop);
-    }, true);
+    pageHost.addEventListener('pointerdown', rememberPointerFocus, true);
+    pageHost.addEventListener('mousedown', rememberPointerFocus, true);
+    pageHost.addEventListener('touchstart', rememberPointerFocus, { capture: true, passive: true });
 
     pageHost.addEventListener('focusin', event => {
         if (!event.target.matches?.(editorSelector)) return;
         runtime.directorEditorActive = true;
-        const activeLock = runtime.directorScrollLock;
-        const stableTop = activeLock && Date.now() <= activeLock.until
-            ? activeLock.top
-            : Number(runtime.pageScrollByTab.director ?? pageHost.scrollTop);
-        lockScroll(stableTop);
+        if (pointerFocus?.editor === event.target && Date.now() - pointerFocus.at < 2000) {
+            lockScroll(pointerFocus.top);
+        }
     }, true);
+
+    pageHost.addEventListener('click', event => {
+        const editor = event.target.closest?.(editorSelector);
+        if (editor && pointerFocus?.editor === editor && Date.now() - pointerFocus.at < 2500) {
+            lockScroll(pointerFocus.top);
+        }
+    }, true);
+
+    const releaseForUserScroll = () => {
+        pointerFocus = null;
+        runtime.directorScrollLock = null;
+    };
+    pageHost.addEventListener('wheel', releaseForUserScroll, { capture: true, passive: true });
+    pageHost.addEventListener('touchmove', releaseForUserScroll, { capture: true, passive: true });
 
     pageHost.addEventListener('focusout', () => {
         queueMicrotask(() => {
             runtime.directorEditorActive = Boolean(pageHost.contains(document.activeElement) && document.activeElement?.matches?.(editorSelector));
         });
     }, true);
+}
+
+function refreshDirectorEditorRegion(node, html, key) {
+    if (!node) return;
+    const signature = simpleHash(html);
+    if (runtime.directorRenderSignatures[key] === signature) return;
+    if (runtime.directorEditorActive || node.contains(document.activeElement)) return;
+    node.innerHTML = html;
+    runtime.directorRenderSignatures[key] = signature;
 }
 
 function updateDirectorFromUi(ctx) {
@@ -3329,11 +3360,11 @@ function refreshUi() {
     const directorOutput = runtime.overlay.querySelector('[data-gds-director-output]');
     if (directorOutput && document.activeElement !== directorOutput) directorOutput.value = runtime.directorText || director.lastExecutionCard || '';
     const directorPlan = runtime.overlay.querySelector('[data-gds-director-plan]');
-    if (directorPlan && !runtime.directorEditorActive && !directorPlan.contains(document.activeElement)) directorPlan.innerHTML = renderDirectorPlan(director);
+    refreshDirectorEditorRegion(directorPlan, renderDirectorPlan(director), 'plan');
     const branchList = runtime.overlay.querySelector('[data-gds-director-branches]');
-    if (branchList && !runtime.directorEditorActive && !branchList.contains(document.activeElement)) branchList.innerHTML = renderDirectorBranches(director);
+    refreshDirectorEditorRegion(branchList, renderDirectorBranches(director), 'branches');
     const foreshadowList = runtime.overlay.querySelector('[data-gds-director-foreshadows]');
-    if (foreshadowList && !runtime.directorEditorActive && !foreshadowList.contains(document.activeElement)) foreshadowList.innerHTML = renderDirectorForeshadows(director);
+    refreshDirectorEditorRegion(foreshadowList, renderDirectorForeshadows(director), 'foreshadows');
     const directorRevisionPreview = runtime.overlay.querySelector('[data-gds-director-revision-preview]');
     if (directorRevisionPreview) directorRevisionPreview.innerHTML = renderDirectorRevisionPreview(director);
     const calendarEnabled = runtime.overlay.querySelector('[data-gds-calendar-enabled]');
