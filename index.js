@@ -114,11 +114,12 @@ const INJECTION_ID = `${EXTENSION_NAME}:memory`;
 const DIRECTOR_INJECTION_ID = `${EXTENSION_NAME}:director`;
 const PANEL_LOGO_URL = new URL('./assets/gaga-dog-logo.png', import.meta.url).href;
 const FLOATING_LOGO_URL = new URL('./assets/gaga-dog-floating.png', import.meta.url).href;
-const VERSION = '0.6.2';
-const SETTINGS_VERSION = 10;
+const VERSION = '0.7.0';
+const SETTINGS_VERSION = 11;
 
 const DEFAULT_SETTINGS = {
     workshopEnabled: true,
+    showTopBarButton: true,
     showFloatingButton: true,
     floatingIconSize: 62,
     floatingIconData: '',
@@ -146,6 +147,10 @@ const DEFAULT_SETTINGS = {
 const runtime = {
     overlay: null,
     floating: null,
+    floatingDragCleanup: null,
+    topBarEntry: null,
+    entryPointObserver: null,
+    entryPointTimer: null,
     settingsEntry: null,
     open: false,
     busy: false,
@@ -275,6 +280,8 @@ function getSettings(ctx = getContext()) {
     delete result.triggerTokens;
     result.settingsVersion = SETTINGS_VERSION;
     result.workshopEnabled = result.workshopEnabled !== false;
+    result.showTopBarButton = result.showTopBarButton !== false;
+    result.showFloatingButton = result.showFloatingButton !== false;
     result.prompts = { ...DEFAULT_PROMPTS, ...(current?.prompts && typeof current.prompts === 'object' ? current.prompts : {}) };
     result.summaryMode = ['novel', 'structured', 'mixed'].includes(result.summaryMode) ? result.summaryMode : DEFAULT_SETTINGS.summaryMode;
     result.memoryMode = ['manual', 'layered'].includes(result.memoryMode) ? result.memoryMode : DEFAULT_SETTINGS.memoryMode;
@@ -3835,6 +3842,7 @@ function refreshUi() {
     if (replyList) replyList.innerHTML = renderReplyCandidates(reply.lastCandidates);
     refreshSettingsEntry();
     applyFloatingAppearance();
+    applyTopBarAppearance();
     applyCollapsedView();
     if (pageHost?.isConnected) pageHost.scrollTop = preservedScrollTop;
 }
@@ -3853,15 +3861,35 @@ function applyCollapsedView() {
 }
 
 function clampFloatingPosition(node, x, y) {
-    const viewportWidth = Math.max(1, Number(globalThis.innerWidth || document.documentElement?.clientWidth || 1));
-    const viewportHeight = Math.max(1, Number(globalThis.innerHeight || document.documentElement?.clientHeight || 1));
+    const viewport = globalThis.visualViewport;
+    const viewportLeft = Math.max(0, Number(viewport?.offsetLeft || 0));
+    const viewportTop = Math.max(0, Number(viewport?.offsetTop || 0));
+    const viewportWidth = Math.max(1, Number(viewport?.width || globalThis.innerWidth || document.documentElement?.clientWidth || 1));
+    const viewportHeight = Math.max(1, Number(viewport?.height || globalThis.innerHeight || document.documentElement?.clientHeight || 1));
     const width = Math.max(1, Number(node?.offsetWidth || node?.getBoundingClientRect?.().width || 62));
     const height = Math.max(1, Number(node?.offsetHeight || node?.getBoundingClientRect?.().height || 62));
-    const margin = 6;
+    const margin = isMobilePanelLayout() ? 10 : 6;
+    const rawBottomBarSize = Number.parseFloat(globalThis.getComputedStyle?.(document.documentElement)?.getPropertyValue('--bottomFormBlockSize'));
+    const bottomInset = isMobilePanelLayout() ? Math.max(72, (Number.isFinite(rawBottomBarSize) ? rawBottomBarSize : 56) + 16) : margin;
+    const minX = viewportLeft + margin;
+    const minY = viewportTop + margin;
+    const maxX = Math.max(minX, viewportLeft + viewportWidth - width - margin);
+    const maxY = Math.max(minY, viewportTop + viewportHeight - height - bottomInset);
     return {
-        x: Math.round(Math.min(Math.max(margin, Number(x) || margin), Math.max(margin, viewportWidth - width - margin))),
-        y: Math.round(Math.min(Math.max(margin, Number(y) || margin), Math.max(margin, viewportHeight - height - margin))),
+        x: Math.round(Math.min(Math.max(minX, Number(x) || minX), maxX)),
+        y: Math.round(Math.min(Math.max(minY, Number(y) || minY), maxY)),
     };
+}
+
+function defaultMobileFloatingPosition(node) {
+    const viewport = globalThis.visualViewport;
+    const viewportLeft = Math.max(0, Number(viewport?.offsetLeft || 0));
+    const viewportTop = Math.max(0, Number(viewport?.offsetTop || 0));
+    const viewportWidth = Math.max(1, Number(viewport?.width || globalThis.innerWidth || document.documentElement?.clientWidth || 1));
+    const viewportHeight = Math.max(1, Number(viewport?.height || globalThis.innerHeight || document.documentElement?.clientHeight || 1));
+    const width = Math.max(1, Number(node?.offsetWidth || node?.getBoundingClientRect?.().width || 62));
+    const height = Math.max(1, Number(node?.offsetHeight || node?.getBoundingClientRect?.().height || 62));
+    return clampFloatingPosition(node, viewportLeft + viewportWidth - width - 14, viewportTop + viewportHeight - height - 88);
 }
 
 function placeFloating(node = runtime.floating, position = null) {
@@ -3880,20 +3908,78 @@ function placeFloating(node = runtime.floating, position = null) {
 
 function applyFloatingPosition() {
     if (!runtime.floating || runtime.floating.classList.contains('gds-dragging')) return;
-    placeFloating(runtime.floating, getSettings().floatingPosition);
+    const position = getSettings().floatingPosition;
+    if (position) placeFloating(runtime.floating, position);
+    else if (isMobilePanelLayout()) placeFloating(runtime.floating, defaultMobileFloatingPosition(runtime.floating));
+    else placeFloating(runtime.floating, null);
 }
 
 function applyFloatingAppearance() {
-    if (!runtime.floating) return;
+    const floating = ensureFloatingButton();
+    if (!floating) return;
     const settings = getSettings();
-    runtime.floating.classList.toggle('gds-floating-mobile', isMobilePanelLayout());
-    runtime.floating.hidden = !settings.workshopEnabled || !settings.showFloatingButton;
+    floating.classList.toggle('gds-floating-mobile', isMobilePanelLayout());
+    floating.hidden = !settings.workshopEnabled || !settings.showFloatingButton || runtime.open;
     const size = settings.floatingIconSize;
-    runtime.floating.style.width = `${size}px`;
-    runtime.floating.style.height = `${size}px`;
-    const image = runtime.floating.querySelector('.gds-floating-image');
+    floating.style.width = `${size}px`;
+    floating.style.height = `${size}px`;
+    const image = floating.querySelector('.gds-floating-image');
     if (image) image.src = settings.floatingIconData || FLOATING_LOGO_URL;
     applyFloatingPosition();
+}
+
+function ensureTopBarEntry() {
+    const host = document.querySelector('#top-settings-holder');
+    if (!host) return null;
+    let entry = runtime.topBarEntry?.isConnected ? runtime.topBarEntry : document.querySelector('#gds-top-bar-entry');
+    if (!entry) {
+        entry = document.createElement('div');
+        entry.id = 'gds-top-bar-entry';
+        entry.className = 'drawer gds-top-bar-entry';
+        entry.innerHTML = `<button type="button" class="drawer-icon closedIcon gds-top-bar-button" title="打开${DISPLAY_NAME}" aria-label="打开${DISPLAY_NAME}"><img class="gds-top-bar-image" src="${escapeHtml(FLOATING_LOGO_URL)}" alt="" aria-hidden="true" draggable="false"></button>`;
+        const button = entry.querySelector('.gds-top-bar-button');
+        button?.addEventListener('click', event => {
+            event.preventDefault();
+            event.stopPropagation();
+            togglePanel(true);
+        });
+    }
+    if (entry.parentElement !== host) host.appendChild(entry);
+    runtime.topBarEntry = entry;
+    return entry;
+}
+
+function applyTopBarAppearance() {
+    const entry = ensureTopBarEntry();
+    if (!entry) return;
+    const settings = getSettings();
+    entry.hidden = !settings.workshopEnabled || !settings.showTopBarButton;
+    const button = entry.querySelector('.gds-top-bar-button');
+    button?.classList.toggle('gds-active', runtime.open);
+    if (button) button.disabled = !settings.workshopEnabled;
+}
+
+function scheduleEntryPointRefresh(delay = 50) {
+    clearTimeout(runtime.entryPointTimer);
+    runtime.entryPointTimer = setTimeout(() => {
+        runtime.entryPointTimer = null;
+        createSettingsEntry();
+        applyFloatingAppearance();
+        applyTopBarAppearance();
+    }, Math.max(0, Number(delay) || 0));
+}
+
+function bindEntryPointRecovery() {
+    if (runtime.entryPointObserver || typeof MutationObserver !== 'function') return;
+    runtime.entryPointObserver = new MutationObserver(() => {
+        const settingsHostReady = Boolean(document.querySelector('#extensions_settings2, #extensions_settings'));
+        const topBarHostReady = Boolean(document.querySelector('#top-settings-holder'));
+        const settingsMissing = settingsHostReady && !runtime.settingsEntry?.isConnected;
+        const floatingMissing = !runtime.floating?.isConnected;
+        const topBarMissing = topBarHostReady && !runtime.topBarEntry?.isConnected;
+        if (settingsMissing || floatingMissing || topBarMissing) scheduleEntryPointRefresh();
+    });
+    runtime.entryPointObserver.observe(document.documentElement, { childList: true, subtree: true });
 }
 
 function persistFloatingAppearance(mutator) {
@@ -4014,6 +4100,10 @@ function bindFloatingDrag(node) {
     let drag = null;
     let suppressClick = false;
     let suppressTimer = null;
+    let touchStart = null;
+    let touchMove = null;
+    let touchEnd = null;
+    let touchCancel = null;
 
     const startDrag = event => {
         if (event.button !== undefined && event.button !== 0) return;
@@ -4029,6 +4119,8 @@ function bindFloatingDrag(node) {
             position: { x: rect.left, y: rect.top },
         };
         try { node.setPointerCapture?.(event.pointerId); } catch { /* Older WebViews may not support capture. */ }
+        event.preventDefault?.();
+        event.stopPropagation?.();
     };
 
     const moveDrag = event => {
@@ -4056,45 +4148,90 @@ function bindFloatingDrag(node) {
         if (cancelled) applyFloatingPosition();
         if (completed.moved) event.preventDefault?.();
     };
+    const pointerUp = event => finishDrag(event, false);
+    const pointerCancel = event => finishDrag(event, true);
     node.addEventListener('pointerdown', startDrag);
-    node.addEventListener('pointermove', moveDrag);
-    node.addEventListener('pointerup', event => finishDrag(event, false));
-    node.addEventListener('pointercancel', event => finishDrag(event, true));
+    globalThis.addEventListener?.('pointermove', moveDrag, { capture: true, passive: false });
+    globalThis.addEventListener?.('pointerup', pointerUp, { capture: true });
+    globalThis.addEventListener?.('pointercancel', pointerCancel, { capture: true });
 
     // Older mobile WebViews may expose touch events without PointerEvent.
     // Keep the same drag state so a tap still opens the panel while a move
     // persists the position and suppresses the synthetic click.
     if (!globalThis.PointerEvent) {
         const touchPoint = event => event.changedTouches?.[0] || event.touches?.[0];
-        node.addEventListener('touchstart', event => {
+        touchStart = event => {
             const touch = touchPoint(event);
             if (!touch) return;
-            startDrag({ pointerId: 'touch', clientX: touch.clientX, clientY: touch.clientY, button: 0 });
+            startDrag({ pointerId: 'touch', clientX: touch.clientX, clientY: touch.clientY, button: 0, preventDefault: () => event.preventDefault(), stopPropagation: () => event.stopPropagation() });
             event.preventDefault();
-        }, { passive: false });
-        node.addEventListener('touchmove', event => {
+        };
+        touchMove = event => {
             const touch = touchPoint(event);
             if (!touch || !drag) return;
             moveDrag({ pointerId: 'touch', clientX: touch.clientX, clientY: touch.clientY, preventDefault: () => event.preventDefault() });
-        }, { passive: false });
-        node.addEventListener('touchend', event => {
+        };
+        touchEnd = event => {
             if (!touchPoint(event)) return;
             finishDrag({ pointerId: 'touch', preventDefault: () => event.preventDefault() }, false);
-        }, { passive: false });
-        node.addEventListener('touchcancel', event => {
+        };
+        touchCancel = event => {
             if (!touchPoint(event)) return;
             finishDrag({ pointerId: 'touch', preventDefault: () => event.preventDefault() }, true);
-        }, { passive: false });
+        };
+        node.addEventListener('touchstart', touchStart, { passive: false });
+        globalThis.addEventListener?.('touchmove', touchMove, { capture: true, passive: false });
+        globalThis.addEventListener?.('touchend', touchEnd, { capture: true, passive: false });
+        globalThis.addEventListener?.('touchcancel', touchCancel, { capture: true, passive: false });
     }
-    node.addEventListener('click', event => {
+    const blockNativeDrag = event => event.preventDefault();
+    const openFromFloating = event => {
         if (suppressClick) {
             suppressClick = false;
             event.preventDefault();
             event.stopPropagation();
             return;
         }
+        event.preventDefault();
+        event.stopPropagation();
         togglePanel(true);
-    });
+    };
+    node.addEventListener('dragstart', blockNativeDrag);
+    node.addEventListener('click', openFromFloating);
+
+    return () => {
+        clearTimeout(suppressTimer);
+        node.removeEventListener('pointerdown', startDrag);
+        node.removeEventListener('dragstart', blockNativeDrag);
+        node.removeEventListener('click', openFromFloating);
+        globalThis.removeEventListener?.('pointermove', moveDrag, true);
+        globalThis.removeEventListener?.('pointerup', pointerUp, true);
+        globalThis.removeEventListener?.('pointercancel', pointerCancel, true);
+        if (touchStart) node.removeEventListener('touchstart', touchStart);
+        if (touchMove) globalThis.removeEventListener?.('touchmove', touchMove, true);
+        if (touchEnd) globalThis.removeEventListener?.('touchend', touchEnd, true);
+        if (touchCancel) globalThis.removeEventListener?.('touchcancel', touchCancel, true);
+    };
+}
+
+function ensureFloatingButton() {
+    let floating = runtime.floating?.isConnected ? runtime.floating : document.querySelector('#gds-floating-entry');
+    if (floating) {
+        runtime.floating = floating;
+        return floating;
+    }
+    runtime.floatingDragCleanup?.();
+    floating = document.createElement('button');
+    floating.id = 'gds-floating-entry';
+    floating.type = 'button';
+    floating.className = 'gds-floating';
+    floating.title = `拖动调整位置，点击打开${DISPLAY_NAME}`;
+    floating.setAttribute('aria-label', `打开${DISPLAY_NAME}（可拖动）`);
+    floating.innerHTML = `<img class="gds-floating-image" src="${escapeHtml(FLOATING_LOGO_URL)}" alt="" aria-hidden="true" draggable="false">`;
+    document.body.appendChild(floating);
+    runtime.floating = floating;
+    runtime.floatingDragCleanup = bindFloatingDrag(floating);
+    return floating;
 }
 
 function isMobilePanelLayout() {
@@ -4187,7 +4324,8 @@ function bindPanelDrag(node, handle) {
 }
 
 function createUi() {
-    if (runtime.overlay) return;
+    if (runtime.overlay?.isConnected) return;
+    runtime.overlay = null;
     const overlay = document.createElement('section');
     overlay.className = 'gds-overlay';
     overlay.hidden = true;
@@ -4378,14 +4516,8 @@ function createUi() {
     bindBlankAreaScrollGuard(pageHost);
     bindWorkbenchControlScrollGuard(pageHost);
 
-    const floating = document.createElement('button');
-    floating.className = 'gds-floating';
-    floating.title = DISPLAY_NAME;
-    floating.innerHTML = `<img class="gds-floating-image" src="${escapeHtml(FLOATING_LOGO_URL)}" alt="" aria-hidden="true" draggable="false">`;
-    document.body.appendChild(floating);
-    runtime.floating = floating;
+    ensureFloatingButton();
     applyFloatingAppearance();
-    bindFloatingDrag(floating);
 
     // The host page uses delegated pointer handlers. Do not let interactions
     // inside the modal leak through and mutate the page or its scroll state.
@@ -4644,7 +4776,8 @@ function createUi() {
 }
 
 function createSettingsEntry() {
-    if (runtime.settingsEntry || !document.body) return;
+    if (runtime.settingsEntry?.isConnected || !document.body) return;
+    runtime.settingsEntry = null;
     const host = document.querySelector('#extensions_settings2') || document.querySelector('#extensions_settings');
     if (!host) return;
     const entry = document.createElement('div');
@@ -4660,6 +4793,10 @@ function createSettingsEntry() {
                 <label class="gds-master-switch">
                     <span><strong>启用嘎嘎小狗工坊</strong><small data-gds-workshop-status>关闭后暂停运行并撤销提示词注入</small></span>
                     <input type="checkbox" data-gds-workshop-enabled aria-label="启用嘎嘎小狗工坊">
+                </label>
+                <label class="gds-master-switch gds-top-bar-switch">
+                    <span><strong>启用酒馆顶栏入口（桌面/手机）</strong><small data-gds-top-bar-status>显示在酒馆顶部功能按钮区域</small></span>
+                    <input type="checkbox" data-gds-top-bar-enabled aria-label="启用酒馆顶栏入口">
                 </label>
                 <label class="gds-master-switch gds-floating-switch">
                     <span><strong>启用悬浮窗（桌面/手机）</strong><small data-gds-floating-status>开启后显示可拖动的工坊入口</small></span>
@@ -4702,6 +4839,16 @@ function createSettingsEntry() {
         applyFloatingAppearance();
         refreshSettingsEntry();
     });
+    const topBarEnabledInput = entry.querySelector('[data-gds-top-bar-enabled]');
+    topBarEnabledInput?.addEventListener('change', () => {
+        const ctx = getContext();
+        const settings = getSettings(ctx);
+        settings.showTopBarButton = Boolean(topBarEnabledInput.checked);
+        ctx.extensionSettings[SETTINGS_KEY] = settings;
+        saveSettings(ctx);
+        applyTopBarAppearance();
+        refreshSettingsEntry();
+    });
     const sizeInput = entry.querySelector('[data-gds-floating-size]');
     const sizeOutput = entry.querySelector('[data-gds-floating-size-value]');
     sizeInput?.addEventListener('input', () => {
@@ -4730,6 +4877,8 @@ function refreshSettingsEntry() {
     const enabledStatus = entry.querySelector('[data-gds-workshop-status]');
     const floatingEnabledInput = entry.querySelector('[data-gds-floating-enabled]');
     const floatingStatus = entry.querySelector('[data-gds-floating-status]');
+    const topBarEnabledInput = entry.querySelector('[data-gds-top-bar-enabled]');
+    const topBarStatus = entry.querySelector('[data-gds-top-bar-status]');
     const openButton = entry.querySelector('[data-gds-open-settings]');
     if (enabledInput && !enabledInput.disabled) enabledInput.checked = settings.workshopEnabled;
     if (enabledStatus) enabledStatus.textContent = settings.workshopEnabled
@@ -4739,6 +4888,10 @@ function refreshSettingsEntry() {
     if (floatingStatus) floatingStatus.textContent = settings.showFloatingButton !== false
         ? '运行中 · 桌面端和手机端均显示可拖动入口'
         : '已关闭 · 可随时重新开启悬浮窗';
+    if (topBarEnabledInput && document.activeElement !== topBarEnabledInput) topBarEnabledInput.checked = settings.showTopBarButton !== false;
+    if (topBarStatus) topBarStatus.textContent = settings.showTopBarButton !== false
+        ? '运行中 · 点击酒馆顶部小狗图标即可打开工坊'
+        : '已关闭 · 不占用酒馆顶部按钮位置';
     if (openButton) openButton.disabled = !settings.workshopEnabled;
     entry.classList.toggle('gds-workshop-disabled', !settings.workshopEnabled);
     const sizeInput = entry.querySelector('[data-gds-floating-size]');
@@ -4763,6 +4916,7 @@ function togglePanel(open) {
     runtime.open = Boolean(open);
     runtime.overlay.hidden = !runtime.open;
     document.body.classList.toggle('gds-panel-open', runtime.open);
+    applyTopBarAppearance();
     if (runtime.open) {
         syncMobileViewport();
         const windowNode = runtime.overlay.querySelector('.gds-window');
@@ -4785,7 +4939,8 @@ function syncMobileViewport() {
 
 function handleViewportChange() {
     syncMobileViewport();
-    applyFloatingPosition();
+    applyFloatingAppearance();
+    applyTopBarAppearance();
     if (runtime.open) applyPanelPosition();
 }
 
@@ -4842,6 +4997,8 @@ export async function init() {
         getSettings(ctx);
         createUi();
         createSettingsEntry();
+        bindEntryPointRecovery();
+        applyTopBarAppearance();
         bindContextEvents();
         handleViewportChange();
         globalThis.visualViewport?.addEventListener?.('resize', handleViewportChange);

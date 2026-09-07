@@ -9,10 +9,10 @@
 }
 
 .gds-floating {
-    position: fixed;
+    position: fixed !important;
     right: 24px;
     bottom: 24px;
-    z-index: 9998;
+    z-index: 2147483000 !important;
     width: 62px;
     height: 62px;
     border: 0 !important;
@@ -55,8 +55,48 @@
     transition: none;
 }
 .gds-floating.gds-floating-mobile {
-    z-index: 10000;
+    z-index: 2147483000 !important;
     touch-action: none;
+}
+
+.gds-top-bar-entry {
+    box-sizing: border-box;
+    min-width: 0;
+}
+.gds-top-bar-entry[hidden] { display: none !important; }
+.gds-top-bar-button {
+    appearance: none !important;
+    -webkit-appearance: none !important;
+    box-sizing: border-box !important;
+    display: grid !important;
+    place-items: center;
+    width: 100% !important;
+    min-width: 0 !important;
+    height: var(--topBarBlockSize, 42px) !important;
+    margin: 0 !important;
+    padding: 2px 3px !important;
+    border: 0 !important;
+    border-radius: 0 !important;
+    background: transparent !important;
+    box-shadow: none !important;
+    opacity: .42;
+    cursor: pointer;
+    transition: opacity .16s ease, transform .16s ease;
+    touch-action: manipulation;
+}
+.gds-top-bar-button:hover,
+.gds-top-bar-button:focus-visible,
+.gds-top-bar-button.gds-active { opacity: 1; }
+.gds-top-bar-button:hover { transform: translateY(-1px); }
+.gds-top-bar-button:focus-visible { outline: 2px solid var(--gds-pink-deep) !important; outline-offset: -3px; }
+.gds-top-bar-image {
+    display: block;
+    width: var(--topBarIconSize, 25px);
+    height: var(--topBarIconSize, 25px);
+    max-width: 30px;
+    max-height: 30px;
+    object-fit: contain;
+    pointer-events: none;
 }
 
 .gds-overlay {
@@ -747,7 +787,13 @@ body.gds-panel-open { overflow: hidden !important; }
     .gds-capsule-actions button, .gds-capsule-edit-actions button { flex: 1 1 104px; min-height: 36px; }
     .gds-capsule-editor .gds-capsule-importance { grid-template-columns: 1fr; }
     .gds-footer { flex-direction: column; padding: 16px 14px max(18px, env(safe-area-inset-bottom, 0px)); }
-    .gds-floating { right: max(14px, env(safe-area-inset-right, 0px)); bottom: max(14px, env(safe-area-inset-bottom, 0px)); }
+    .gds-floating {
+        right: max(14px, env(safe-area-inset-right, 0px));
+        bottom: calc(max(14px, env(safe-area-inset-bottom, 0px)) + var(--bottomFormBlockSize, 56px) + 12px);
+        z-index: 2147483000 !important;
+        display: grid !important;
+    }
+    .gds-floating[hidden] { display: none !important; }
     .gds-floating-actions { gap: 7px; }
     .gds-floating-actions button { min-height: 36px; padding-inline: 5px; }
 }

@@ -254,6 +254,7 @@ test('uses the supplied dog image instead of emoji branding', () => {
 test('brands the extension as the workshop and exposes local floating icon controls', () => {
     assert.match(js, /const DISPLAY_NAME = '嘎嘎小狗工坊'/);
     assert.match(js, /showFloatingButton:\s*true/);
+    assert.match(js, /showTopBarButton:\s*true/);
     assert.match(js, /"?floatingIconSize"?:\s*62/);
     assert.match(js, /floatingIconData:\s*['"]['"]/);
     assert.match(js, /data-gds-floating-size/);
@@ -262,6 +263,7 @@ test('brands the extension as the workshop and exposes local floating icon contr
     assert.match(js, /async function handleFloatingIconUpload/);
     assert.match(js, /function applyFloatingAppearance/);
     assert.match(js, /data-gds-floating-enabled/);
+    assert.match(js, /data-gds-top-bar-enabled/);
     assert.match(js, /settings\.showFloatingButton = Boolean\(floatingEnabledInput\.checked\)/);
     assert.match(js, /桌面端和手机端均显示可拖动入口/);
     assert.match(js, /恢复默认图标/);
@@ -351,15 +353,30 @@ test('floating dog can be dragged without accidentally opening the panel', () =>
     assert.match(js, /gds-floating-mobile/);
     assert.match(js, /if \(!globalThis\.PointerEvent\)/);
     assert.match(js, /addEventListener\('touchstart'/);
-    assert.match(js, /addEventListener\('touchmove'/);
-    assert.match(js, /addEventListener\('touchend'/);
-    assert.match(js, /addEventListener\('touchcancel'/);
+    assert.match(js, /addEventListener\?\.\('touchmove'/);
+    assert.match(js, /addEventListener\?\.\('touchend'/);
+    assert.match(js, /addEventListener\?\.\('touchcancel'/);
     assert.match(js, /悬浮窗图标大小（桌面\/手机）/);
     assert.match(css, /\.gds-floating\s*\{[\s\S]*?touch-action:\s*none/);
     assert.match(css, /\.gds-floating\.gds-dragging/);
-    assert.match(css, /\.gds-floating\.gds-floating-mobile[\s\S]*?z-index:\s*10000/);
+    assert.match(css, /\.gds-floating\.gds-floating-mobile[\s\S]*?z-index:\s*2147483000\s*!important/);
     assert.match(css, /will-change:\s*left, top/);
     assert.match(css, /right:\s*max\(14px, env\(safe-area-inset-right/);
+    assert.match(css, /bottom:[^;]*var\(--bottomFormBlockSize, 56px\)/);
+    assert.match(js, /globalThis\.visualViewport/);
+    assert.match(js, /function ensureFloatingButton\(\)/);
+    assert.match(js, /function bindEntryPointRecovery\(\)/);
+});
+
+test('adds an independently controlled native SillyTavern top-bar entry', () => {
+    assert.match(js, /document\.querySelector\('#top-settings-holder'\)/);
+    assert.match(js, /id = 'gds-top-bar-entry'/);
+    assert.match(js, /drawer gds-top-bar-entry/);
+    assert.match(js, /function applyTopBarAppearance\(\)/);
+    assert.match(js, /settings\.showTopBarButton = Boolean\(topBarEnabledInput\.checked\)/);
+    assert.match(js, /启用酒馆顶栏入口（桌面\/手机）/);
+    assert.match(css, /\.gds-top-bar-button\s*\{/);
+    assert.match(css, /\.gds-top-bar-entry\[hidden\]/);
 });
 
 test('desktop summary window is draggable by its header', () => {
