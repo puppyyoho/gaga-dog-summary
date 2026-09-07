@@ -377,6 +377,7 @@ test('adds an independently controlled native SillyTavern top-bar entry', () => 
     assert.match(js, /启用酒馆顶栏入口（桌面\/手机）/);
     assert.match(css, /\.gds-top-bar-button\s*\{/);
     assert.match(css, /\.gds-top-bar-entry\[hidden\]/);
+    assert.match(css, /\.gds-top-bar-image\s*\{[\s\S]*?transform:\s*translateY\(2px\)/);
 });
 
 test('desktop summary window is draggable by its header', () => {

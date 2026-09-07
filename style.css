@@ -97,6 +97,7 @@
     max-height: 30px;
     object-fit: contain;
     pointer-events: none;
+    transform: translateY(2px);
 }
 
 .gds-overlay {
