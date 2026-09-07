@@ -253,6 +253,7 @@ test('uses the supplied dog image instead of emoji branding', () => {
 
 test('brands the extension as the workshop and exposes local floating icon controls', () => {
     assert.match(js, /const DISPLAY_NAME = '嘎嘎小狗工坊'/);
+    assert.match(js, /showFloatingButton:\s*true/);
     assert.match(js, /"?floatingIconSize"?:\s*62/);
     assert.match(js, /floatingIconData:\s*['"]['"]/);
     assert.match(js, /data-gds-floating-size/);
@@ -260,12 +261,17 @@ test('brands the extension as the workshop and exposes local floating icon contr
     assert.match(js, /data-gds-floating-upload-button/);
     assert.match(js, /async function handleFloatingIconUpload/);
     assert.match(js, /function applyFloatingAppearance/);
+    assert.match(js, /data-gds-floating-enabled/);
+    assert.match(js, /settings\.showFloatingButton = Boolean\(floatingEnabledInput\.checked\)/);
+    assert.match(js, /桌面端和手机端均显示可拖动入口/);
     assert.match(js, /恢复默认图标/);
     assert.match(css, /\.gds-floating-settings\s*\{/);
     assert.match(css, /\.gds-floating-size input\[type="range"\]/);
     assert.match(css, /\.gds-floating-actions\s*\{[\s\S]*?flex-direction:\s*row/);
     assert.match(css, /\.gds-floating-actions button\s*\{[\s\S]*?white-space:\s*nowrap/);
     assert.match(css, /\.gds-floating-file\s*\{[\s\S]*?display:\s*none/);
+    assert.match(css, /\.gds-floating:not\(\[hidden\]\)\s*\{[\s\S]*?display:\s*grid\s*!important/);
+    assert.match(css, /\.gds-floating\[hidden\]\s*\{\s*display:\s*none\s*!important/);
     assert.match(css, /@media \(max-width: 900px\)[\s\S]*?\.gds-floating-actions/);
 });
 

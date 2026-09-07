@@ -114,7 +114,7 @@ const INJECTION_ID = `${EXTENSION_NAME}:memory`;
 const DIRECTOR_INJECTION_ID = `${EXTENSION_NAME}:director`;
 const PANEL_LOGO_URL = new URL('./assets/gaga-dog-logo.png', import.meta.url).href;
 const FLOATING_LOGO_URL = new URL('./assets/gaga-dog-floating.png', import.meta.url).href;
-const VERSION = '0.6.0';
+const VERSION = '0.6.2';
 const SETTINGS_VERSION = 10;
 
 const DEFAULT_SETTINGS = {
@@ -4661,6 +4661,10 @@ function createSettingsEntry() {
                     <span><strong>启用嘎嘎小狗工坊</strong><small data-gds-workshop-status>关闭后暂停运行并撤销提示词注入</small></span>
                     <input type="checkbox" data-gds-workshop-enabled aria-label="启用嘎嘎小狗工坊">
                 </label>
+                <label class="gds-master-switch gds-floating-switch">
+                    <span><strong>启用悬浮窗（桌面/手机）</strong><small data-gds-floating-status>开启后显示可拖动的工坊入口</small></span>
+                    <input type="checkbox" data-gds-floating-enabled aria-label="启用悬浮窗">
+                </label>
                 <button class="menu_button gds-open-settings" type="button" data-gds-open-settings><img class="gds-entry-puppy" src="${escapeHtml(PANEL_LOGO_URL)}" alt="" aria-hidden="true"><span>打开${DISPLAY_NAME}</span></button>
                 <div class="gds-floating-settings">
                         <label class="gds-floating-size"><span>悬浮窗图标大小（桌面/手机） <output data-gds-floating-size-value>62 px</output></span><input type="range" min="32" max="120" step="1" value="62" data-gds-floating-size></label>
@@ -4688,6 +4692,16 @@ function createSettingsEntry() {
             refreshSettingsEntry();
         }
     });
+    const floatingEnabledInput = entry.querySelector('[data-gds-floating-enabled]');
+    floatingEnabledInput?.addEventListener('change', () => {
+        const ctx = getContext();
+        const settings = getSettings(ctx);
+        settings.showFloatingButton = Boolean(floatingEnabledInput.checked);
+        ctx.extensionSettings[SETTINGS_KEY] = settings;
+        saveSettings(ctx);
+        applyFloatingAppearance();
+        refreshSettingsEntry();
+    });
     const sizeInput = entry.querySelector('[data-gds-floating-size]');
     const sizeOutput = entry.querySelector('[data-gds-floating-size-value]');
     sizeInput?.addEventListener('input', () => {
@@ -4714,11 +4728,17 @@ function refreshSettingsEntry() {
     try { settings = getSettings(); } catch { return; }
     const enabledInput = entry.querySelector('[data-gds-workshop-enabled]');
     const enabledStatus = entry.querySelector('[data-gds-workshop-status]');
+    const floatingEnabledInput = entry.querySelector('[data-gds-floating-enabled]');
+    const floatingStatus = entry.querySelector('[data-gds-floating-status]');
     const openButton = entry.querySelector('[data-gds-open-settings]');
     if (enabledInput && !enabledInput.disabled) enabledInput.checked = settings.workshopEnabled;
     if (enabledStatus) enabledStatus.textContent = settings.workshopEnabled
         ? '运行中 · 点击可暂停插件与提示词注入'
         : '已关闭 · 记忆、图标和模型配置均已保留';
+    if (floatingEnabledInput && document.activeElement !== floatingEnabledInput) floatingEnabledInput.checked = settings.showFloatingButton !== false;
+    if (floatingStatus) floatingStatus.textContent = settings.showFloatingButton !== false
+        ? '运行中 · 桌面端和手机端均显示可拖动入口'
+        : '已关闭 · 可随时重新开启悬浮窗';
     if (openButton) openButton.disabled = !settings.workshopEnabled;
     entry.classList.toggle('gds-workshop-disabled', !settings.workshopEnabled);
     const sizeInput = entry.querySelector('[data-gds-floating-size]');

@@ -31,6 +31,13 @@
     -webkit-tap-highlight-color: transparent;
     will-change: left, top;
 }
+.gds-floating:not([hidden]) {
+    display: grid !important;
+    place-items: center;
+    visibility: visible !important;
+    pointer-events: auto !important;
+}
+.gds-floating[hidden] { display: none !important; }
 
 .gds-floating-image {
     display: block;
