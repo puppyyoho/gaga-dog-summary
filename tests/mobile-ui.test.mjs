@@ -342,8 +342,18 @@ test('floating dog can be dragged without accidentally opening the panel', () =>
     assert.match(js, /setPointerCapture/);
     assert.match(js, /persistFloatingPosition\(completed\.position\)/);
     assert.match(js, /if \(suppressClick\)/);
+    assert.match(js, /gds-floating-mobile/);
+    assert.match(js, /if \(!globalThis\.PointerEvent\)/);
+    assert.match(js, /addEventListener\('touchstart'/);
+    assert.match(js, /addEventListener\('touchmove'/);
+    assert.match(js, /addEventListener\('touchend'/);
+    assert.match(js, /addEventListener\('touchcancel'/);
+    assert.match(js, /悬浮窗图标大小（桌面\/手机）/);
     assert.match(css, /\.gds-floating\s*\{[\s\S]*?touch-action:\s*none/);
     assert.match(css, /\.gds-floating\.gds-dragging/);
+    assert.match(css, /\.gds-floating\.gds-floating-mobile[\s\S]*?z-index:\s*10000/);
+    assert.match(css, /will-change:\s*left, top/);
+    assert.match(css, /right:\s*max\(14px, env\(safe-area-inset-right/);
 });
 
 test('desktop summary window is draggable by its header', () => {

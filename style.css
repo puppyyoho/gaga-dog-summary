@@ -28,6 +28,8 @@
     touch-action: none;
     user-select: none;
     -webkit-user-select: none;
+    -webkit-tap-highlight-color: transparent;
+    will-change: left, top;
 }
 
 .gds-floating-image {
@@ -44,6 +46,10 @@
     cursor: grabbing;
     transform: none;
     transition: none;
+}
+.gds-floating.gds-floating-mobile {
+    z-index: 10000;
+    touch-action: none;
 }
 
 .gds-overlay {
@@ -734,7 +740,7 @@ body.gds-panel-open { overflow: hidden !important; }
     .gds-capsule-actions button, .gds-capsule-edit-actions button { flex: 1 1 104px; min-height: 36px; }
     .gds-capsule-editor .gds-capsule-importance { grid-template-columns: 1fr; }
     .gds-footer { flex-direction: column; padding: 16px 14px max(18px, env(safe-area-inset-bottom, 0px)); }
-    .gds-floating { right: 14px; bottom: 14px; }
+    .gds-floating { right: max(14px, env(safe-area-inset-right, 0px)); bottom: max(14px, env(safe-area-inset-bottom, 0px)); }
     .gds-floating-actions { gap: 7px; }
     .gds-floating-actions button { min-height: 36px; padding-inline: 5px; }
 }

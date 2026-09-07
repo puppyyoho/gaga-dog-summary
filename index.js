@@ -3886,6 +3886,7 @@ function applyFloatingPosition() {
 function applyFloatingAppearance() {
     if (!runtime.floating) return;
     const settings = getSettings();
+    runtime.floating.classList.toggle('gds-floating-mobile', isMobilePanelLayout());
     runtime.floating.hidden = !settings.workshopEnabled || !settings.showFloatingButton;
     const size = settings.floatingIconSize;
     runtime.floating.style.width = `${size}px`;
@@ -4014,7 +4015,7 @@ function bindFloatingDrag(node) {
     let suppressClick = false;
     let suppressTimer = null;
 
-    node.addEventListener('pointerdown', event => {
+    const startDrag = event => {
         if (event.button !== undefined && event.button !== 0) return;
         node.classList.add('gds-dragging');
         const rect = node.getBoundingClientRect();
@@ -4028,17 +4029,17 @@ function bindFloatingDrag(node) {
             position: { x: rect.left, y: rect.top },
         };
         try { node.setPointerCapture?.(event.pointerId); } catch { /* Older WebViews may not support capture. */ }
-    });
+    };
 
-    node.addEventListener('pointermove', event => {
+    const moveDrag = event => {
         if (!drag || event.pointerId !== drag.pointerId) return;
         if (Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY) >= 4) drag.moved = true;
         drag.position = placeFloating(node, {
             x: event.clientX - drag.offsetX,
             y: event.clientY - drag.offsetY,
         }) || drag.position;
-        event.preventDefault();
-    });
+        event.preventDefault?.();
+    };
 
     const finishDrag = (event, cancelled = false) => {
         if (!drag || event.pointerId !== drag.pointerId) return;
@@ -4053,10 +4054,38 @@ function bindFloatingDrag(node) {
             suppressTimer = setTimeout(() => { suppressClick = false; }, 350);
         }
         if (cancelled) applyFloatingPosition();
-        if (completed.moved) event.preventDefault();
+        if (completed.moved) event.preventDefault?.();
     };
+    node.addEventListener('pointerdown', startDrag);
+    node.addEventListener('pointermove', moveDrag);
     node.addEventListener('pointerup', event => finishDrag(event, false));
     node.addEventListener('pointercancel', event => finishDrag(event, true));
+
+    // Older mobile WebViews may expose touch events without PointerEvent.
+    // Keep the same drag state so a tap still opens the panel while a move
+    // persists the position and suppresses the synthetic click.
+    if (!globalThis.PointerEvent) {
+        const touchPoint = event => event.changedTouches?.[0] || event.touches?.[0];
+        node.addEventListener('touchstart', event => {
+            const touch = touchPoint(event);
+            if (!touch) return;
+            startDrag({ pointerId: 'touch', clientX: touch.clientX, clientY: touch.clientY, button: 0 });
+            event.preventDefault();
+        }, { passive: false });
+        node.addEventListener('touchmove', event => {
+            const touch = touchPoint(event);
+            if (!touch || !drag) return;
+            moveDrag({ pointerId: 'touch', clientX: touch.clientX, clientY: touch.clientY, preventDefault: () => event.preventDefault() });
+        }, { passive: false });
+        node.addEventListener('touchend', event => {
+            if (!touchPoint(event)) return;
+            finishDrag({ pointerId: 'touch', preventDefault: () => event.preventDefault() }, false);
+        }, { passive: false });
+        node.addEventListener('touchcancel', event => {
+            if (!touchPoint(event)) return;
+            finishDrag({ pointerId: 'touch', preventDefault: () => event.preventDefault() }, true);
+        }, { passive: false });
+    }
     node.addEventListener('click', event => {
         if (suppressClick) {
             suppressClick = false;
@@ -4634,7 +4663,7 @@ function createSettingsEntry() {
                 </label>
                 <button class="menu_button gds-open-settings" type="button" data-gds-open-settings><img class="gds-entry-puppy" src="${escapeHtml(PANEL_LOGO_URL)}" alt="" aria-hidden="true"><span>打开${DISPLAY_NAME}</span></button>
                 <div class="gds-floating-settings">
-                    <label class="gds-floating-size"><span>悬浮窗图标大小 <output data-gds-floating-size-value>62 px</output></span><input type="range" min="32" max="120" step="1" value="62" data-gds-floating-size></label>
+                        <label class="gds-floating-size"><span>悬浮窗图标大小（桌面/手机） <output data-gds-floating-size-value>62 px</output></span><input type="range" min="32" max="120" step="1" value="62" data-gds-floating-size></label>
                     <div class="gds-floating-actions" role="group" aria-label="悬浮窗图标设置">
                         <button type="button" class="menu_button" data-gds-floating-upload-button>上传图标</button>
                         <button type="button" class="menu_button" data-gds-floating-reset>恢复默认图标</button>
