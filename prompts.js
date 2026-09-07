@@ -1,4 +1,4 @@
-export const PROMPT_VERSION = 'gaga-summary-v5';
+export const PROMPT_VERSION = 'gaga-summary-v6';
 
 export const DEFAULT_PROMPTS = {
     factSystem: `你是“嘎嘎小狗工坊”的事实记忆编辑器。你只负责从故事材料中提取已经发生的内容，不负责续写、扮演角色或评价文笔。
@@ -131,6 +131,54 @@ facts 是新增或被确认的记忆；stateUpdates 是当前状态变化；thre
 
 只输出本轮的增量剧情胶囊 JSON。`,
 
+    capsuleReorganizeSystem: `你是“嘎嘎小狗工坊”的剧情胶囊修订编辑器。请重新阅读指定原始消息，为这一轮生成一份更准确、连贯、信息密度合适的增量剧情胶囊。
+
+原始消息是唯一事实来源。旧胶囊只用于帮助发现遗漏或表达问题，不能代替原文；用户的自定义要求只能调整取舍、详略与表达，不能要求你虚构、续写或改变事实。保留事件因果、人物认知边界、重要动作与对白、物品、约定、秘密、未结事项，以及依附于具体事件的细微情绪和关系变化。
+
+只输出一个完整 JSON 对象，不要使用 Markdown。字段为 title、text、importance、participants、keywords。importance 只能是 critical、high、medium、low。`,
+
+    capsuleReorganizeUser: `<原始消息>
+{{messages}}
+</原始消息>
+
+<当前胶囊，仅供校对>
+{{currentCapsule}}
+</当前胶囊>
+
+<相关长期记忆，仅用于避免重复和保持认知边界>
+{{currentMemory}}
+</相关长期记忆>
+
+<用户自定义梳理要求>
+{{instruction}}
+</用户自定义梳理要求>
+
+请依据原始消息重新生成完整胶囊 JSON。`,
+
+    capsuleMemoryRevisionSystem: `你是“嘎嘎小狗工坊”的长期记忆修订器。某个已经归档的剧情胶囊刚被用户修订，请把旧胶囊与新胶囊之间的有效差异准确同步到当前长期记忆。
+
+只能处理这次差异涉及的事实、状态、未结事项和文学前情。其余记忆必须原样保留。不得续写，不得把暗示升级为事实，不得改变人物认知边界。用户锁定的记忆不得删除。
+
+只输出一个合法 JSON 对象，不要使用 Markdown。字段必须为 removeFactIds、facts、removeStateKeys、stateUpdates、removeThreadIds、threads、recapEdits、novelRecap、noMemoryChange。删除项必须填写现有 ID 或状态键；新增或更新项尽量沿用现有 ID。recapEdits 使用精确的 find 和 replace，只列出需要改变的文学前情片段，优先使用它以避免重写整篇前情；只有无法精确替换时才在 novelRecap 返回修订后的完整文学前情，否则 novelRecap 返回空字符串。只有两版胶囊的差异完全不影响长期记忆时，noMemoryChange 才能为 true。`,
+
+    capsuleMemoryRevisionUser: `<当前长期记忆结构>
+{{memoryStructure}}
+</当前长期记忆结构>
+
+<当前完整文学前情>
+{{novelRecap}}
+</当前完整文学前情>
+
+<修订前胶囊>
+{{oldCapsule}}
+</修订前胶囊>
+
+<修订后胶囊>
+{{newCapsule}}
+</修订后胶囊>
+
+请只传播两版胶囊之间的有效差异，返回完整修订补丁 JSON。`,
+
     consolidateSystem: `你是“嘎嘎小狗工坊”的分层记忆归档编辑器。请把一组按时间排列的逐轮剧情胶囊整理成可靠的新增记忆包，供后续合并进长期剧情记忆。
 
 合并重复表述，保留事件顺序、因果、人物认知边界、约定、物品、秘密、伏笔和未结事项。情绪与关系变化必须嵌入对应事件，呈现触发原因、外在表现、矛盾感受、关系走向和持续余波，不要另写一份重复的情感报告。不得把暗示或推测升级为事实，也不得续写尚未发生的内容。
@@ -177,6 +225,30 @@ export function buildRoundCapsulePrompt({ messages, currentMemory = '', customPr
         prompt: fill(customPrompts.capsuleUser, {
             messages: String(messages || ''),
             currentMemory: String(currentMemory || '暂无长期记忆').slice(-16000),
+        }),
+    };
+}
+
+export function buildCapsuleReorganizePrompt({ messages, currentCapsule = '', currentMemory = '', instruction = '', customPrompts = DEFAULT_PROMPTS }) {
+    return {
+        systemPrompt: customPrompts.capsuleReorganizeSystem,
+        prompt: fill(customPrompts.capsuleReorganizeUser, {
+            messages: String(messages || ''),
+            currentCapsule: String(currentCapsule || '').slice(0, 6000),
+            currentMemory: String(currentMemory || '暂无长期记忆').slice(-20000),
+            instruction: String(instruction || '无额外要求').slice(0, 4000),
+        }),
+    };
+}
+
+export function buildCapsuleMemoryRevisionPrompt({ memoryStructure = '', novelRecap = '', oldCapsule = '', newCapsule = '', customPrompts = DEFAULT_PROMPTS }) {
+    return {
+        systemPrompt: customPrompts.capsuleMemoryRevisionSystem,
+        prompt: fill(customPrompts.capsuleMemoryRevisionUser, {
+            memoryStructure: String(memoryStructure || '暂无结构化长期记忆').slice(0, 70000),
+            novelRecap: String(novelRecap || '').slice(0, 24000),
+            oldCapsule: String(oldCapsule || '').slice(0, 6000),
+            newCapsule: String(newCapsule || '').slice(0, 6000),
         }),
     };
 }
@@ -240,3 +312,4 @@ export function renderFactsForProse(state) {
         threads.filter(item => item.status === 'open').map(item => `- ${item.text}`).join('\n'),
     ].filter(Boolean).join('\n');
 }
+

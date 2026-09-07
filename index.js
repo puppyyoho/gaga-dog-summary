@@ -1,4 +1,5 @@
 import {
+    applyCapsuleMemoryRevision,
     assertMemoryPacket,
     activeRoundCapsules,
     appendRoundCapsule,
@@ -14,6 +15,7 @@ import {
     normalizeChatState,
     normalizeMessages,
     nextRoundRange,
+    parseCapsuleMemoryRevision,
     parseModelPacket,
     parseRoundCapsule,
     rangeForNewSummary,
@@ -28,10 +30,14 @@ import {
     tokenEstimate,
     renderMixedSummary,
     renderStructuredSummary,
+    restorePreviousRoundCapsule,
+    reviseRoundCapsule,
 } from './memory-core.js';
 import { persistChatMetadata, readChatState, writeChatState } from './chat-state.js';
 import {
     buildAuditPrompt,
+    buildCapsuleMemoryRevisionPrompt,
+    buildCapsuleReorganizePrompt,
     buildCapsuleConsolidationPrompt,
     buildFactPrompt,
     buildPolishPrompt,
@@ -108,7 +114,7 @@ const INJECTION_ID = `${EXTENSION_NAME}:memory`;
 const DIRECTOR_INJECTION_ID = `${EXTENSION_NAME}:director`;
 const PANEL_LOGO_URL = new URL('./assets/gaga-dog-logo.png', import.meta.url).href;
 const FLOATING_LOGO_URL = new URL('./assets/gaga-dog-floating.png', import.meta.url).href;
-const VERSION = '0.5.12';
+const VERSION = '0.6.0';
 const SETTINGS_VERSION = 10;
 
 const DEFAULT_SETTINGS = {
@@ -153,6 +159,9 @@ const runtime = {
     workflow: null,
     capsuleBusy: false,
     capsuleController: null,
+    capsuleEditor: null,
+    capsuleTaskId: '',
+    capsuleRenderSignature: '',
     backfillBusy: false,
     backfillStopRequested: false,
     layeredPausedByError: false,
@@ -377,6 +386,25 @@ function formatMessages(messages, start = 0, end = messages.length - 1) {
         const content = compactText(message?.mes ?? message?.content ?? '', 300000);
         return `[消息 ${index}｜${item.name}]\n${content}`;
     }).join('\n\n');
+}
+
+function formatCapsuleSourceMessages(messages, range) {
+    const rows = [];
+    const seen = new Set();
+    for (const ref of range?.refs || []) {
+        const located = locateMessage(messages, ref);
+        const message = located?.message;
+        if (!located || !message || seen.has(located.index)) continue;
+        // Messages hidden by this extension remain recoverable story source.
+        // Genuine system messages still stay outside the capsule task.
+        if (message.is_system && !message.extra?.gagaDogHiddenBy) continue;
+        const content = compactText(message?.mes ?? message?.content ?? '', 300000);
+        if (!content) continue;
+        seen.add(located.index);
+        const [item] = normalizeMessages([{ ...message, is_system: false }]);
+        rows.push(`[消息 ${located.index}｜${item.name}]\n${content}`);
+    }
+    return rows.join('\n\n');
 }
 
 function formatState(value) {
@@ -1533,7 +1561,9 @@ function stopLayeredAuto({ notifyUser = true } = {}) {
 function layeredTaskBlocked(ctx) {
     reconcileGeneratingFlag(ctx);
     const chatState = getChatState(ctx);
-    return !chatState.enabled || chatState.pending || runtime.busy || runtime.workflowActive || runtime.capsuleBusy || runtime.backfillBusy
+    const activeTab = runtime.overlay?.querySelector('.gds-window')?.dataset.gdsTab || '';
+    const visibleCapsuleEditor = runtime.open && activeTab === 'memory-layered' && Boolean(runtime.capsuleEditor);
+    return !chatState.enabled || chatState.pending || runtime.busy || runtime.workflowActive || runtime.capsuleBusy || runtime.backfillBusy || visibleCapsuleEditor
         || hostGenerationActive(ctx) || runtime.directorBusy || runtime.replyBusy;
 }
 
@@ -2281,11 +2311,403 @@ function renderCapsuleList(chatState) {
     const archives = Array.isArray(chatState.memoryArchives) ? chatState.memoryArchives : [];
     if (!capsules.length && !archives.length) return '<div class="gds-empty">还没有逐轮胶囊。</div>';
     const capsuleHtml = [...capsules].reverse().map(item => {
-        const archived = Number(item?.sourceRange?.end ?? -1) <= chatState.lastProcessedIndex;
-        return `<article class="gds-capsule-card ${archived ? 'archived' : ''}"><div><strong>${escapeHtml(item.title || '本轮剧情')}</strong><span>${archived ? '已归档' : '待归档'} · 消息 ${Number(item?.sourceRange?.start ?? 0)}–${Number(item?.sourceRange?.end ?? 0)}</span></div><p>${escapeHtml(item.text || '')}</p></article>`;
+        const id = String(item.id || '');
+        const archived = capsuleIsArchived(chatState, id);
+        const editor = runtime.capsuleEditor?.id === id ? runtime.capsuleEditor : null;
+        const busy = runtime.capsuleBusy && runtime.capsuleTaskId === id;
+        const interactionBusy = runtime.busy || runtime.workflowActive || runtime.capsuleBusy || runtime.backfillBusy || runtime.directorBusy || runtime.replyBusy;
+        const hasHistory = Boolean(item.revisionHistory?.length);
+        const importance = ['critical', 'high', 'medium', 'low'].includes(editor?.importance) ? editor.importance : item.importance || 'medium';
+        const options = [
+            ['critical', '关键'],
+            ['high', '高'],
+            ['medium', '中'],
+            ['low', '低'],
+        ].map(([value, label]) => `<option value="${value}"${importance === value ? ' selected' : ''}>${label}</option>`).join('');
+        const editorHtml = editor ? `<div class="gds-capsule-editor">
+            <label>胶囊标题<input type="text" maxlength="120" data-gds-capsule-title value="${escapeHtml(editor.title)}"></label>
+            <label>胶囊正文<textarea rows="6" maxlength="2400" data-gds-capsule-text>${escapeHtml(editor.text)}</textarea></label>
+            <label class="gds-capsule-importance">重要程度<select data-gds-capsule-importance>${options}</select></label>
+            ${editor.mode === 'reorganize' ? `<label>自定义梳理要求（选填）<textarea rows="3" maxlength="4000" data-gds-capsule-instruction placeholder="例如：加强微妙情绪，保留日期、约定和物品细节。">${escapeHtml(editor.instruction || '')}</textarea></label>` : ''}
+            <p class="gds-capsule-edit-status">${busy ? (runtime.activeOperation === 'capsule-archive-sync' ? '正在把修改同步进长期记忆……' : '正在重新读取原文并生成新版……') : editor.generated ? 'AI 新版已生成，确认内容后再保存。' : archived ? '保存后会同步修订已经生成的长期记忆。' : '保存后会立即更新当前剧情记忆注入。'}</p>
+            <div class="gds-capsule-edit-actions">
+                ${editor.mode === 'reorganize' ? `<button type="button" data-gds-capsule-generate="${escapeHtml(id)}"${busy ? ' disabled' : ''}>${editor.generated ? '再次生成' : '生成新版'}</button>` : ''}
+                <button type="button" class="gds-primary" data-gds-capsule-save="${escapeHtml(id)}"${busy ? ' disabled' : ''}>保存</button>
+                <button type="button" data-gds-capsule-cancel="${escapeHtml(id)}"${busy ? ' disabled' : ''}>取消</button>
+                ${busy ? `<button type="button" class="gds-danger" data-gds-capsule-stop="${escapeHtml(id)}">停止</button>` : ''}
+            </div>
+        </div>` : `<p>${escapeHtml(item.text || '')}</p>
+            <div class="gds-capsule-actions">
+                <button type="button" data-gds-capsule-reorganize="${escapeHtml(id)}"${interactionBusy ? ' disabled' : ''}>重新梳理</button>
+                <button type="button" data-gds-capsule-edit="${escapeHtml(id)}"${interactionBusy ? ' disabled' : ''}>编辑</button>
+                <button type="button" data-gds-capsule-restore="${escapeHtml(id)}"${!hasHistory || interactionBusy ? ' disabled' : ''}>恢复上一版</button>
+            </div>`;
+        return `<article class="gds-capsule-card ${archived ? 'archived' : ''}${editor ? ' editing' : ''}" data-gds-capsule-card="${escapeHtml(id)}">
+            <div class="gds-capsule-head"><strong>${escapeHtml(item.title || '本轮剧情')}</strong><span>${archived ? '已归档' : '待归档'} · 消息 ${Number(item?.sourceRange?.start ?? 0)}–${Number(item?.sourceRange?.end ?? 0)} · 第 ${Math.max(1, Number(item.revision) || 1)} 版</span></div>
+            ${editorHtml}
+        </article>`;
     }).join('');
     const archiveHtml = [...archives].reverse().map(item => `<small>归档 ${escapeHtml(item.id)} · ${Number(item.capsuleIds?.length || 0)} 个胶囊 · 消息 ${Number(item.sourceRange?.start ?? 0)}–${Number(item.sourceRange?.end ?? 0)}</small>`).join('');
     return `${archiveHtml ? `<div class="gds-capsule-archives">${archiveHtml}</div>` : ''}<div class="gds-capsule-list">${capsuleHtml}</div>`;
+}
+
+function capsuleIsArchived(chatState, capsuleId) {
+    const id = String(capsuleId || '');
+    if (!id) return false;
+    if ((chatState.memoryArchives || []).some(archive => (archive.capsuleIds || []).includes(id))) return true;
+    const capsule = (chatState.roundCapsules || []).find(item => item.id === id);
+    return Number(capsule?.sourceRange?.end ?? -1) <= Number(chatState.lastProcessedIndex ?? -1);
+}
+
+function refreshCapsuleListRegion(chatState, { force = false } = {}) {
+    const host = runtime.overlay?.querySelector('[data-gds-capsules]');
+    if (!host) return;
+    const html = renderCapsuleList(chatState);
+    const signature = simpleHash(html);
+    if (!force && runtime.capsuleRenderSignature === signature) return;
+    const pageHost = runtime.overlay.querySelector('.gds-page-host');
+    const pageTop = Number(pageHost?.scrollTop || 0);
+    const oldList = host.querySelector('.gds-capsule-list');
+    const listTop = Number(oldList?.scrollTop || 0);
+    host.innerHTML = html;
+    runtime.capsuleRenderSignature = signature;
+    const restore = () => {
+        const newList = host.querySelector('.gds-capsule-list');
+        if (newList) newList.scrollTop = listTop;
+        if (pageHost) pageHost.scrollTop = pageTop;
+    };
+    restore();
+    queueMicrotask(restore);
+    requestAnimationFrame(restore);
+}
+
+function capsuleById(chatState, capsuleId) {
+    return (chatState.roundCapsules || []).find(item => item.id === String(capsuleId || '')) || null;
+}
+
+function beginCapsuleEditor(ctx, capsuleId, mode = 'edit') {
+    if (capsuleTaskBlocked(ctx)) {
+        notify('info', '当前还有生成任务进行中，请稍后编辑胶囊。');
+        return;
+    }
+    const capsule = capsuleById(getChatState(ctx), capsuleId);
+    if (!capsule) throw new Error('没有找到要编辑的剧情胶囊');
+    if (runtime.capsuleEditor && runtime.capsuleEditor.id !== capsule.id) {
+        const confirmed = !globalThis.confirm || globalThis.confirm('另一个胶囊还有未保存修改，确定放弃并切换吗？');
+        if (!confirmed) return;
+    }
+    runtime.capsuleEditor = {
+        id: capsule.id,
+        mode: mode === 'reorganize' ? 'reorganize' : 'edit',
+        title: capsule.title || '本轮剧情',
+        text: capsule.text || '',
+        importance: capsule.importance || 'medium',
+        participants: [...(capsule.participants || [])],
+        keywords: [...(capsule.keywords || [])],
+        instruction: '',
+        generated: false,
+    };
+    runtime.capsuleRenderSignature = '';
+    refreshCapsuleListRegion(getChatState(ctx), { force: true });
+}
+
+function captureCapsuleEditor(capsuleId) {
+    const id = String(capsuleId || '');
+    if (runtime.capsuleEditor?.id !== id) return null;
+    const card = [...(runtime.overlay?.querySelectorAll('[data-gds-capsule-card]') || [])]
+        .find(item => item.dataset.gdsCapsuleCard === id);
+    if (!card) return runtime.capsuleEditor;
+    runtime.capsuleEditor = {
+        ...runtime.capsuleEditor,
+        title: String(card.querySelector('[data-gds-capsule-title]')?.value || '').trim(),
+        text: String(card.querySelector('[data-gds-capsule-text]')?.value || '').trim(),
+        importance: String(card.querySelector('[data-gds-capsule-importance]')?.value || 'medium'),
+        instruction: String(card.querySelector('[data-gds-capsule-instruction]')?.value || '').trim(),
+    };
+    return runtime.capsuleEditor;
+}
+
+function capsuleMemoryStructure(chatState) {
+    const state = normalizeChatState(chatState);
+    return JSON.stringify({
+        facts: state.facts.map(item => ({
+            id: item.id,
+            text: item.text,
+            importance: item.importance,
+            certainty: item.certainty,
+            truthStatus: item.truthStatus,
+            status: item.status,
+            userLocked: item.userLocked,
+        })),
+        state: Object.values(state.state).map(item => ({
+            key: item.key,
+            value: item.value,
+            previous: item.previous,
+            status: item.status,
+            importance: item.importance,
+            userLocked: item.userLocked,
+        })),
+        threads: state.threads.map(item => ({
+            id: item.id,
+            text: item.text,
+            status: item.status,
+            importance: item.importance,
+            userLocked: item.userLocked,
+        })),
+    }, null, 2);
+}
+
+function capsuleTaskBlocked(ctx) {
+    reconcileGeneratingFlag(ctx);
+    return runtime.busy || runtime.workflowActive || runtime.capsuleBusy || runtime.backfillBusy
+        || runtime.directorBusy || runtime.replyBusy || hostGenerationActive(ctx);
+}
+
+async function generateCapsuleRevisionPacket(ctx, request, controller) {
+    const settings = getSettings(ctx);
+    const result = await generateWithFallback(ctx, {
+        ...request,
+        providerProfile: moduleProvider(ctx, 'memory'),
+        preferStream: false,
+        signal: controller.signal,
+    });
+    try {
+        return parseRoundCapsule(result.text, { allowPlainText: false });
+    } catch (error) {
+        if (controller.signal.aborted) throw error;
+        const repaired = await generateWithFallback(ctx, {
+            systemPrompt: '你是 JSON 格式修复器。把输入原样整理为合法剧情胶囊 JSON，只输出 title、text、importance、participants、keywords，不得续写或改变事实。',
+            prompt: `<待修复内容>\n${String(result.text || '').slice(0, 24000)}\n</待修复内容>\n\n只输出完整 JSON 对象。`,
+            providerProfile: moduleProvider(ctx, 'memory'),
+            preferStream: false,
+            signal: controller.signal,
+        });
+        return parseRoundCapsule(repaired.text, { allowPlainText: false });
+    }
+}
+
+async function reorganizeCapsule(ctx, capsuleId) {
+    const id = String(capsuleId || '');
+    if (capsuleTaskBlocked(ctx)) {
+        notify('info', '当前还有生成任务进行中，请稍后再重新梳理胶囊。');
+        return null;
+    }
+    const state = getChatState(ctx);
+    const capsule = capsuleById(state, id);
+    const editor = captureCapsuleEditor(id);
+    if (!capsule || !editor) throw new Error('没有找到要重新梳理的剧情胶囊');
+    if (!rangeStillMatches(getMessages(ctx), capsule.sourceRange)) throw new Error('该胶囊对应的原文已经变化，请先重新补建受影响的历史胶囊');
+    const sourceText = formatCapsuleSourceMessages(getMessages(ctx), capsule.sourceRange);
+    if (!sourceText) throw new Error('该胶囊对应的原始正文已不可读取');
+
+    const controller = new AbortController();
+    runtime.capsuleBusy = true;
+    runtime.capsuleController = controller;
+    runtime.capsuleTaskId = id;
+    runtime.activeOperation = 'capsule-reorganize';
+    runtime.capsuleRenderSignature = '';
+    refreshCapsuleListRegion(state, { force: true });
+    try {
+        const request = buildCapsuleReorganizePrompt({
+            messages: sourceText,
+            currentCapsule: renderRoundCapsule(capsule),
+            currentMemory: [savedRecap(state), ...activeRoundCapsules(state).filter(item => item.id !== id).slice(-4).map(renderRoundCapsule)].filter(Boolean).join('\n\n'),
+            instruction: editor.instruction,
+            customPrompts: getSettings(ctx).prompts,
+        });
+        const packet = await generateCapsuleRevisionPacket(ctx, request, controller);
+        if (controller.signal.aborted) throw controller.signal.reason || new DOMException('已停止重新梳理', 'AbortError');
+        if (!rangeStillMatches(getMessages(ctx), capsule.sourceRange)) throw new Error('生成期间原文发生了变化，新版胶囊未采用');
+        runtime.capsuleEditor = {
+            ...editor,
+            title: packet.title,
+            text: packet.text,
+            importance: packet.importance,
+            participants: [...(packet.participants || [])],
+            keywords: [...(packet.keywords || [])],
+            generated: true,
+        };
+        runtime.lastError = '';
+        notify('success', '胶囊新版已生成，确认后点击“保存”。');
+        return packet;
+    } catch (error) {
+        if (isInterrupted(error, controller)) notify('info', '已停止重新梳理，原胶囊没有变化。');
+        else {
+            console.warn(`[${DISPLAY_NAME}] 单个胶囊重新梳理失败`, error);
+            notify('error', `重新梳理失败：${readableGenerationError(error)}`);
+        }
+        return null;
+    } finally {
+        if (runtime.capsuleController === controller) runtime.capsuleController = null;
+        runtime.capsuleBusy = false;
+        runtime.capsuleTaskId = '';
+        if (runtime.activeOperation === 'capsule-reorganize') runtime.activeOperation = '';
+        runtime.capsuleRenderSignature = '';
+        refreshCapsuleListRegion(getChatState(ctx), { force: true });
+        if (getSettings(ctx).layeredAutoEnabled && !runtime.layeredPausedByError) scheduleLayeredMemory(900);
+    }
+}
+
+async function parseArchivedCapsuleRevision(ctx, request, controller) {
+    const settings = getSettings(ctx);
+    const run = prompt => generateWithFallback(ctx, {
+        ...prompt,
+        providerProfile: moduleProvider(ctx, 'memory'),
+        preferStream: false,
+        signal: controller.signal,
+    });
+    const result = await run(request);
+    try {
+        return parseCapsuleMemoryRevision(result.text);
+    } catch (error) {
+        if (controller.signal.aborted) throw error;
+        const repaired = await run({
+            ...request,
+            prompt: `${request.prompt}\n\n上一次返回无法解析。请重新输出完整合法的 JSON 对象，字段只能是 removeFactIds、facts、removeStateKeys、stateUpdates、removeThreadIds、threads、recapEdits、novelRecap、noMemoryChange。`,
+        });
+        return parseCapsuleMemoryRevision(repaired.text);
+    }
+}
+
+async function syncArchivedCapsuleRevision(ctx, before, proposed, oldCapsule, newCapsule) {
+    const controller = new AbortController();
+    runtime.capsuleBusy = true;
+    runtime.capsuleController = controller;
+    runtime.capsuleTaskId = newCapsule.id;
+    runtime.activeOperation = 'capsule-archive-sync';
+    runtime.capsuleRenderSignature = '';
+    refreshCapsuleListRegion(before, { force: true });
+    try {
+        const request = buildCapsuleMemoryRevisionPrompt({
+            memoryStructure: capsuleMemoryStructure(before),
+            novelRecap: before.summaryArtifacts?.novel || '',
+            oldCapsule: renderRoundCapsule(oldCapsule),
+            newCapsule: renderRoundCapsule(newCapsule),
+            customPrompts: getSettings(ctx).prompts,
+        });
+        const patch = await parseArchivedCapsuleRevision(ctx, request, controller);
+        if (controller.signal.aborted) throw controller.signal.reason || new DOMException('已停止归档同步', 'AbortError');
+        const revisionId = `capsule_revision_${Date.now()}_${simpleHash(newCapsule.id)}`;
+        const synchronized = applyCapsuleMemoryRevision(proposed, patch, newCapsule.sourceRange, revisionId);
+        synchronized.memoryArchives = synchronized.memoryArchives.map(archive => (archive.capsuleIds || []).includes(newCapsule.id) ? {
+            ...archive,
+            revisedAt: Date.now(),
+            revisedCapsuleIds: [...new Set([...(archive.revisedCapsuleIds || []), newCapsule.id])],
+        } : archive);
+        const checkpoint = {
+            id: revisionId,
+            range: clone(newCapsule.sourceRange),
+            createdAt: Date.now(),
+            promptVersion: PROMPT_VERSION,
+            status: 'committed',
+            reason: 'capsule-revision',
+            beforeSnapshot: snapshotMemory(before),
+        };
+        synchronized.checkpoints = [...synchronized.checkpoints, checkpoint];
+        checkpoint.memorySnapshot = snapshotMemory(synchronized);
+        setChatState(synchronized, ctx);
+        await applyInjection(ctx, synchronized, getSettings(ctx));
+        await saveChat(ctx);
+        return synchronized;
+    } catch (error) {
+        setChatState(before, ctx);
+        try {
+            await applyInjection(ctx, before, getSettings(ctx));
+            await saveChat(ctx);
+        } catch (rollbackError) {
+            console.error(`[${DISPLAY_NAME}] 胶囊修订回滚失败`, rollbackError);
+        }
+        throw error;
+    } finally {
+        if (runtime.capsuleController === controller) runtime.capsuleController = null;
+        runtime.capsuleBusy = false;
+        runtime.capsuleTaskId = '';
+        if (runtime.activeOperation === 'capsule-archive-sync') runtime.activeOperation = '';
+    }
+}
+
+async function commitCapsuleRevision(ctx, before, proposed, capsuleId, successMessage) {
+    const oldCapsule = capsuleById(before, capsuleId);
+    const newCapsule = capsuleById(proposed, capsuleId);
+    if (!oldCapsule || !newCapsule) throw new Error('胶囊修改结果不完整');
+    let committed = proposed;
+    if (capsuleIsArchived(before, capsuleId)) {
+        committed = await syncArchivedCapsuleRevision(ctx, before, proposed, oldCapsule, newCapsule);
+    } else {
+        try {
+            setChatState(proposed, ctx);
+            await applyInjection(ctx, proposed, getSettings(ctx));
+            await saveChat(ctx);
+        } catch (error) {
+            setChatState(before, ctx);
+            try { await applyInjection(ctx, before, getSettings(ctx)); } catch { /* Keep the original error. */ }
+            throw error;
+        }
+    }
+    runtime.capsuleEditor = null;
+    runtime.capsuleRenderSignature = '';
+    runtime.lastError = '';
+    runtime.lastSuccess = successMessage;
+    runtime.lastResultScope = 'layered';
+    notify('success', successMessage);
+    refreshCapsuleListRegion(committed, { force: true });
+    if (getSettings(ctx).layeredAutoEnabled && !runtime.layeredPausedByError) scheduleLayeredMemory(900);
+    return committed;
+}
+
+async function saveCapsuleEditor(ctx, capsuleId) {
+    if (capsuleTaskBlocked(ctx)) {
+        notify('info', '当前还有生成任务进行中，请稍后保存胶囊。');
+        return null;
+    }
+    const editor = captureCapsuleEditor(capsuleId);
+    if (!editor) throw new Error('没有找到正在编辑的胶囊');
+    if (!editor.title) throw new Error('胶囊标题不能为空');
+    if (!editor.text) throw new Error('胶囊正文不能为空');
+    const before = getChatState(ctx);
+    const current = capsuleById(before, capsuleId);
+    if (!current) throw new Error('没有找到要保存的剧情胶囊');
+    if (editor.title === current.title && editor.text === current.text && editor.importance === current.importance) {
+        runtime.capsuleEditor = null;
+        runtime.capsuleRenderSignature = '';
+        refreshCapsuleListRegion(before, { force: true });
+        notify('info', '胶囊内容没有变化，无需保存。');
+        if (getSettings(ctx).layeredAutoEnabled && !runtime.layeredPausedByError) scheduleLayeredMemory(900);
+        return before;
+    }
+    const proposed = reviseRoundCapsule(before, capsuleId, {
+        title: editor.title,
+        text: editor.text,
+        importance: editor.importance,
+        ...(editor.generated ? {
+            participants: editor.participants,
+            keywords: editor.keywords,
+        } : {}),
+    }, editor.generated ? 'ai-reorganize' : 'manual-edit');
+    const archived = capsuleIsArchived(before, capsuleId);
+    return commitCapsuleRevision(ctx, before, proposed, capsuleId, archived ? '胶囊修改已保存并同步到长期记忆。' : '胶囊修改已保存并更新记忆注入。');
+}
+
+async function restoreCapsuleVersion(ctx, capsuleId) {
+    if (capsuleTaskBlocked(ctx)) {
+        notify('info', '当前还有生成任务进行中，请稍后恢复胶囊版本。');
+        return null;
+    }
+    const before = getChatState(ctx);
+    const current = capsuleById(before, capsuleId);
+    if (!current?.revisionHistory?.length) throw new Error('这个胶囊还没有可以恢复的上一版');
+    const confirmed = !globalThis.confirm || globalThis.confirm('恢复这个胶囊的上一版吗？如果它已经归档，长期记忆也会一起同步修订。');
+    if (!confirmed) return null;
+    const proposed = restorePreviousRoundCapsule(before, capsuleId);
+    return commitCapsuleRevision(ctx, before, proposed, capsuleId, '已恢复胶囊上一版，并同步更新剧情记忆。');
+}
+
+function stopCapsuleRevision() {
+    if (!runtime.capsuleController || !['capsule-reorganize', 'capsule-archive-sync'].includes(runtime.activeOperation)) return;
+    runtime.capsuleController.abort(new DOMException('用户停止胶囊修订', 'AbortError'));
+    try { getContext().stopGeneration?.(); } catch (error) {
+        console.warn(`[${DISPLAY_NAME}] 酒馆停止接口调用失败`, error);
+    }
 }
 
 async function restoreLatestCapsuleArchive(ctx) {
@@ -2829,6 +3251,11 @@ function setActiveTab(tab = 'home') {
     const windowNode = runtime.overlay?.querySelector('.gds-window');
     if (!windowNode) return;
     const active = ['home', 'memory-full', 'memory-layered', 'director', 'reply', 'connections'].includes(tab) ? tab : 'home';
+    const previous = windowNode.dataset.gdsTab || 'home';
+    if (previous === 'memory-layered' && active !== previous && runtime.capsuleEditor) {
+        captureCapsuleEditor(runtime.capsuleEditor.id);
+        runtime.capsuleRenderSignature = '';
+    }
     windowNode.dataset.gdsTab = active;
     for (const button of windowNode.querySelectorAll('[data-gds-tab]')) button.classList.toggle('active', button.dataset.gdsTab === active);
     for (const panel of windowNode.querySelectorAll('[data-gds-tab-panel]')) panel.hidden = panel.dataset.gdsTabPanel !== active;
@@ -3150,6 +3577,10 @@ function refreshUi() {
         pullModelsForProvider(ctx, activeApiModule).catch(error => console.warn(`[${DISPLAY_NAME}] 自动拉取模型失败`, error));
     }
     const chatState = getChatState(ctx);
+    if (runtime.capsuleEditor && !capsuleById(chatState, runtime.capsuleEditor.id)) {
+        runtime.capsuleEditor = null;
+        runtime.capsuleRenderSignature = '';
+    }
     const summary = runtime.overlay.querySelector('[data-gds-summary]');
     const previews = runtime.overlay.querySelectorAll('[data-gds-preview]');
     const streamPreviews = runtime.overlay.querySelectorAll('[data-gds-stream-preview]');
@@ -3307,8 +3738,7 @@ function refreshUi() {
     if (restore) restore.disabled = taskActive;
     const list = runtime.overlay.querySelector('[data-gds-checkpoints]');
     if (list) list.innerHTML = renderCheckpointList(chatState);
-    const capsuleList = runtime.overlay.querySelector('[data-gds-capsules]');
-    if (capsuleList) capsuleList.innerHTML = renderCapsuleList(chatState);
+    refreshCapsuleListRegion(chatState);
     const hides = runtime.overlay.querySelectorAll('[data-gds-hide]');
     const collapses = runtime.overlay.querySelectorAll('[data-gds-collapse]');
     const streams = runtime.overlay.querySelectorAll('[data-gds-stream]');
@@ -3936,7 +4366,7 @@ function createUi() {
 
     overlay.addEventListener('click', async event => {
         event.stopPropagation();
-        const target = event.target.closest('[data-gds-tab],[data-gds-close],[data-gds-summarize],[data-gds-layered-start],[data-gds-layered-pause],[data-gds-layered-stop],[data-gds-backfill-start],[data-gds-backfill-continue],[data-gds-backfill-restart],[data-gds-backfill-stop],[data-gds-consolidate],[data-gds-restore-archive],[data-gds-continue],[data-gds-stop],[data-gds-rebuild],[data-gds-restore],[data-gds-save-summary],[data-gds-api-save],[data-gds-api-test],[data-gds-director-longline],[data-gds-director-branch],[data-gds-director-foreshadow],[data-gds-director-progress],[data-gds-director-save],[data-gds-director-save-content],[data-gds-director-revise],[data-gds-director-apply-revision],[data-gds-director-discard-revision],[data-gds-director-undo-revision],[data-gds-director-lock],[data-gds-director-unlock],[data-gds-director-select-branch],[data-gds-director-clear-branch],[data-gds-director-set-beat],[data-gds-director-stop],[data-gds-director-continue],[data-gds-director-restart],[data-gds-director-clear],[data-gds-calendar-add],[data-gds-calendar-remove],[data-gds-calendar-sync],[data-gds-reply-generate],[data-gds-reply-copy],[data-gds-reply-insert],[data-gds-reply-stop]');
+        const target = event.target.closest('[data-gds-tab],[data-gds-close],[data-gds-summarize],[data-gds-layered-start],[data-gds-layered-pause],[data-gds-layered-stop],[data-gds-backfill-start],[data-gds-backfill-continue],[data-gds-backfill-restart],[data-gds-backfill-stop],[data-gds-consolidate],[data-gds-restore-archive],[data-gds-capsule-reorganize],[data-gds-capsule-edit],[data-gds-capsule-generate],[data-gds-capsule-save],[data-gds-capsule-cancel],[data-gds-capsule-restore],[data-gds-capsule-stop],[data-gds-continue],[data-gds-stop],[data-gds-rebuild],[data-gds-restore],[data-gds-save-summary],[data-gds-api-save],[data-gds-api-test],[data-gds-director-longline],[data-gds-director-branch],[data-gds-director-foreshadow],[data-gds-director-progress],[data-gds-director-save],[data-gds-director-save-content],[data-gds-director-revise],[data-gds-director-apply-revision],[data-gds-director-discard-revision],[data-gds-director-undo-revision],[data-gds-director-lock],[data-gds-director-unlock],[data-gds-director-select-branch],[data-gds-director-clear-branch],[data-gds-director-set-beat],[data-gds-director-stop],[data-gds-director-continue],[data-gds-director-restart],[data-gds-director-clear],[data-gds-calendar-add],[data-gds-calendar-remove],[data-gds-calendar-sync],[data-gds-reply-generate],[data-gds-reply-copy],[data-gds-reply-insert],[data-gds-reply-stop]');
         if (!target) return;
         try {
             if (target.matches('[data-gds-tab]')) {
@@ -3953,6 +4383,18 @@ function createUi() {
             if (target.matches('[data-gds-backfill-stop]')) await stopHistoricalBackfill();
             if (target.matches('[data-gds-consolidate]')) await consolidateRollingMemory(true);
             if (target.matches('[data-gds-restore-archive]')) await restoreLatestCapsuleArchive(getContext());
+            if (target.matches('[data-gds-capsule-reorganize]')) beginCapsuleEditor(getContext(), target.dataset.gdsCapsuleReorganize, 'reorganize');
+            if (target.matches('[data-gds-capsule-edit]')) beginCapsuleEditor(getContext(), target.dataset.gdsCapsuleEdit, 'edit');
+            if (target.matches('[data-gds-capsule-generate]')) await reorganizeCapsule(getContext(), target.dataset.gdsCapsuleGenerate);
+            if (target.matches('[data-gds-capsule-save]')) await saveCapsuleEditor(getContext(), target.dataset.gdsCapsuleSave);
+            if (target.matches('[data-gds-capsule-cancel]')) {
+                captureCapsuleEditor(target.dataset.gdsCapsuleCancel);
+                runtime.capsuleEditor = null;
+                runtime.capsuleRenderSignature = '';
+                if (getSettings().layeredAutoEnabled && !runtime.layeredPausedByError) scheduleLayeredMemory(900);
+            }
+            if (target.matches('[data-gds-capsule-restore]')) await restoreCapsuleVersion(getContext(), target.dataset.gdsCapsuleRestore);
+            if (target.matches('[data-gds-capsule-stop]')) stopCapsuleRevision();
             if (target.matches('[data-gds-continue]')) await continueSummary();
             if (target.matches('[data-gds-stop]')) stopSummary();
             if (target.matches('[data-gds-rebuild]')) await rebuildFromStart();
@@ -4265,6 +4707,10 @@ function togglePanel(open) {
         return;
     }
     createUi();
+    if (!open && runtime.capsuleEditor) {
+        captureCapsuleEditor(runtime.capsuleEditor.id);
+        runtime.capsuleRenderSignature = '';
+    }
     runtime.open = Boolean(open);
     runtime.overlay.hidden = !runtime.open;
     document.body.classList.toggle('gds-panel-open', runtime.open);
@@ -4363,3 +4809,4 @@ export async function init() {
 
 if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', () => init(), { once: true });
 else init();
+

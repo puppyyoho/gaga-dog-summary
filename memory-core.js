@@ -1,4 +1,6 @@
-export const SCHEMA_VERSION = 3;
+export const SCHEMA_VERSION = 4;
+
+const CAPSULE_REVISION_LIMIT = 6;
 
 export const DEFAULT_CHAT_STATE = {
     schemaVersion: SCHEMA_VERSION,
@@ -47,6 +49,7 @@ export function normalizeChatState(value) {
     for (const key of ['checkpoints', 'sceneCards', 'facts', 'threads', 'styleAnchors', 'hiddenRanges', 'pinnedFactIds', 'excludedMessageKeys', 'roundCapsules', 'memoryArchives']) {
         if (!Array.isArray(result[key])) result[key] = [];
     }
+    result.roundCapsules = result.roundCapsules.map(normalizeStoredRoundCapsule).filter(Boolean);
     if (!result.state || typeof result.state !== 'object' || Array.isArray(result.state)) result.state = {};
     result.summaryMode = ['novel', 'structured', 'mixed'].includes(result.summaryMode) ? result.summaryMode : 'mixed';
     result.memoryMode = ['manual', 'layered'].includes(result.memoryMode) ? result.memoryMode : 'manual';
@@ -526,6 +529,61 @@ export function parseRoundCapsule(raw, { allowPlainText = true } = {}) {
     throw new Error('模型没有返回可解析的剧情胶囊');
 }
 
+function memoryRevisionValueCandidates(value, depth = 0) {
+    if (depth > 4 || value == null) return [];
+    if (Array.isArray(value)) return value.flatMap(item => memoryRevisionValueCandidates(item, depth + 1));
+    if (typeof value !== 'object') return [];
+    const output = [value];
+    for (const key of ['revision', 'patch', 'result', 'data', 'output', 'response']) {
+        const nested = value[key];
+        if (nested && typeof nested === 'object') output.push(...memoryRevisionValueCandidates(nested, depth + 1));
+        else if (typeof nested === 'string' && /[\[{]/.test(nested)) {
+            for (const candidate of balancedJsonCandidates(nested)) {
+                try { output.push(...memoryRevisionValueCandidates(JSON.parse(candidate), depth + 1)); } catch { /* Try the next wrapper. */ }
+            }
+        }
+    }
+    return output;
+}
+
+function normalizedStringList(value) {
+    const list = Array.isArray(value) ? value : typeof value === 'string' ? value.split(/[，,、；;|\n]/) : [];
+    return [...new Set(list.map(item => compactText(item, 240)).filter(Boolean))];
+}
+
+export function parseCapsuleMemoryRevision(raw) {
+    const text = capsuleResponseText(raw);
+    if (!text) throw new Error('模型没有返回长期记忆修订结果');
+    for (const candidate of balancedJsonCandidates(text)) {
+        for (const source of [candidate, repairCapsuleJson(candidate)]) {
+            try {
+                const parsed = JSON.parse(source);
+                for (const value of memoryRevisionValueCandidates(parsed)) {
+                    const patch = {
+                        removeFactIds: normalizedStringList(value.removeFactIds || value.factRemovals || value['删除事实ID']),
+                        facts: Array.isArray(value.facts || value.upsertFacts) ? clone(value.facts || value.upsertFacts) : [],
+                        removeStateKeys: normalizedStringList(value.removeStateKeys || value.stateRemovals || value['删除状态键']),
+                        stateUpdates: Array.isArray(value.stateUpdates || value.states) ? clone(value.stateUpdates || value.states) : [],
+                        removeThreadIds: normalizedStringList(value.removeThreadIds || value.threadRemovals || value['删除未结事项ID']),
+                        threads: Array.isArray(value.threads || value.threadUpdates) ? clone(value.threads || value.threadUpdates) : [],
+                        recapEdits: (Array.isArray(value.recapEdits) ? value.recapEdits : []).map(item => ({
+                            find: compactText(item?.find || item?.oldText || '', 4000),
+                            replace: compactText(item?.replace ?? item?.newText ?? '', 4000),
+                        })).filter(item => item.find),
+                        novelRecap: compactText(value.novelRecap || value.recap || value['文学前情'] || '', 20000),
+                        noMemoryChange: value.noMemoryChange === true || String(value.noMemoryChange || '').toLowerCase() === 'true',
+                    };
+                    const changed = patch.removeFactIds.length || patch.facts.length || patch.removeStateKeys.length
+                        || patch.stateUpdates.length || patch.removeThreadIds.length || patch.threads.length || patch.recapEdits.length
+                        || patch.novelRecap || patch.noMemoryChange;
+                    if (changed) return patch;
+                }
+            } catch { /* Try the remaining bounded and repaired candidates. */ }
+        }
+    }
+    throw new Error('模型没有返回可解析的长期记忆修订结构');
+}
+
 export function createRoundCapsule(packet, sourceRange, id = `capsule_${Date.now()}`) {
     const text = compactText(packet?.text || '', 2400);
     if (!text || !sourceRange?.refs?.length) throw new Error('剧情胶囊缺少正文或来源范围');
@@ -539,7 +597,163 @@ export function createRoundCapsule(packet, sourceRange, id = `capsule_${Date.now
         sourceRange: clone(sourceRange),
         tokenCount: tokenEstimate(text),
         createdAt: Date.now(),
+        updatedAt: Date.now(),
+        revision: 1,
+        revisionHistory: [],
+        revisionSource: 'model',
     };
+}
+
+function capsuleRevisionSnapshot(capsule, reason = 'manual') {
+    return {
+        title: compactText(capsule?.title || '本轮剧情', 120),
+        text: compactText(capsule?.text || '', 2400),
+        importance: ['critical', 'high', 'medium', 'low'].includes(String(capsule?.importance || '').toLowerCase())
+            ? String(capsule.importance).toLowerCase()
+            : 'medium',
+        participants: Array.isArray(capsule?.participants) ? capsule.participants.map(String).slice(0, 20) : [],
+        keywords: Array.isArray(capsule?.keywords) ? capsule.keywords.map(String).slice(0, 40) : [],
+        revision: Math.max(1, Math.round(Number(capsule?.revision) || 1)),
+        savedAt: Math.max(0, Number(capsule?.updatedAt || capsule?.createdAt) || Date.now()),
+        reason: compactText(reason || capsule?.revisionSource || 'manual', 80),
+    };
+}
+
+function normalizeStoredRoundCapsule(value) {
+    if (!value || typeof value !== 'object') return null;
+    const text = compactText(value.text || '', 2400);
+    if (!text || !value.sourceRange?.refs?.length) return null;
+    const importance = String(value.importance || 'medium').toLowerCase();
+    const history = (Array.isArray(value.revisionHistory) ? value.revisionHistory : [])
+        .map(item => capsuleRevisionSnapshot(item, item?.reason || 'manual'))
+        .slice(-CAPSULE_REVISION_LIMIT);
+    return {
+        ...clone(value),
+        id: String(value.id || `capsule_${Date.now()}_${simpleHash(text)}`),
+        title: compactText(value.title || '本轮剧情', 120),
+        text,
+        importance: ['critical', 'high', 'medium', 'low'].includes(importance) ? importance : 'medium',
+        participants: Array.isArray(value.participants) ? value.participants.map(String).slice(0, 20) : [],
+        keywords: [...new Set([...(value.keywords || []).map(String), ...extractKeywords(text)])].slice(0, 40),
+        sourceRange: clone(value.sourceRange),
+        tokenCount: tokenEstimate(text),
+        createdAt: Math.max(0, Number(value.createdAt) || Date.now()),
+        updatedAt: Math.max(0, Number(value.updatedAt || value.createdAt) || Date.now()),
+        revision: Math.max(1, Math.round(Number(value.revision) || 1)),
+        revisionHistory: history,
+        revisionSource: compactText(value.revisionSource || 'model', 80),
+    };
+}
+
+export function reviseRoundCapsule(stateValue, capsuleId, changes = {}, reason = 'manual') {
+    const state = normalizeChatState(stateValue);
+    const index = state.roundCapsules.findIndex(item => item.id === String(capsuleId || ''));
+    if (index < 0) throw new Error('没有找到要修改的剧情胶囊');
+    const original = state.roundCapsules[index];
+    const text = compactText(changes.text ?? original.text, 2400);
+    if (!text) throw new Error('剧情胶囊正文不能为空');
+    const next = clone(state);
+    const history = [...(original.revisionHistory || []), capsuleRevisionSnapshot(original, reason)]
+        .slice(-CAPSULE_REVISION_LIMIT);
+    const updated = normalizeStoredRoundCapsule({
+        ...original,
+        title: changes.title ?? original.title,
+        text,
+        importance: changes.importance ?? original.importance,
+        participants: changes.participants ?? original.participants,
+        keywords: changes.keywords ?? extractKeywords(text).slice(0, 20),
+        updatedAt: Date.now(),
+        revision: Math.max(1, Number(original.revision) || 1) + 1,
+        revisionHistory: history,
+        revisionSource: reason,
+    });
+    next.roundCapsules[index] = updated;
+    return next;
+}
+
+export function restorePreviousRoundCapsule(stateValue, capsuleId) {
+    const state = normalizeChatState(stateValue);
+    const index = state.roundCapsules.findIndex(item => item.id === String(capsuleId || ''));
+    if (index < 0) throw new Error('没有找到要恢复的剧情胶囊');
+    const original = state.roundCapsules[index];
+    const history = [...(original.revisionHistory || [])];
+    const previous = history.pop();
+    if (!previous) throw new Error('这个胶囊还没有可以恢复的上一版');
+    const next = clone(state);
+    next.roundCapsules[index] = normalizeStoredRoundCapsule({
+        ...original,
+        title: previous.title,
+        text: previous.text,
+        importance: previous.importance,
+        participants: previous.participants,
+        keywords: previous.keywords,
+        id: original.id,
+        sourceRange: original.sourceRange,
+        createdAt: original.createdAt,
+        updatedAt: Date.now(),
+        revision: Math.max(1, Number(original.revision) || 1) + 1,
+        revisionHistory: history,
+        revisionSource: 'restore',
+    });
+    return next;
+}
+
+export function applyCapsuleMemoryRevision(stateValue, patchValue, sourceRange = null, revisionId = `capsule_revision_${Date.now()}`) {
+    const state = normalizeChatState(stateValue);
+    const patch = patchValue && typeof patchValue === 'object' ? patchValue : {};
+    const next = clone(state);
+    const removeFactIds = new Set(normalizedStringList(patch.removeFactIds));
+    const removeStateKeys = new Set(normalizedStringList(patch.removeStateKeys));
+    const removeThreadIds = new Set(normalizedStringList(patch.removeThreadIds));
+    next.facts = next.facts.filter(item => item.userLocked || !removeFactIds.has(String(item.id || '')));
+    for (const key of removeStateKeys) {
+        if (!next.state[key]?.userLocked) delete next.state[key];
+    }
+    next.threads = next.threads.filter(item => item.userLocked || !removeThreadIds.has(String(item.id || '')));
+
+    const originalCheckpoints = clone(next.checkpoints);
+    const originalScenes = clone(next.sceneCards);
+    const originalLastProcessed = next.lastProcessedIndex;
+    const originalLastStable = next.lastStableIndex;
+    const protectedFactIds = new Set(next.facts.filter(item => item.userLocked).map(item => String(item.id || '')));
+    const protectedStateKeys = new Set(Object.values(next.state).filter(item => item.userLocked).map(item => String(item.key || '')));
+    const protectedThreadIds = new Set(next.threads.filter(item => item.userLocked).map(item => String(item.id || '')));
+    const facts = (Array.isArray(patch.facts) ? patch.facts : []).filter((item, index) => {
+        const normalized = normalizeFact(item, [], index);
+        return normalized && !protectedFactIds.has(normalized.id);
+    });
+    const stateUpdates = (Array.isArray(patch.stateUpdates) ? patch.stateUpdates : []).filter(item => {
+        const key = String(item?.key || item?.path || item?.target || '').trim();
+        return key && !protectedStateKeys.has(key);
+    });
+    const threads = (Array.isArray(patch.threads) ? patch.threads : []).filter(item => {
+        const text = compactText(item?.text || item?.description || item?.thread || '', 1000);
+        const id = String(item?.id || `thread_${simpleHash(text)}`);
+        return text && !protectedThreadIds.has(id);
+    });
+    const merged = mergeMemoryPacket(next, {
+        facts,
+        stateUpdates,
+        threads,
+        recap: '',
+    }, sourceRange, revisionId);
+    merged.checkpoints = originalCheckpoints;
+    merged.sceneCards = originalScenes;
+    merged.lastProcessedIndex = originalLastProcessed;
+    merged.lastStableIndex = originalLastStable;
+    let novelRecap = String(merged.summaryArtifacts.novel || '');
+    for (const edit of Array.isArray(patch.recapEdits) ? patch.recapEdits : []) {
+        const find = String(edit?.find || '');
+        if (!find) continue;
+        if (!novelRecap.includes(find)) throw new Error('长期文学前情中的修订位置无法定位，已阻止不完整覆盖');
+        novelRecap = novelRecap.replace(find, String(edit?.replace || ''));
+    }
+    if (patch.novelRecap) novelRecap = compactText(patch.novelRecap, 20000);
+    merged.summaryArtifacts.novel = novelRecap;
+    merged.summaryArtifacts.structured = renderStructuredSummary(merged);
+    merged.summaryArtifacts.mixed = renderMixedSummary(merged, merged.summaryArtifacts.novel);
+    merged.recap = String(merged.summaryArtifacts?.[merged.summaryMode] || merged.summaryArtifacts.novel || merged.summaryArtifacts.structured || '').trim();
+    return merged;
 }
 
 export function appendRoundCapsule(stateValue, capsule) {
@@ -857,3 +1071,4 @@ export function selectStyleAnchors(messages, max = 3, options = {}) {
         .slice(0, max)
         .map(item => ({ key: item.key, index: item.index, text: item.content.slice(0, 1500) }));
 }
+

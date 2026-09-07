@@ -1,6 +1,6 @@
 {
   "name": "gaga-dog-summary",
-  "version": "0.5.12",
+  "version": "0.6.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -8,3 +8,4 @@
     "test": "node --test tests/*.test.mjs"
   }
 }
+

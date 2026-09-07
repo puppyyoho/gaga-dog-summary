@@ -419,9 +419,44 @@ body.gds-panel-open { overflow: hidden !important; }
 .gds-capsule-list { display: grid; gap: 7px; max-height: 340px; overflow-y: auto; padding: 8px 2px; }
 .gds-capsule-card { border: 1px solid var(--gds-line); border-radius: 10px; padding: 9px 11px; background: rgba(255,255,255,.45); }
 .gds-capsule-card.archived { opacity: .72; }
-.gds-capsule-card > div { display: flex; justify-content: space-between; gap: 10px; align-items: baseline; }
+.gds-capsule-card.editing { border-color: var(--gds-pink); background: rgba(255,255,255,.82); opacity: 1; }
+.gds-capsule-head { display: flex; justify-content: space-between; gap: 10px; align-items: baseline; }
 .gds-capsule-card span, .gds-capsule-archives small { color: var(--gds-muted); font-size: 11px; }
 .gds-capsule-card p { margin: 6px 0 0; white-space: pre-wrap; line-height: 1.55; font-size: 12px; }
+.gds-capsule-actions, .gds-capsule-edit-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.gds-capsule-actions button, .gds-capsule-edit-actions button {
+    min-height: 30px;
+    border: 1px solid var(--gds-line);
+    border-radius: 8px;
+    background: #fff;
+    color: var(--gds-ink);
+    padding: 5px 10px;
+    cursor: pointer;
+    font-size: 11px;
+}
+.gds-capsule-actions button:hover, .gds-capsule-edit-actions button:hover { border-color: var(--gds-pink); }
+.gds-capsule-actions button:disabled, .gds-capsule-edit-actions button:disabled { cursor: not-allowed; opacity: .5; }
+.gds-capsule-edit-actions .gds-primary { border-color: var(--gds-pink-deep); background: var(--gds-pink-deep); color: #fff; }
+.gds-capsule-edit-actions .gds-danger { border-color: #c75466; background: #c75466; color: #fff; }
+.gds-capsule-editor { display: grid; gap: 8px; margin-top: 9px; }
+.gds-capsule-editor label { display: grid; gap: 5px; color: var(--gds-muted); font-size: 11px; }
+.gds-capsule-editor input, .gds-capsule-editor select, .gds-capsule-editor textarea {
+    box-sizing: border-box;
+    width: 100%;
+    min-width: 0;
+    border: 1px solid var(--gds-line);
+    border-radius: 8px;
+    background: #fff;
+    color: var(--gds-ink);
+    padding: 7px 8px;
+    font: inherit;
+    font-size: 12px;
+    line-height: 1.5;
+}
+.gds-capsule-editor textarea { resize: vertical; min-height: 64px; }
+.gds-capsule-editor input:focus, .gds-capsule-editor select:focus, .gds-capsule-editor textarea:focus { outline: 2px solid rgba(255, 130, 179, .28); border-color: var(--gds-pink); }
+.gds-capsule-editor .gds-capsule-importance { grid-template-columns: auto minmax(100px, 160px); align-items: center; justify-content: start; }
+.gds-capsule-edit-status { color: var(--gds-pink-deep); }
 .gds-capsule-archives { display: flex; flex-wrap: wrap; gap: 6px 12px; margin: 9px 0 3px; }
 .gds-settings-grid label { display: flex; align-items: center; justify-content: space-between; gap: 12px; color: var(--gds-muted); }
 .gds-settings-grid .gds-toggle-row { width: fit-content; max-width: 100%; min-height: 24px; justify-content: flex-start; gap: 9px; }
@@ -695,6 +730,9 @@ body.gds-panel-open { overflow: hidden !important; }
     .gds-calendar-settings input[type="date"] { max-width: 48%; }
     .gds-wide { grid-column: auto; }
     .gds-checkpoint { grid-template-columns: 1fr; gap: 4px; }
+    .gds-capsule-head { align-items: flex-start; flex-direction: column; gap: 3px; }
+    .gds-capsule-actions button, .gds-capsule-edit-actions button { flex: 1 1 104px; min-height: 36px; }
+    .gds-capsule-editor .gds-capsule-importance { grid-template-columns: 1fr; }
     .gds-footer { flex-direction: column; padding: 16px 14px max(18px, env(safe-area-inset-bottom, 0px)); }
     .gds-floating { right: 14px; bottom: 14px; }
     .gds-floating-actions { gap: 7px; }
@@ -709,3 +747,4 @@ body.gds-panel-open { overflow: hidden !important; }
 
 /* When the optional collapse helper is enabled, the extension may mark old messages. */
 .mes.gds-auto-hidden .mes_block { max-height: 34px; overflow: hidden; opacity: .66; }
+
