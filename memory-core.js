@@ -1071,4 +1071,3 @@ export function selectStyleAnchors(messages, max = 3, options = {}) {
         .slice(0, max)
         .map(item => ({ key: item.key, index: item.index, text: item.content.slice(0, 1500) }));
 }
-

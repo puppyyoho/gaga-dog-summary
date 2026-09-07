@@ -312,4 +312,3 @@ export function renderFactsForProse(state) {
         threads.filter(item => item.status === 'open').map(item => `- ${item.text}`).join('\n'),
     ].filter(Boolean).join('\n');
 }
-

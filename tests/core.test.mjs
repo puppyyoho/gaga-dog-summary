@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
     activeRoundCapsules,
+    applyCapsuleMemoryRevision,
     appendRoundCapsule,
     assertMemoryPacket,
     compileInjection,
@@ -11,6 +12,7 @@ import {
     mergeMemoryPacket,
     normalizeChatState,
     nextRoundRange,
+    parseCapsuleMemoryRevision,
     roundRangesForBackfill,
     parseModelPacket,
     parseRoundCapsule,
@@ -18,6 +20,8 @@ import {
     rangesForSummaryBacklog,
     rangeStillMatches,
     roundCapsuleTokens,
+    restorePreviousRoundCapsule,
+    reviseRoundCapsule,
     selectHideEnd,
     summaryMessageIndexes,
     selectRelevantCapsules,
@@ -198,6 +202,81 @@ test('creates one incremental capsule for a completed user and assistant round',
     assert.equal(next.lastCapsuleIndex, 3);
     assert.equal(activeRoundCapsules(next).length, 1);
     assert.ok(roundCapsuleTokens(next) > 0);
+});
+
+test('edits a capsule with bounded version history and restores its previous version', () => {
+    const original = createRoundCapsule(
+        { title: '旧标题', text: '陆遥拿走军徽。', importance: 'high', participants: ['陆遥'], keywords: ['军徽'] },
+        makeSourceRange(messages, 2, 3),
+        'cap_revision',
+    );
+    const state = normalizeChatState({ memoryMode: 'layered', roundCapsules: [original] });
+    const revised = reviseRoundCapsule(state, original.id, {
+        title: '军徽与隐瞒',
+        text: '陆遥发现并拿走军徽，沈砚仍不知道此事。',
+        importance: 'critical',
+    }, 'manual-edit');
+    const edited = revised.roundCapsules[0];
+    assert.equal(edited.title, '军徽与隐瞒');
+    assert.equal(edited.revision, 2);
+    assert.equal(edited.revisionHistory.length, 1);
+    assert.ok(edited.tokenCount > 0);
+
+    const restored = restorePreviousRoundCapsule(revised, original.id);
+    assert.equal(restored.roundCapsules[0].title, '旧标题');
+    assert.equal(restored.roundCapsules[0].text, '陆遥拿走军徽。');
+    assert.equal(restored.roundCapsules[0].revisionHistory.length, 0);
+});
+
+test('parses and applies an archived capsule correction without touching locked memory', () => {
+    const patch = parseCapsuleMemoryRevision(JSON.stringify({
+        removeFactIds: ['old', 'locked'],
+        facts: [
+            { id: 'new', text: '陆遥拿走军徽，沈砚仍不知情。', importance: 'critical' },
+            { id: 'locked', text: '模型试图覆盖锁定事实', importance: 'low', userLocked: true },
+        ],
+        removeStateKeys: ['地点', '锁定状态'],
+        stateUpdates: [
+            { key: '地点', value: '枯井旁', importance: 'high' },
+            { key: '锁定状态', value: '模型试图覆盖', userLocked: true },
+        ],
+        removeThreadIds: ['old_thread', 'locked_thread'],
+        threads: [
+            { id: 'well', text: '天亮前调查枯井', status: 'open' },
+            { id: 'locked_thread', text: '模型试图覆盖锁定事项', status: 'open', userLocked: true },
+        ],
+        recapEdits: [{ find: '旧前情。', replace: '陆遥拿走军徽，沈砚对此仍不知情。' }],
+        novelRecap: '',
+        noMemoryChange: false,
+    }));
+    const state = normalizeChatState({
+        summaryMode: 'mixed',
+        summaryArtifacts: { novel: '旧前情。', structured: '', mixed: '' },
+        facts: [
+            { id: 'old', text: '旧事实', importance: 'medium' },
+            { id: 'locked', text: '锁定事实', importance: 'critical', userLocked: true },
+        ],
+        state: {
+            地点: { key: '地点', value: '客栈' },
+            锁定状态: { key: '锁定状态', value: '必须保留', userLocked: true },
+        },
+        threads: [
+            { id: 'old_thread', text: '旧事项', status: 'open' },
+            { id: 'locked_thread', text: '必须保留的事项', status: 'open', userLocked: true },
+        ],
+    });
+    const revised = applyCapsuleMemoryRevision(state, patch, makeSourceRange(messages, 2, 3), 'revision_test');
+    assert.equal(revised.facts.some(item => item.id === 'old'), false);
+    assert.equal(revised.facts.some(item => item.id === 'locked'), true);
+    assert.equal(revised.facts.find(item => item.id === 'locked').text, '锁定事实');
+    assert.match(revised.facts.find(item => item.id === 'new').text, /仍不知情/);
+    assert.equal(revised.state['地点'].value, '枯井旁');
+    assert.equal(revised.state['锁定状态'].value, '必须保留');
+    assert.equal(revised.threads.some(item => item.id === 'old_thread'), false);
+    assert.equal(revised.threads.some(item => item.id === 'well'), true);
+    assert.equal(revised.threads.find(item => item.id === 'locked_thread').text, '必须保留的事项');
+    assert.match(revised.summaryArtifacts.novel, /沈砚对此仍不知情/);
+    assert.match(revised.summaryArtifacts.mixed, /沈砚对此仍不知情/);
 });
 
 test('parses fenced, reasoning-prefixed and wrapped capsule responses', () => {

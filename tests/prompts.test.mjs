@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+    buildCapsuleMemoryRevisionPrompt,
+    buildCapsuleReorganizePrompt,
     buildCapsuleConsolidationPrompt,
     buildFactPrompt,
     buildPolishPrompt,
@@ -18,7 +20,7 @@ test('builds a separate fact-bounded literary polishing stage', () => {
         targetWords: 600,
         customPrompts: DEFAULT_PROMPTS,
     });
-    assert.equal(PROMPT_VERSION, 'gaga-summary-v5');
+    assert.equal(PROMPT_VERSION, 'gaga-summary-v6');
     assert.match(request.systemPrompt, /不得新增、删除或改变事件/);
     assert.match(request.prompt, /<前情草稿>/);
     assert.match(request.prompt, /谢怀璧接过了茶/);
@@ -45,4 +47,26 @@ test('keeps the complete source text in an adaptive fact request', () => {
     });
 
     assert.match(request.prompt, /尾部标记/);
+});
+
+test('capsule reorganization rereads source and archived edits use a bounded correction prompt', () => {
+    const reorganize = buildCapsuleReorganizePrompt({
+        messages: '[消息 4] 她收下钥匙。',
+        currentCapsule: '她收下钥匙。',
+        currentMemory: '两人已经约定再见。',
+        instruction: '保留她迟疑后才收下的细节',
+    });
+    assert.match(reorganize.systemPrompt, /原始消息是唯一事实来源/);
+    assert.match(reorganize.prompt, /保留她迟疑后才收下的细节/);
+
+    const archiveRevision = buildCapsuleMemoryRevisionPrompt({
+        memoryStructure: '{"facts":[]}',
+        novelRecap: '旧前情',
+        oldCapsule: '旧胶囊',
+        newCapsule: '新胶囊',
+    });
+    assert.match(archiveRevision.systemPrompt, /其余记忆必须原样保留/);
+    assert.match(archiveRevision.systemPrompt, /noMemoryChange/);
+    assert.match(archiveRevision.prompt, /<修订前胶囊>/);
+    assert.match(archiveRevision.prompt, /新胶囊/);
 });

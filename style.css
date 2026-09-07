@@ -747,4 +747,3 @@ body.gds-panel-open { overflow: hidden !important; }
 
 /* When the optional collapse helper is enabled, the extension may mark old messages. */
 .mes.gds-auto-hidden .mes_block { max-height: 34px; overflow: hidden; opacity: .66; }
-

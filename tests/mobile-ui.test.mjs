@@ -306,6 +306,23 @@ test('uses independent full-summary and layered-memory workflows without the old
     assert.match(js, /近期消息只按楼层完整保留，不受 Token 限制/);
 });
 
+test('each rolling capsule can be reorganized, edited, saved and restored without replacing the active editor on every refresh', () => {
+    assert.match(js, /data-gds-capsule-reorganize/);
+    assert.match(js, /data-gds-capsule-edit/);
+    assert.match(js, /data-gds-capsule-generate/);
+    assert.match(js, /data-gds-capsule-save/);
+    assert.match(js, /data-gds-capsule-cancel/);
+    assert.match(js, /data-gds-capsule-restore/);
+    assert.match(js, /data-gds-capsule-stop/);
+    assert.match(js, /function refreshCapsuleListRegion/);
+    assert.match(js, /runtime\.capsuleRenderSignature === signature/);
+    assert.match(js, /formatCapsuleSourceMessages/);
+    assert.match(js, /buildCapsuleMemoryRevisionPrompt/);
+    assert.match(js, /applyCapsuleMemoryRevision/);
+    assert.match(css, /\.gds-capsule-editor/);
+    assert.match(css, /\.gds-capsule-edit-actions/);
+});
+
 test('rolling memory stops cleanly and pauses itself after an error', () => {
     assert.match(js, /function clearLayeredTimer\(\)/);
     assert.match(js, /function pauseLayeredAfterError\(ctx, message\)/);
