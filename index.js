@@ -108,7 +108,7 @@ const INJECTION_ID = `${EXTENSION_NAME}:memory`;
 const DIRECTOR_INJECTION_ID = `${EXTENSION_NAME}:director`;
 const PANEL_LOGO_URL = new URL('./assets/gaga-dog-logo.png', import.meta.url).href;
 const FLOATING_LOGO_URL = new URL('./assets/gaga-dog-floating.png', import.meta.url).href;
-const VERSION = '0.5.11';
+const VERSION = '0.5.12';
 const SETTINGS_VERSION = 10;
 
 const DEFAULT_SETTINGS = {
@@ -175,8 +175,8 @@ const runtime = {
     modelPullController: null,
     modelPullBusy: false,
     modelOptions: [],
-    directorEditorActive: false,
-    directorScrollLock: null,
+    workbenchEditorActive: false,
+    workbenchScrollLock: null,
     pageScrollByTab: {},
     directorRenderSignatures: { plan: '', branches: '', foreshadows: '' },
 };
@@ -2836,7 +2836,7 @@ function setActiveTab(tab = 'home') {
     if (navigation) navigation.hidden = active === 'home';
     const pageHost = windowNode.querySelector('.gds-page-host');
     if (pageHost) {
-        runtime.directorScrollLock = null;
+        runtime.workbenchScrollLock = null;
         runtime.pageScrollByTab[active] = 0;
         pageHost.scrollTop = 0;
     }
@@ -2930,24 +2930,25 @@ function bindBlankAreaScrollGuard(pageHost) {
     });
 }
 
-function bindDirectorEditorScrollGuard(pageHost) {
-    if (!pageHost || pageHost.dataset.gdsDirectorEditorGuard === 'true') return;
-    pageHost.dataset.gdsDirectorEditorGuard = 'true';
-    // Protect every editable control on the director page. Limiting this to the
-    // generated plan regions left the planning brief and the pacing/calendar
-    // fields exposed to SillyTavern/WebView focus scrolling.
-    const editorSelector = '[data-gds-tab-panel="director"] input,[data-gds-tab-panel="director"] textarea,[data-gds-tab-panel="director"] select,[data-gds-tab-panel="director"] [contenteditable="true"]';
+function bindWorkbenchControlScrollGuard(pageHost) {
+    if (!pageHost || pageHost.dataset.gdsWorkbenchControlGuard === 'true') return;
+    pageHost.dataset.gdsWorkbenchControlGuard = 'true';
+    // SillyTavern themes and embedded WebViews can scroll the nearest overflow
+    // container when any form control receives focus. Guard all workbench
+    // pages, including buttons whose handlers refresh a panel after clicking.
+    const editorSelector = '[data-gds-tab-panel] input,[data-gds-tab-panel] textarea,[data-gds-tab-panel] select,[data-gds-tab-panel] [contenteditable="true"]';
+    const controlSelector = `${editorSelector},[data-gds-tab-panel] button,[data-gds-tab-panel] summary,[data-gds-tab-panel] a`;
     let pointerFocus = null;
 
     const tabName = () => pageHost.closest('.gds-window')?.dataset.gdsTab || '';
-    const lockScroll = (scrollTop, duration = 1600) => {
+    const lockScroll = (scrollTop, tab = tabName(), duration = 1600) => {
         const top = Math.max(0, Number(scrollTop) || 0);
-        const token = Symbol('director-scroll-lock');
-        runtime.directorScrollLock = { token, top, until: Date.now() + duration };
-        runtime.pageScrollByTab.director = top;
+        const token = Symbol('workbench-scroll-lock');
+        runtime.workbenchScrollLock = { token, top, tab, until: Date.now() + duration };
+        runtime.pageScrollByTab[tab] = top;
         const restore = () => {
-            const lock = runtime.directorScrollLock;
-            if (!pageHost.isConnected || lock?.token !== token) return;
+            const lock = runtime.workbenchScrollLock;
+            if (!pageHost.isConnected || lock?.token !== token || tabName() !== tab) return;
             pageHost.scrollTop = top;
         };
         restorePageScrollAfterLayout(pageHost, top);
@@ -2955,29 +2956,30 @@ function bindDirectorEditorScrollGuard(pageHost) {
     };
 
     const rememberPointerFocus = event => {
-        const editor = event.target.closest?.(editorSelector);
-        if (!editor) {
+        const control = event.target.closest?.(controlSelector);
+        if (!control) {
             pointerFocus = null;
-            runtime.directorScrollLock = null;
+            runtime.workbenchScrollLock = null;
             return;
         }
         pointerFocus = {
-            editor,
+            control,
             top: pageHost.scrollTop,
+            tab: tabName(),
             at: Date.now(),
         };
-        runtime.directorEditorActive = true;
-        lockScroll(pointerFocus.top);
+        runtime.workbenchEditorActive = control.matches(editorSelector);
+        lockScroll(pointerFocus.top, pointerFocus.tab);
     };
 
     pageHost.addEventListener('scroll', () => {
-        const lock = runtime.directorScrollLock;
-        if (tabName() === 'director' && lock && Date.now() <= lock.until) {
+        const lock = runtime.workbenchScrollLock;
+        if (lock?.tab === tabName() && Date.now() <= lock.until) {
             if (Math.abs(pageHost.scrollTop - lock.top) > 0.5) pageHost.scrollTop = lock.top;
             return;
         }
         runtime.pageScrollByTab[tabName()] = pageHost.scrollTop;
-        if (lock && Date.now() > lock.until) runtime.directorScrollLock = null;
+        if (lock && Date.now() > lock.until) runtime.workbenchScrollLock = null;
     }, { passive: true });
 
     pageHost.addEventListener('pointerdown', rememberPointerFocus, true);
@@ -2985,30 +2987,31 @@ function bindDirectorEditorScrollGuard(pageHost) {
     pageHost.addEventListener('touchstart', rememberPointerFocus, { capture: true, passive: true });
 
     pageHost.addEventListener('focusin', event => {
-        if (!event.target.matches?.(editorSelector)) return;
-        runtime.directorEditorActive = true;
-        if (pointerFocus?.editor === event.target && Date.now() - pointerFocus.at < 2000) {
-            lockScroll(pointerFocus.top);
+        const control = event.target.closest?.(controlSelector);
+        if (!control) return;
+        runtime.workbenchEditorActive = control.matches(editorSelector);
+        if (pointerFocus?.control === control && Date.now() - pointerFocus.at < 2000) {
+            lockScroll(pointerFocus.top, pointerFocus.tab);
         }
     }, true);
 
     pageHost.addEventListener('click', event => {
-        const editor = event.target.closest?.(editorSelector);
-        if (editor && pointerFocus?.editor === editor && Date.now() - pointerFocus.at < 2500) {
-            lockScroll(pointerFocus.top);
+        const control = event.target.closest?.(controlSelector);
+        if (control && pointerFocus?.control === control && Date.now() - pointerFocus.at < 2500) {
+            lockScroll(pointerFocus.top, pointerFocus.tab);
         }
     }, true);
 
     const releaseForUserScroll = () => {
         pointerFocus = null;
-        runtime.directorScrollLock = null;
+        runtime.workbenchScrollLock = null;
     };
     pageHost.addEventListener('wheel', releaseForUserScroll, { capture: true, passive: true });
     pageHost.addEventListener('touchmove', releaseForUserScroll, { capture: true, passive: true });
 
     pageHost.addEventListener('focusout', () => {
         queueMicrotask(() => {
-            runtime.directorEditorActive = Boolean(pageHost.contains(document.activeElement) && document.activeElement?.matches?.(editorSelector));
+            runtime.workbenchEditorActive = Boolean(pageHost.contains(document.activeElement) && document.activeElement?.matches?.(editorSelector));
         });
     }, true);
 }
@@ -3017,7 +3020,7 @@ function refreshDirectorEditorRegion(node, html, key) {
     if (!node) return;
     const signature = simpleHash(html);
     if (runtime.directorRenderSignatures[key] === signature) return;
-    if (runtime.directorEditorActive || node.contains(document.activeElement)) return;
+    if (runtime.workbenchEditorActive || node.contains(document.activeElement)) return;
     node.innerHTML = html;
     runtime.directorRenderSignatures[key] = signature;
 }
@@ -3131,8 +3134,8 @@ function refreshUi() {
     if (!runtime.overlay) return;
     const pageHost = runtime.overlay.querySelector('.gds-page-host');
     const activeTab = runtime.overlay.querySelector('.gds-window')?.dataset.gdsTab || '';
-    const activeScrollLock = runtime.directorScrollLock;
-    const preservedScrollTop = activeTab === 'director' && activeScrollLock && Date.now() <= activeScrollLock.until
+    const activeScrollLock = runtime.workbenchScrollLock;
+    const preservedScrollTop = activeScrollLock?.tab === activeTab && Date.now() <= activeScrollLock.until
         ? activeScrollLock.top
         : Number(pageHost?.scrollTop || 0);
     runtime.pageScrollByTab[activeTab] = preservedScrollTop;
@@ -3914,7 +3917,7 @@ function createUi() {
     const pageHost = overlay.querySelector('.gds-page-host');
     bindStableDetailsScrolling(pageHost);
     bindBlankAreaScrollGuard(pageHost);
-    bindDirectorEditorScrollGuard(pageHost);
+    bindWorkbenchControlScrollGuard(pageHost);
 
     const floating = document.createElement('button');
     floating.className = 'gds-floating';

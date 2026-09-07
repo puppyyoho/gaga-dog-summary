@@ -191,7 +191,7 @@ test('opening lower detail sections preserves the internal scroll anchor', () =>
     assert.match(js, /const lockedScrollTop = pageHost\.scrollTop/);
     assert.match(js, /details\.open = !details\.open/);
     assert.match(js, /restorePageScrollAfterLayout\(pageHost, lockedScrollTop\)/);
-    assert.match(js, /const preservedScrollTop = activeTab === 'director'/);
+    assert.match(js, /const preservedScrollTop = activeScrollLock\?\.tab === activeTab/);
     assert.match(js, /bindStableDetailsScrolling\(pageHost\)/);
 });
 
@@ -204,15 +204,17 @@ test('clicking non-interactive page space cannot reset the internal scroll posit
     assert.match(js, /bindBlankAreaScrollGuard\(pageHost\)/);
 });
 
-test('director editors keep focus and scroll without being re-rendered', () => {
-    assert.match(js, /function bindDirectorEditorScrollGuard\(pageHost\)/);
-    assert.match(js, /\[data-gds-tab-panel="director"\] input/);
-    assert.match(js, /\[data-gds-tab-panel="director"\] textarea/);
-    assert.match(js, /\[data-gds-tab-panel="director"\] select/);
+test('all workbench controls keep focus and scroll without re-rendering director editors', () => {
+    assert.match(js, /function bindWorkbenchControlScrollGuard\(pageHost\)/);
+    assert.match(js, /\[data-gds-tab-panel\] input/);
+    assert.match(js, /\[data-gds-tab-panel\] textarea/);
+    assert.match(js, /\[data-gds-tab-panel\] select/);
+    assert.match(js, /\[data-gds-tab-panel\] button/);
+    assert.match(js, /\[data-gds-tab-panel\] summary/);
     assert.match(js, /data-gds-director-brief/);
     assert.doesNotMatch(js, /editor\.focus\(\{ preventScroll: true \}\)/);
-    assert.match(js, /runtime\.directorEditorActive = true/);
-    assert.match(js, /runtime\.directorScrollLock = \{ token, top, until:/);
+    assert.match(js, /runtime\.workbenchEditorActive = control\.matches\(editorSelector\)/);
+    assert.match(js, /runtime\.workbenchScrollLock = \{ token, top, tab, until:/);
     assert.match(js, /pageHost\.addEventListener\('mousedown', rememberPointerFocus/);
     assert.match(js, /pageHost\.addEventListener\('touchstart', rememberPointerFocus/);
     assert.match(js, /for \(const delay of \[40, 100, 220, 480, 900, duration\]\)/);
@@ -220,7 +222,7 @@ test('director editors keep focus and scroll without being re-rendered', () => {
     assert.match(js, /function refreshDirectorEditorRegion\(node, html, key\)/);
     assert.match(js, /runtime\.directorRenderSignatures\[key\] === signature/);
     assert.match(js, /refreshDirectorEditorRegion\(directorPlan, renderDirectorPlan\(director\), 'plan'\)/);
-    assert.match(js, /bindDirectorEditorScrollGuard\(pageHost\)/);
+    assert.match(js, /bindWorkbenchControlScrollGuard\(pageHost\)/);
 });
 
 test('reply candidates can be copied or inserted without auto-sending', () => {
