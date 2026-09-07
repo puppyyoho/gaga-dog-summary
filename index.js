@@ -22,6 +22,7 @@ import {
     roundRangesForBackfill,
     rangesForSummaryBacklog,
     rangeStillMatches,
+    recoverConsolidationPacket,
     renderRoundCapsule,
     roundCapsuleTokens,
     selectStyleAnchors,
@@ -114,7 +115,7 @@ const INJECTION_ID = `${EXTENSION_NAME}:memory`;
 const DIRECTOR_INJECTION_ID = `${EXTENSION_NAME}:director`;
 const PANEL_LOGO_URL = new URL('./assets/gaga-dog-logo.png', import.meta.url).href;
 const FLOATING_LOGO_URL = new URL('./assets/gaga-dog-floating.png', import.meta.url).href;
-const VERSION = '0.7.1';
+const VERSION = '0.7.2';
 const SETTINGS_VERSION = 11;
 
 const DEFAULT_SETTINGS = {
@@ -1997,17 +1998,27 @@ async function consolidateRollingMemory(manual = true, { allowWhenAutoOff = fals
             customPrompts: settings.prompts,
         });
         let packet;
+        let firstPacket = null;
+        let firstRawText = '';
         try {
             const result = await generateArchiveStage(request, 'archive');
-            packet = assertMemoryPacket(parseModelPacket(result.text));
+            firstRawText = String(result.text || '');
+            firstPacket = parseModelPacket(firstRawText);
+            packet = assertMemoryPacket(firstPacket);
         } catch (error) {
             if (controller.signal.aborted) throw error;
             console.warn(`[${DISPLAY_NAME}] 胶囊归档结构需要修复`, error);
-            const repaired = await generateArchiveStage({
-                ...request,
-                prompt: `${request.prompt}\n\n上一次返回无法解析。请重新输出一个完整、合法的 JSON 对象，只包含 scene、facts、stateUpdates、threads、recap。`,
-            }, 'archive');
-            packet = assertMemoryPacket(parseModelPacket(repaired.text));
+            try {
+                const repaired = await generateArchiveStage({
+                    ...request,
+                    prompt: `${request.prompt}\n\n<上一次未通过校验的返回>\n${firstRawText.slice(0, 24000) || '上一次返回无法解析'}\n</上一次未通过校验的返回>\n\n上一次返回缺少可保存的结构化记忆。请保留其中有效的 recap，并根据每个待归档胶囊补全结构：facts 至少包含一条带 text 的事实；若有状态变化或未结事项，分别写入带 key 的 stateUpdates 和带 text 的 threads。重新输出完整、合法的 JSON 对象，只包含 scene、facts、stateUpdates、threads、recap。`,
+                }, 'archive-repair');
+                packet = recoverConsolidationPacket(parseModelPacket(repaired.text), capsules);
+            } catch (repairError) {
+                if (controller.signal.aborted) throw repairError;
+                if (!firstPacket) throw repairError;
+                packet = recoverConsolidationPacket(firstPacket, capsules);
+            }
         }
         if (!rangeStillMatches(getMessages(ctx), sourceRange)) throw new Error('梳理期间原消息发生了变化，归档未保存');
 
@@ -2079,7 +2090,13 @@ async function consolidateRollingMemory(manual = true, { allowWhenAutoOff = fals
         else {
             const message = `滚动记忆梳理失败：${readableGenerationError(error)}`;
             console.error(`[${DISPLAY_NAME}] ${message}`, error);
-            pauseLayeredAfterError(ctx, message);
+            if (manual) {
+                runtime.lastError = `${message}；原胶囊保持不变，自动记录状态未改变`;
+                runtime.lastResultScope = 'layered';
+                notify('error', runtime.lastError);
+            } else {
+                pauseLayeredAfterError(ctx, message);
+            }
         }
         return null;
     } finally {
@@ -3647,7 +3664,7 @@ function refreshUi() {
         }
         if (layeredStatus) {
             const backfill = chatState.capsuleBackfill;
-            if (runtime.lastError && runtime.layeredPausedByError) layeredStatus.textContent = runtime.lastError;
+            if (runtime.lastError && runtime.lastResultScope === 'layered') layeredStatus.textContent = runtime.lastError;
             else if (backfill?.status === 'failed') layeredStatus.textContent = `历史补建停在第 ${Math.min(backfill.totalRounds, backfill.completedRounds + 1)}/${backfill.totalRounds} 轮，可继续补建`;
             else if (backfill && (backfill.status === 'paused' || (backfill.status === 'running' && !runtime.backfillBusy))) layeredStatus.textContent = `历史补建已暂停 · 已完成 ${backfill.completedRounds}/${backfill.totalRounds} 轮`;
             else if (layeredNeedsInitialSummary(ctx, chatState, settings)) layeredStatus.textContent = '检测到未记录的旧对话，请先点击“补建历史胶囊”';

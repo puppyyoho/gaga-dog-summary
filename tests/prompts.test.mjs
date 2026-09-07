@@ -20,7 +20,7 @@ test('builds a separate fact-bounded literary polishing stage', () => {
         targetWords: 600,
         customPrompts: DEFAULT_PROMPTS,
     });
-    assert.equal(PROMPT_VERSION, 'gaga-summary-v6');
+    assert.equal(PROMPT_VERSION, 'gaga-summary-v7');
     assert.match(request.systemPrompt, /不得新增、删除或改变事件/);
     assert.match(request.prompt, /<前情草稿>/);
     assert.match(request.prompt, /谢怀璧接过了茶/);
@@ -35,6 +35,14 @@ test('capsule prompts embed emotional and relationship changes without a duplica
     const archive = buildCapsuleConsolidationPrompt({ capsules: '本轮胶囊', currentMemory: '长期记忆' });
     assert.match(archive.systemPrompt, /情绪与关系变化必须嵌入对应事件/);
     assert.match(archive.systemPrompt, /不要另写一份重复的情感报告/);
+    assert.match(archive.systemPrompt, /不得只返回 recap/);
+    assert.match(archive.systemPrompt, /facts 至少包含一条带 text 的事实/);
+    const upgradedArchive = buildCapsuleConsolidationPrompt({
+        capsules: '本轮胶囊',
+        customPrompts: { ...DEFAULT_PROMPTS, consolidateSystem: '旧版自定义归档提示' },
+    });
+    assert.match(upgradedArchive.systemPrompt, /旧版自定义归档提示/);
+    assert.match(upgradedArchive.systemPrompt, /不得只返回 recap/);
 });
 
 test('keeps the complete source text in an adaptive fact request', () => {

@@ -19,6 +19,7 @@ import {
     rangeForNewSummary,
     rangesForSummaryBacklog,
     rangeStillMatches,
+    recoverConsolidationPacket,
     roundCapsuleTokens,
     restorePreviousRoundCapsule,
     reviseRoundCapsule,
@@ -50,6 +51,33 @@ test('rejects prose-only and empty memory packets before committing a checkpoint
     assert.throws(() => assertMemoryPacket(parseModelPacket(JSON.stringify({ recap: '只有散文，没有事实结构' }))));
     assert.throws(() => assertMemoryPacket(parseModelPacket(JSON.stringify({ facts: [], stateUpdates: [], threads: [] }))));
     assert.equal(assertMemoryPacket(parseModelPacket(JSON.stringify({ facts: [{ text: '沈砚带伤抵达客栈' }] }))).facts.length, 1);
+});
+
+test('recovers recap-only capsule consolidation without weakening the general validator', () => {
+    const range = makeSourceRange(messages, 0, 1);
+    const capsules = [{
+        id: 'capsule_one',
+        title: '抵达白榆镇',
+        text: '两人进入白榆镇。沈砚带着旧伤，并提醒陆遥远离后院。',
+        importance: 'high',
+        participants: ['沈砚', '陆遥'],
+        sourceRange: range,
+    }];
+    const recapOnly = parseModelPacket(JSON.stringify({
+        scene: {},
+        facts: [],
+        stateUpdates: [],
+        threads: [],
+        recap: '两人抵达白榆镇，旧伤与后院的秘密仍在影响他们。',
+    }));
+
+    assert.throws(() => assertMemoryPacket(recapOnly));
+    const recovered = recoverConsolidationPacket(recapOnly, capsules);
+    assert.equal(recovered.recap, recapOnly.recap);
+    assert.equal(recovered.facts.length, 1);
+    assert.match(recovered.facts[0].text, /沈砚带着旧伤/);
+    assert.deepEqual(recovered.facts[0].sourceRefs, range.refs);
+    assert.throws(() => recoverConsolidationPacket({ scene: {}, facts: [], stateUpdates: [], threads: [], recap: '' }, capsules));
 });
 
 test('merges facts, state and threads while protecting locked memory', () => {

@@ -1,4 +1,6 @@
-export const PROMPT_VERSION = 'gaga-summary-v6';
+export const PROMPT_VERSION = 'gaga-summary-v7';
+
+const CONSOLIDATION_OUTPUT_CONTRACT = `归档结果必须是一个 JSON 对象，且包含 scene、facts、stateUpdates、threads、recap。scene 是对象；facts、stateUpdates、threads 是数组；recap 是字符串。每个待归档胶囊都必须在结构化字段中得到体现。facts 至少包含一条带 text 的事实；若存在状态变化或未结事项，分别写入带 key 的 stateUpdates 和带 text 的 threads。不得只返回 recap，也不得让 scene、facts、stateUpdates、threads 同时为空。`;
 
 export const DEFAULT_PROMPTS = {
     factSystem: `你是“嘎嘎小狗工坊”的事实记忆编辑器。你只负责从故事材料中提取已经发生的内容，不负责续写、扮演角色或评价文笔。
@@ -183,7 +185,9 @@ facts 是新增或被确认的记忆；stateUpdates 是当前状态变化；thre
 
 合并重复表述，保留事件顺序、因果、人物认知边界、约定、物品、秘密、伏笔和未结事项。情绪与关系变化必须嵌入对应事件，呈现触发原因、外在表现、矛盾感受、关系走向和持续余波，不要另写一份重复的情感报告。不得把暗示或推测升级为事实，也不得续写尚未发生的内容。
 
-输出一个 JSON 对象，不要输出 Markdown 或解释。字段必须包含 scene、facts、stateUpdates、threads、recap。recap 只回顾本批胶囊新增的连续剧情，不要复述已有长期记忆。`,
+输出一个 JSON 对象，不要输出 Markdown 或解释。字段必须包含 scene、facts、stateUpdates、threads、recap。scene 是对象；facts、stateUpdates、threads 是数组；recap 是字符串。recap 只回顾本批胶囊新增的连续剧情，不要复述已有长期记忆。
+
+每个待归档胶囊都必须在结构化字段中得到体现。facts 至少包含一条带 text 的事实；若存在状态变化或未结事项，分别写入带 key 的 stateUpdates 和带 text 的 threads。不得只返回 recap，也不得让 scene、facts、stateUpdates、threads 同时为空。`,
 
     consolidateUser: `<已有长期记忆>
 {{currentMemory}}
@@ -255,7 +259,9 @@ export function buildCapsuleMemoryRevisionPrompt({ memoryStructure = '', novelRe
 
 export function buildCapsuleConsolidationPrompt({ capsules, currentMemory = '', currentState = '', openThreads = '', customPrompts = DEFAULT_PROMPTS }) {
     return {
-        systemPrompt: customPrompts.consolidateSystem,
+        // The schema contract is appended independently so users upgrading
+        // from an older saved prompt still receive the current safety rule.
+        systemPrompt: `${customPrompts.consolidateSystem || DEFAULT_PROMPTS.consolidateSystem}\n\n${CONSOLIDATION_OUTPUT_CONTRACT}`,
         prompt: fill(customPrompts.consolidateUser, {
             capsules: String(capsules || ''),
             currentMemory: String(currentMemory || '暂无长期记忆').slice(-24000),

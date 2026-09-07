@@ -239,6 +239,71 @@ export function assertMemoryPacket(packet) {
     return packet;
 }
 
+function splitCapsuleFactText(value, maxLength = 1000) {
+    let remaining = compactText(value, 2400);
+    const parts = [];
+    while (remaining) {
+        if (remaining.length <= maxLength) {
+            parts.push(remaining);
+            break;
+        }
+        const sample = remaining.slice(0, maxLength);
+        const boundaries = ['。', '！', '？', '；', '\n'].map(mark => sample.lastIndexOf(mark));
+        const naturalEnd = Math.max(...boundaries);
+        const cutAt = naturalEnd >= Math.floor(maxLength * 0.55) ? naturalEnd + 1 : maxLength;
+        const part = remaining.slice(0, cutAt).trim();
+        if (part) parts.push(part);
+        remaining = remaining.slice(cutAt).trim();
+    }
+    return parts;
+}
+
+/**
+ * A recap-only archive response is still useful prose, but it is not safe to
+ * commit as the sole long-term memory. Preserve the strict general validator
+ * and recover only capsule consolidation by promoting the already validated
+ * source capsules into deterministic facts. No new story content is invented.
+ */
+export function recoverConsolidationPacket(packetValue, capsuleValues = []) {
+    try {
+        return assertMemoryPacket(packetValue);
+    } catch (validationError) {
+        const recap = compactText(packetValue?.recap || '', 12000);
+        if (!recap) throw validationError;
+
+        const fallbackFacts = [];
+        for (const capsule of Array.isArray(capsuleValues) ? capsuleValues : []) {
+            const title = compactText(capsule?.title || '本轮剧情', 120);
+            const sourceRefs = Array.isArray(capsule?.sourceRange?.refs) ? clone(capsule.sourceRange.refs) : [];
+            const importance = ['critical', 'high', 'medium', 'low'].includes(String(capsule?.importance || '').toLowerCase())
+                ? String(capsule.importance).toLowerCase()
+                : 'medium';
+            for (const [partIndex, part] of splitCapsuleFactText(capsule?.text || '').entries()) {
+                fallbackFacts.push({
+                    id: `capsule_fact_${simpleHash(`${capsule?.id || title}|${partIndex}|${part}`)}`,
+                    text: partIndex === 0 ? `${title}：${part}` : part,
+                    kind: 'capsule-archive',
+                    importance,
+                    certainty: 'confirmed',
+                    truthStatus: 'fact',
+                    status: 'active',
+                    subjects: Array.isArray(capsule?.participants) ? capsule.participants.map(String).slice(0, 20) : [],
+                    sourceRefs,
+                    keywords: Array.isArray(capsule?.keywords) ? capsule.keywords.map(String).slice(0, 40) : extractKeywords(part).slice(0, 12),
+                });
+            }
+        }
+        if (!fallbackFacts.length) throw validationError;
+        return assertMemoryPacket({
+            scene: packetValue?.scene && typeof packetValue.scene === 'object' ? packetValue.scene : {},
+            facts: fallbackFacts,
+            stateUpdates: Array.isArray(packetValue?.stateUpdates) ? packetValue.stateUpdates : [],
+            threads: Array.isArray(packetValue?.threads) ? packetValue.threads : [],
+            recap,
+        });
+    }
+}
+
 function factIdentity(fact, fallbackIndex = 0) {
     const explicit = String(fact?.id || '').trim();
     if (explicit) return explicit;
