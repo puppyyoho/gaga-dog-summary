@@ -206,6 +206,10 @@ test('clicking non-interactive page space cannot reset the internal scroll posit
 
 test('director editors keep focus and scroll without being re-rendered', () => {
     assert.match(js, /function bindDirectorEditorScrollGuard\(pageHost\)/);
+    assert.match(js, /\[data-gds-tab-panel="director"\] input/);
+    assert.match(js, /\[data-gds-tab-panel="director"\] textarea/);
+    assert.match(js, /\[data-gds-tab-panel="director"\] select/);
+    assert.match(js, /data-gds-director-brief/);
     assert.doesNotMatch(js, /editor\.focus\(\{ preventScroll: true \}\)/);
     assert.match(js, /runtime\.directorEditorActive = true/);
     assert.match(js, /runtime\.directorScrollLock = \{ token, top, until:/);

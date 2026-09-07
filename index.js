@@ -108,7 +108,7 @@ const INJECTION_ID = `${EXTENSION_NAME}:memory`;
 const DIRECTOR_INJECTION_ID = `${EXTENSION_NAME}:director`;
 const PANEL_LOGO_URL = new URL('./assets/gaga-dog-logo.png', import.meta.url).href;
 const FLOATING_LOGO_URL = new URL('./assets/gaga-dog-floating.png', import.meta.url).href;
-const VERSION = '0.5.10';
+const VERSION = '0.5.11';
 const SETTINGS_VERSION = 10;
 
 const DEFAULT_SETTINGS = {
@@ -2933,7 +2933,10 @@ function bindBlankAreaScrollGuard(pageHost) {
 function bindDirectorEditorScrollGuard(pageHost) {
     if (!pageHost || pageHost.dataset.gdsDirectorEditorGuard === 'true') return;
     pageHost.dataset.gdsDirectorEditorGuard = 'true';
-    const editorSelector = '[data-gds-director-plan] input,[data-gds-director-plan] textarea,[data-gds-director-branches] input,[data-gds-director-branches] textarea,[data-gds-director-foreshadows] input,[data-gds-director-foreshadows] textarea,[data-gds-director-revision] input,[data-gds-director-revision] textarea,[data-gds-director-revision] select';
+    // Protect every editable control on the director page. Limiting this to the
+    // generated plan regions left the planning brief and the pacing/calendar
+    // fields exposed to SillyTavern/WebView focus scrolling.
+    const editorSelector = '[data-gds-tab-panel="director"] input,[data-gds-tab-panel="director"] textarea,[data-gds-tab-panel="director"] select,[data-gds-tab-panel="director"] [contenteditable="true"]';
     let pointerFocus = null;
 
     const tabName = () => pageHost.closest('.gds-window')?.dataset.gdsTab || '';
