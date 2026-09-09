@@ -99,6 +99,55 @@ export function compactText(value, max = 6000) {
         .slice(0, max);
 }
 
+const AUXILIARY_BLOCK_TAG = /<(status(?:[_-]?(?:bar|block|panel))?|character[_-]?status|role[_-]?status|choices?|options?|branches?|plot[_-]?branches|状态栏|角色状态|人物状态|剧情分支|剧情选项|分支选项)(?:\s[^>]*)?>[\s\S]*?<\/\1\s*>/gi;
+const AUXILIARY_FENCE = /```[ \t]*(?:status(?:[_-]?(?:bar|block|panel))?|character[_-]?status|role[_-]?status|choices?|options?|branches?|plot[_-]?branches|状态栏|角色状态|人物状态|剧情分支|剧情选项|分支选项)[^\n]*\n[\s\S]*?```/gi;
+const AUXILIARY_HTML_CONTAINER = /<(div|section|aside)\b[^>]*(?:class|id)\s*=\s*["'][^"']*(?:status(?:[_-]?(?:bar|block|panel))?|character[_-]?status|role[_-]?status|choices?|options?|branches?|plot[_-]?branches)[^"']*["'][^>]*>[\s\S]*?<\/\1\s*>/gi;
+
+function auxiliarySectionLabel(value) {
+    const label = String(value || '')
+        .replace(/<[^>]*>/g, ' ')
+        .replace(/[\s*_`#>【】\[\]（）()：:｜|]/g, '')
+        .toLowerCase();
+    if (!label || label.length > 80) return false;
+    return /状态栏|角色状态|人物状态|当前状态|状态面板|状态信息|剧情分支|剧情选项|分支选项|行动选项|可选行动|选择分支|选择行动|status(?:bar|block|panel)?|characterstatus|rolestatus|choices?|options?|branches?|plotbranches?/.test(label);
+}
+
+function auxiliarySectionHeader(line) {
+    const value = String(line || '').trim();
+    if (!value) return false;
+    const decorated = /^(?:#{1,6}\s*|>\s*#{0,6}\s*|<!--|<|\*\*|__|【|\[)/.test(value);
+    if (decorated) return auxiliarySectionLabel(value);
+    const plain = value.replace(/[：:]\s*$/, '').trim();
+    return plain.length <= 48 && /^(?:当前)?(?:角色|人物)?状态(?:栏|面板|信息)?(?:（[^）]*）|\([^)]*\))?$|^(?:请选择)?(?:剧情)?(?:分支|选项)|^(?:分支|行动)选项|^可选行动$/i.test(plain);
+}
+
+/**
+ * Extract only narrative and dialogue from a Tavern message. Status panels and
+ * branch menus are presentation aids rather than events that actually
+ * happened, so summary, capsule and style pipelines must not learn from them.
+ */
+export function storyMessageContent(messageOrText, max = 300000) {
+    const source = messageOrText && typeof messageOrText === 'object'
+        ? messageOrText.mes ?? messageOrText.content ?? ''
+        : messageOrText;
+    let text = String(source ?? '');
+    text = text.replace(/<details\b[^>]*>[\s\S]*?<\/details\s*>/gi, block => {
+        const summary = block.match(/<summary\b[^>]*>([\s\S]*?)<\/summary\s*>/i)?.[1] || '';
+        return auxiliarySectionLabel(summary) ? '' : block;
+    });
+    text = text.replace(AUXILIARY_HTML_CONTAINER, '');
+    text = text.replace(AUXILIARY_BLOCK_TAG, '');
+    text = text.replace(AUXILIARY_FENCE, '');
+
+    const lines = text.split(/\r?\n/);
+    const auxiliaryStart = lines.findIndex(auxiliarySectionHeader);
+    if (auxiliaryStart >= 0) lines.splice(auxiliaryStart);
+    return compactText(lines.join('\n'), max)
+        .replace(/(?:\r?\n)?\s*(?:-{3,}|_{3,}|\*{3,})\s*$/g, '')
+        .replace(/\n{3,}/g, '\n\n')
+        .trim();
+}
+
 export function simpleHash(value) {
     const text = String(value ?? '');
     let hash = 2166136261;
@@ -128,7 +177,7 @@ export function summaryMessageIndexes(messages, start = 0, end = Number.POSITIVE
     const safeStart = Math.max(0, Number.isFinite(Number(start)) ? Number(start) : 0);
     const safeEnd = Number.isFinite(Number(end)) ? Number(end) : normalized.length - 1;
     return normalized
-        .filter(item => item.index >= safeStart && item.index <= safeEnd && !item.isSystem && item.content.trim())
+        .filter(item => item.index >= safeStart && item.index <= safeEnd && !item.isSystem && storyMessageContent(messages[item.index]).trim())
         .map(item => item.index);
 }
 
@@ -841,7 +890,7 @@ export function nextRoundRange(messages, stateValue, exclusiveEndValue = null) {
     let sawUser = false;
     for (let index = start; index < exclusiveEnd; index += 1) {
         const item = normalized[index];
-        if (item.isSystem) continue;
+        if (item.isSystem || !storyMessageContent(messages[index])) continue;
         if (item.isUser) {
             sawUser = true;
             continue;
@@ -1114,7 +1163,7 @@ export function rangesForSummaryBacklog(messages, state, options = {}) {
             const index = eligibleIndexes[offset];
             const item = normalized[index];
             const raw = messages[index];
-            const fullContent = compactText(raw?.mes ?? raw?.content ?? '', 300000);
+            const fullContent = storyMessageContent(raw, 300000);
             accumulated += tokenEstimate(`[消息 ${index}｜${item.name}]\n${fullContent}\n\n`);
             batchIndexes.push(index);
             if (accumulated >= targetTokens) break;
@@ -1131,6 +1180,7 @@ export function rangeForNewSummary(messages, state, options = {}) {
 
 export function selectStyleAnchors(messages, max = 3, options = {}) {
     return normalizeMessages(messages)
+        .map(item => ({ ...item, content: storyMessageContent(messages[item.index], 300000) }))
         .filter(item => !item.isUser && (!item.isSystem || options.includeHidden) && item.content.length >= 260)
         .sort((a, b) => b.content.length - a.content.length)
         .slice(0, max)

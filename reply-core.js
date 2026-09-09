@@ -1,4 +1,4 @@
-import { compactText, normalizeChatState } from './memory-core.js';
+import { compactText, normalizeChatState, storyMessageContent } from './memory-core.js';
 
 export const REPLY_SCHEMA_VERSION = 1;
 
@@ -56,7 +56,7 @@ export function buildRecentStoryText(messages, { count = 10, maxChars = 60000 } 
     for (let index = source.length - 1; index >= 0 && rows.length < limit; index -= 1) {
         const message = source[index];
         if (!message || message.is_system || message.extra?.is_system || message.extra?.gagaDogHiddenBy) continue;
-        const content = compactText(message.mes ?? message.content ?? '', 300000);
+        const content = storyMessageContent(message, 300000);
         if (!content) continue;
         const name = String(message.name ?? message.sender ?? (message.is_user ? 'User' : 'Character'));
         rows.unshift(`[消息 ${index}｜${name}]\n${content}`);

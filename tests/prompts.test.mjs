@@ -20,7 +20,7 @@ test('builds a separate fact-bounded literary polishing stage', () => {
         targetWords: 600,
         customPrompts: DEFAULT_PROMPTS,
     });
-    assert.equal(PROMPT_VERSION, 'gaga-summary-v7');
+    assert.equal(PROMPT_VERSION, 'gaga-summary-v8');
     assert.match(request.systemPrompt, /不得新增、删除或改变事件/);
     assert.match(request.prompt, /<前情草稿>/);
     assert.match(request.prompt, /谢怀璧接过了茶/);
@@ -32,6 +32,8 @@ test('capsule prompts embed emotional and relationship changes without a duplica
     const capsule = buildRoundCapsulePrompt({ messages: '她低头避开他的目光。', currentMemory: '两人关系正在升温。' });
     assert.match(capsule.systemPrompt, /情绪变化和人物关系变化自然写进同一段 text/);
     assert.match(capsule.systemPrompt, /只记录本轮新发生/);
+    assert.match(capsule.systemPrompt, /角色状态栏、人物属性面板/);
+    assert.match(capsule.systemPrompt, /剧情分支、候选选项/);
     const archive = buildCapsuleConsolidationPrompt({ capsules: '本轮胶囊', currentMemory: '长期记忆' });
     assert.match(archive.systemPrompt, /情绪与关系变化必须嵌入对应事件/);
     assert.match(archive.systemPrompt, /不要另写一份重复的情感报告/);

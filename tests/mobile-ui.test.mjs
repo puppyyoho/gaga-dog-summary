@@ -396,7 +396,10 @@ test('uses SillyTavern hide and unhide paths for committed ranges', () => {
     assert.match(js, /await executeSlashCommands\(command\)/);
     assert.match(js, /import\('\/scripts\/chats\.js'\)/);
     assert.match(js, /const hidden = await hideRange\(ctx, range, checkpointId\)/);
-    assert.match(js, /const count = await restoreOwnedMessages\(ctx\)/);
+    assert.match(js, /async function restoreAllHiddenMessages\(ctx\)/);
+    assert.match(js, /const count = await restoreAllHiddenMessages\(ctx\)/);
+    assert.match(js, /包括插件和斜杠命令隐藏的楼层/);
+    assert.match(js, />恢复全部隐藏<\/button>/);
 });
 
 test('settings entry uses a standard drawer and cannot become vertical text', () => {

@@ -27,6 +27,7 @@ import {
     summaryMessageIndexes,
     selectRelevantCapsules,
     selectStyleAnchors,
+    storyMessageContent,
     tokenEstimate,
 } from '../memory-core.js';
 
@@ -45,6 +46,31 @@ test('parses JSON and JSONL memory packets', () => {
     const jsonl = parseModelPacket('{"type":"event","text":"进入客栈"}\n{"type":"state","key":"地点","value":"客栈"}');
     assert.equal(jsonl.facts.length, 1);
     assert.equal(jsonl.stateUpdates.length, 1);
+});
+
+test('extracts正文 while removing character status panels and branch menus', () => {
+    const content = [
+        '她把钥匙放到桌上，示意他坐下。',
+        '<details><summary>角色状态栏</summary>好感度：80；地点：客厅</details>',
+        '<section class="character-status-panel">体力：60</section>',
+        '<branches>1. 追问秘密\n2. 转身离开</branches>',
+        '### 剧情分支',
+        'A. 接受邀请',
+        'B. 拒绝邀请',
+    ].join('\n');
+    assert.equal(storyMessageContent(content), '她把钥匙放到桌上，示意他坐下。');
+    assert.equal(storyMessageContent('【状态栏】\n体力：60\n情绪：紧张'), '');
+    assert.equal(storyMessageContent('他看见墙上的旧式状态指示灯，停下了脚步。'), '他看见墙上的旧式状态指示灯，停下了脚步。');
+});
+
+test('summary indexes ignore messages that contain only auxiliary UI content', () => {
+    const source = [
+        { name: 'User', is_user: true, mes: '我推开房门。' },
+        { name: 'Char', mes: '<status_bar>地点：卧室</status_bar>' },
+        { name: 'Char', mes: '他从窗边回过头。\n\n【剧情选项】\n1. 询问来意\n2. 保持沉默' },
+    ];
+    assert.deepEqual(summaryMessageIndexes(source), [0, 2]);
+    assert.equal(storyMessageContent(source[2]), '他从窗边回过头。');
 });
 
 test('rejects prose-only and empty memory packets before committing a checkpoint', () => {

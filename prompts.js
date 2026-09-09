@@ -1,6 +1,7 @@
-export const PROMPT_VERSION = 'gaga-summary-v7';
+export const PROMPT_VERSION = 'gaga-summary-v8';
 
 const CONSOLIDATION_OUTPUT_CONTRACT = `归档结果必须是一个 JSON 对象，且包含 scene、facts、stateUpdates、threads、recap。scene 是对象；facts、stateUpdates、threads 是数组；recap 是字符串。每个待归档胶囊都必须在结构化字段中得到体现。facts 至少包含一条带 text 的事实；若存在状态变化或未结事项，分别写入带 key 的 stateUpdates 和带 text 的 threads。不得只返回 recap，也不得让 scene、facts、stateUpdates、threads 同时为空。`;
+const STORY_SOURCE_CONTRACT = `只整理故事中真实发生的正文叙事与对白。角色状态栏、人物属性面板、数值信息、剧情分支、候选选项、可选行动、作者注释和界面辅助内容都不是已发生剧情，即使残留在聊天材料中也必须完全忽略，不得写入事实、场景、状态、未结事项、前情或文风参考。`;
 
 export const DEFAULT_PROMPTS = {
     factSystem: `你是“嘎嘎小狗工坊”的事实记忆编辑器。你只负责从故事材料中提取已经发生的内容，不负责续写、扮演角色或评价文笔。
@@ -220,12 +221,12 @@ export function buildFactPrompt({ messages, currentState, openThreads, customPro
         currentState: String(currentState || '无').slice(0, 12000),
         openThreads: String(openThreads || '无').slice(0, 8000),
     });
-    return { systemPrompt: customPrompts.factSystem, prompt: body };
+    return { systemPrompt: `${customPrompts.factSystem}\n\n${STORY_SOURCE_CONTRACT}`, prompt: body };
 }
 
 export function buildRoundCapsulePrompt({ messages, currentMemory = '', customPrompts = DEFAULT_PROMPTS }) {
     return {
-        systemPrompt: customPrompts.capsuleSystem,
+        systemPrompt: `${customPrompts.capsuleSystem}\n\n${STORY_SOURCE_CONTRACT}`,
         prompt: fill(customPrompts.capsuleUser, {
             messages: String(messages || ''),
             currentMemory: String(currentMemory || '暂无长期记忆').slice(-16000),
@@ -235,7 +236,7 @@ export function buildRoundCapsulePrompt({ messages, currentMemory = '', customPr
 
 export function buildCapsuleReorganizePrompt({ messages, currentCapsule = '', currentMemory = '', instruction = '', customPrompts = DEFAULT_PROMPTS }) {
     return {
-        systemPrompt: customPrompts.capsuleReorganizeSystem,
+        systemPrompt: `${customPrompts.capsuleReorganizeSystem}\n\n${STORY_SOURCE_CONTRACT}`,
         prompt: fill(customPrompts.capsuleReorganizeUser, {
             messages: String(messages || ''),
             currentCapsule: String(currentCapsule || '').slice(0, 6000),
@@ -261,7 +262,7 @@ export function buildCapsuleConsolidationPrompt({ capsules, currentMemory = '', 
     return {
         // The schema contract is appended independently so users upgrading
         // from an older saved prompt still receive the current safety rule.
-        systemPrompt: `${customPrompts.consolidateSystem || DEFAULT_PROMPTS.consolidateSystem}\n\n${CONSOLIDATION_OUTPUT_CONTRACT}`,
+        systemPrompt: `${customPrompts.consolidateSystem || DEFAULT_PROMPTS.consolidateSystem}\n\n${CONSOLIDATION_OUTPUT_CONTRACT}\n\n${STORY_SOURCE_CONTRACT}`,
         prompt: fill(customPrompts.consolidateUser, {
             capsules: String(capsules || ''),
             currentMemory: String(currentMemory || '暂无长期记忆').slice(-24000),

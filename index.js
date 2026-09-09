@@ -28,6 +28,7 @@ import {
     selectStyleAnchors,
     simpleHash,
     summaryMessageIndexes,
+    storyMessageContent,
     tokenEstimate,
     renderMixedSummary,
     renderStructuredSummary,
@@ -115,7 +116,7 @@ const INJECTION_ID = `${EXTENSION_NAME}:memory`;
 const DIRECTOR_INJECTION_ID = `${EXTENSION_NAME}:director`;
 const PANEL_LOGO_URL = new URL('./assets/gaga-dog-logo.png', import.meta.url).href;
 const FLOATING_LOGO_URL = new URL('./assets/gaga-dog-floating.png', import.meta.url).href;
-const VERSION = '0.7.2';
+const VERSION = '0.7.3';
 const SETTINGS_VERSION = 11;
 
 const DEFAULT_SETTINGS = {
@@ -391,7 +392,7 @@ function formatMessages(messages, start = 0, end = messages.length - 1) {
     return summaryMessageIndexes(messages, start, end).map(index => {
         const message = messages[index];
         const [item] = normalizeMessages([message]);
-        const content = compactText(message?.mes ?? message?.content ?? '', 300000);
+        const content = storyMessageContent(message, 300000);
         return `[消息 ${index}｜${item.name}]\n${content}`;
     }).join('\n\n');
 }
@@ -406,7 +407,7 @@ function formatCapsuleSourceMessages(messages, range) {
         // Messages hidden by this extension remain recoverable story source.
         // Genuine system messages still stay outside the capsule task.
         if (message.is_system && !message.extra?.gagaDogHiddenBy) continue;
-        const content = compactText(message?.mes ?? message?.content ?? '', 300000);
+        const content = storyMessageContent(message, 300000);
         if (!content) continue;
         seen.add(located.index);
         const [item] = normalizeMessages([{ ...message, is_system: false }]);
@@ -428,7 +429,11 @@ function formatThreads(value) {
 }
 
 function recentQuery(messages) {
-    return normalizeMessages(messages).slice(-5).map(item => `${item.name}：${item.content}`).join('\n');
+    return normalizeMessages(messages).slice(-5)
+        .map(item => ({ ...item, content: storyMessageContent(messages[item.index], 300000) }))
+        .filter(item => item.content)
+        .map(item => `${item.name}：${item.content}`)
+        .join('\n');
 }
 
 function locateMessage(messages, ref) {
@@ -581,6 +586,31 @@ async function restoreOwnedMessages(ctx, checkpointIds = null) {
         restored += 1;
     }
     return restored;
+}
+
+async function restoreAllHiddenMessages(ctx) {
+    const messages = getMessages(ctx);
+    const hidden = messages.map((message, index) => ({ message, index }))
+        .filter(({ message }) => Boolean(message?.is_system));
+    if (!hidden.length) return 0;
+
+    const restoredRanges = [];
+    for (const range of contiguousRanges(hidden.map(item => item.index))) {
+        if (await setTavernRangeVisibility(ctx, range.start, range.end, false)) restoredRanges.push(range);
+    }
+    for (const { message, index } of hidden) {
+        if (!restoredRanges.some(range => index >= range.start && index <= range.end) || message.is_system) {
+            message.is_system = false;
+            syncMessageVisibilityDom(index, false);
+        }
+        const extra = message.extra;
+        if (extra && typeof extra === 'object') {
+            delete extra.gagaDogHiddenBy;
+            delete extra.gagaDogHadSystemField;
+            delete extra.gagaDogOriginalSystem;
+        }
+    }
+    return hidden.length;
 }
 
 function snapshotMemory(value) {
@@ -2254,14 +2284,14 @@ function stopSummary() {
 
 async function restoreAll() {
     const ctx = getContext();
-    const count = await restoreOwnedMessages(ctx);
+    const count = await restoreAllHiddenMessages(ctx);
     const chatState = getChatState(ctx);
     chatState.hiddenRanges = [];
     setChatState(chatState, ctx);
     await saveChat(ctx, { includeMessages: true });
     await applyInjection(ctx, chatState, getSettings(ctx));
     refreshUi();
-    notify('success', count ? `已恢复 ${count} 条由插件隐藏的消息。` : '没有需要恢复的插件隐藏消息。');
+    notify('success', count ? `已恢复 ${count} 条隐藏消息，包括插件和斜杠命令隐藏的楼层。` : '没有需要恢复的隐藏消息。');
 }
 
 async function rebuildFromStart() {
@@ -4372,7 +4402,7 @@ function createUi() {
                     <button class="gds-primary" data-gds-continue hidden>继续</button>
                     <button class="gds-danger" data-gds-stop hidden>中断</button>
                     <button data-gds-rebuild>恢复并重建</button>
-                    <button data-gds-restore>恢复隐藏</button>
+                    <button data-gds-restore title="恢复插件或 /hide 命令隐藏的全部楼层">恢复全部隐藏</button>
                 </div>
                 <div class="gds-grid">
                     <label class="gds-field gds-wide gds-stream-field"><span>当前阶段原始返回（事实 → 草稿 → 润色，不代表已保存）</span><textarea rows="6" readonly data-gds-stream-preview placeholder="每个阶段会重新显示；正常批次会自动衔接，只有中断或失败后才需要点击继续"></textarea></label>
