@@ -14,6 +14,7 @@ import {
     mergeMemoryPacket,
     normalizeChatState,
     normalizeMessages,
+    nextBackfillRoundRange,
     nextRoundRange,
     parseCapsuleMemoryRevision,
     parseModelPacket,
@@ -116,7 +117,7 @@ const INJECTION_ID = `${EXTENSION_NAME}:memory`;
 const DIRECTOR_INJECTION_ID = `${EXTENSION_NAME}:director`;
 const PANEL_LOGO_URL = new URL('./assets/gaga-dog-logo.png', import.meta.url).href;
 const FLOATING_LOGO_URL = new URL('./assets/gaga-dog-floating.png', import.meta.url).href;
-const VERSION = '0.7.3';
+const VERSION = '0.7.4';
 const SETTINGS_VERSION = 11;
 
 const DEFAULT_SETTINGS = {
@@ -1828,7 +1829,12 @@ async function runHistoricalBackfill({ resume = false, restart = false } = {}) {
         while (!runtime.backfillStopRequested) {
             state = getChatState(ctx);
             const currentTask = state.capsuleBackfill || task;
-            const range = nextRoundRange(getMessages(ctx), state, Math.max(0, Number(currentTask.goalEnd) + 1));
+            const range = nextBackfillRoundRange(
+                getMessages(ctx),
+                state,
+                Math.max(0, Number(currentTask.goalEnd) + 1),
+                Math.max(0, Number(currentTask.nextStart) || 0),
+            );
             if (!range) {
                 await saveBackfillTask(ctx, {
                     status: 'completed',

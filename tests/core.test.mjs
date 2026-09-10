@@ -379,9 +379,28 @@ test('historical backfill plans every complete old round and respects the recent
     assert.equal(ranges.some(range => range.end >= 5), false);
 });
 
-test('historical backfill resumes after the last saved capsule without repeating it', () => {
-    const state = normalizeChatState({ lastCapsuleIndex: 1 });
+test('historical backfill resumes after actual saved capsules without repeating them', () => {
+    const first = createRoundCapsule({ title: '首轮', text: '首轮已经保存。' }, makeSourceRange(messages, 0, 1), 'saved_first');
+    const state = normalizeChatState({ lastCapsuleIndex: 1, roundCapsules: [first] });
     const ranges = roundRangesForBackfill(messages, state, 6);
+    assert.deepEqual(ranges.map(range => [range.start, range.end]), [[2, 3], [4, 5]]);
+});
+
+test('historical backfill fills restored early messages even when summary cursors point near the end', () => {
+    const state = normalizeChatState({ lastProcessedIndex: 3, lastCapsuleIndex: 3 });
+    const ranges = roundRangesForBackfill(messages, state, 6);
+    assert.deepEqual(ranges.map(range => [range.start, range.end]), [[0, 1], [2, 3], [4, 5]]);
+});
+
+test('historical backfill fills gaps before a later saved capsule', () => {
+    const last = createRoundCapsule({ title: '末轮', text: '末轮已经保存。' }, makeSourceRange(messages, 4, 5), 'saved_last');
+    const state = normalizeChatState({ lastProcessedIndex: 3, lastCapsuleIndex: 5, roundCapsules: [last] });
+    const ranges = roundRangesForBackfill(messages, state, 6);
+    assert.deepEqual(ranges.map(range => [range.start, range.end]), [[0, 1], [2, 3]]);
+});
+
+test('historical backfill can continue from its saved task position', () => {
+    const ranges = roundRangesForBackfill(messages, normalizeChatState(), 6, 2);
     assert.deepEqual(ranges.map(range => [range.start, range.end]), [[2, 3], [4, 5]]);
 });
 

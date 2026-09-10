@@ -900,21 +900,51 @@ export function nextRoundRange(messages, stateValue, exclusiveEndValue = null) {
     return null;
 }
 
-export function roundRangesForBackfill(messages, stateValue, exclusiveEndValue) {
+function completeRoundRanges(messages, exclusiveEndValue, startValue = 0) {
+    const normalized = normalizeMessages(messages);
+    const exclusiveEnd = exclusiveEndValue === null
+        ? normalized.length
+        : Math.max(0, Math.min(normalized.length, Math.round(Number(exclusiveEndValue) || 0)));
+    const safeStart = Math.max(0, Math.min(exclusiveEnd, Math.round(Number(startValue) || 0)));
     const ranges = [];
-    const state = normalizeChatState(stateValue);
-    const cursor = {
-        ...state,
-        lastProcessedIndex: state.lastProcessedIndex,
-        lastCapsuleIndex: state.lastCapsuleIndex,
-    };
-    while (true) {
-        const range = nextRoundRange(messages, cursor, exclusiveEndValue);
-        if (!range) break;
-        ranges.push(range);
-        cursor.lastCapsuleIndex = range.end;
+    let start = safeStart;
+    let sawUser = false;
+    for (let index = safeStart; index < exclusiveEnd; index += 1) {
+        const item = normalized[index];
+        if (item.isSystem || !storyMessageContent(messages[index])) continue;
+        if (item.isUser) {
+            sawUser = true;
+            continue;
+        }
+        if (!sawUser) continue;
+        ranges.push(makeSourceRange(messages, start, index));
+        start = index + 1;
+        sawUser = false;
     }
-    return ranges;
+    return ranges.filter(Boolean);
+}
+
+function rangeIsCovered(candidate, storedRanges) {
+    return storedRanges.some(range => {
+        const start = Number(range?.start);
+        const end = Number(range?.end);
+        return Number.isInteger(start) && Number.isInteger(end)
+            && start <= candidate.start && end >= candidate.end;
+    });
+}
+
+export function roundRangesForBackfill(messages, stateValue, exclusiveEndValue, startValue = 0) {
+    const state = normalizeChatState(stateValue);
+    const storedRanges = [
+        ...state.roundCapsules.map(item => item?.sourceRange),
+        ...state.memoryArchives.map(item => item?.sourceRange),
+    ].filter(Boolean);
+    return completeRoundRanges(messages, exclusiveEndValue, startValue)
+        .filter(range => !rangeIsCovered(range, storedRanges));
+}
+
+export function nextBackfillRoundRange(messages, stateValue, exclusiveEndValue, startValue = 0) {
+    return roundRangesForBackfill(messages, stateValue, exclusiveEndValue, startValue)[0] || null;
 }
 
 export function activeRoundCapsules(stateValue) {
