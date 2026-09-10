@@ -1,4 +1,4 @@
-export const SCHEMA_VERSION = 4;
+export const SCHEMA_VERSION = 5;
 
 const CAPSULE_REVISION_LIMIT = 6;
 
@@ -21,6 +21,7 @@ export const DEFAULT_CHAT_STATE = {
     roundCapsules: [],
     memoryArchives: [],
     lastCapsuleIndex: -1,
+    layeredAutoReady: false,
     capsuleBackfill: null,
     styleAnchors: [],
     hiddenRanges: [],
@@ -54,6 +55,7 @@ export function normalizeChatState(value) {
     result.summaryMode = ['novel', 'structured', 'mixed'].includes(result.summaryMode) ? result.summaryMode : 'mixed';
     result.memoryMode = ['manual', 'layered'].includes(result.memoryMode) ? result.memoryMode : 'manual';
     result.lastCapsuleIndex = Number.isInteger(Number(result.lastCapsuleIndex)) ? Number(result.lastCapsuleIndex) : -1;
+    result.layeredAutoReady = Boolean(result.layeredAutoReady);
     if (!result.capsuleBackfill || typeof result.capsuleBackfill !== 'object' || Array.isArray(result.capsuleBackfill)) {
         result.capsuleBackfill = null;
     } else {

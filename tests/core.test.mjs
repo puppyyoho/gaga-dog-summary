@@ -258,6 +258,26 @@ test('creates one incremental capsule for a completed user and assistant round',
     assert.ok(roundCapsuleTokens(next) > 0);
 });
 
+test('rolling capsules preserve the newest three floors as complete正文', () => {
+    const tenFloors = Array.from({ length: 10 }, (_, index) => ({
+        name: index % 2 ? 'Char' : 'User',
+        is_user: index % 2 === 0,
+        mes: `第 ${index + 1} 楼正文`,
+        send_date: String(index),
+    }));
+    const recentStart = tenFloors.length - 3;
+    const ranges = [];
+    let cursor = normalizeChatState();
+    while (true) {
+        const range = nextRoundRange(tenFloors, cursor, recentStart);
+        if (!range) break;
+        ranges.push(range);
+        cursor = { ...cursor, lastCapsuleIndex: range.end };
+    }
+    assert.deepEqual(ranges.map(range => [range.start, range.end]), [[0, 1], [2, 3], [4, 5]]);
+    assert.equal(ranges.some(range => range.end >= recentStart), false);
+});
+
 test('edits a capsule with bounded version history and restores its previous version', () => {
     const original = createRoundCapsule(
         { title: '旧标题', text: '陆遥拿走军徽。', importance: 'high', participants: ['陆遥'], keywords: ['军徽'] },

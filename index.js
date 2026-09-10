@@ -117,8 +117,8 @@ const INJECTION_ID = `${EXTENSION_NAME}:memory`;
 const DIRECTOR_INJECTION_ID = `${EXTENSION_NAME}:director`;
 const PANEL_LOGO_URL = new URL('./assets/gaga-dog-logo.png', import.meta.url).href;
 const FLOATING_LOGO_URL = new URL('./assets/gaga-dog-floating.png', import.meta.url).href;
-const VERSION = '0.7.4';
-const SETTINGS_VERSION = 11;
+const VERSION = '0.7.5';
+const SETTINGS_VERSION = 12;
 
 const DEFAULT_SETTINGS = {
     workshopEnabled: true,
@@ -132,7 +132,7 @@ const DEFAULT_SETTINGS = {
     layeredAutoEnabled: false,
     autoHide: true,
     collapseHidden: true,
-    keepMessages: 5,
+    keepMessages: 3,
     autoConsolidateCapsules: true,
     capsuleConsolidationTokens: 20000,
     keepRecentCapsules: 8,
@@ -286,6 +286,7 @@ function getSettings(ctx = getContext()) {
     result.showTopBarButton = result.showTopBarButton !== false;
     result.showFloatingButton = result.showFloatingButton !== false;
     result.prompts = { ...DEFAULT_PROMPTS, ...(current?.prompts && typeof current.prompts === 'object' ? current.prompts : {}) };
+    if (previousSettingsVersion < 12 && Number(current?.keepMessages) === 5) result.keepMessages = 3;
     result.summaryMode = ['novel', 'structured', 'mixed'].includes(result.summaryMode) ? result.summaryMode : DEFAULT_SETTINGS.summaryMode;
     result.memoryMode = ['manual', 'layered'].includes(result.memoryMode) ? result.memoryMode : DEFAULT_SETTINGS.memoryMode;
     result.layeredAutoEnabled = typeof current?.layeredAutoEnabled === 'boolean'
@@ -627,6 +628,7 @@ function snapshotMemory(value) {
         roundCapsules: clone(state.roundCapsules),
         memoryArchives: clone(state.memoryArchives),
         lastCapsuleIndex: state.lastCapsuleIndex,
+        layeredAutoReady: state.layeredAutoReady,
         capsuleBackfill: clone(state.capsuleBackfill),
         lastProcessedIndex: state.lastProcessedIndex,
     };
@@ -649,6 +651,7 @@ function restoreSnapshot(state, snapshot) {
     next.roundCapsules = clone(snapshot.roundCapsules || next.roundCapsules || []);
     next.memoryArchives = clone(snapshot.memoryArchives || next.memoryArchives || []);
     next.lastCapsuleIndex = Number(snapshot.lastCapsuleIndex ?? next.lastCapsuleIndex ?? -1);
+    next.layeredAutoReady = Boolean(snapshot.layeredAutoReady ?? next.layeredAutoReady);
     next.capsuleBackfill = clone(snapshot.capsuleBackfill ?? next.capsuleBackfill ?? null);
     next.lastProcessedIndex = Number(snapshot.lastProcessedIndex ?? -1);
     next.lastStableIndex = next.lastProcessedIndex;
@@ -1555,15 +1558,17 @@ async function startLayeredAuto() {
     runtime.lastResultScope = 'layered';
     const state = getChatState(ctx);
     state.memoryMode = 'layered';
+    const needsBackfill = layeredNeedsInitialSummary(ctx, state, settings);
+    if (!needsBackfill) state.layeredAutoReady = true;
     setChatState(state, ctx);
     await applyInjection(ctx, state, settings);
     await saveChat(ctx);
     refreshUi();
     scheduleLayeredMemory(100);
-    if (layeredNeedsInitialSummary(ctx, state, settings)) {
+    if (needsBackfill) {
         notify('info', '自动记录已开启。当前还有未记录的旧对话，请先点击“补建历史胶囊”，完成后会自动接着记录新对话。');
     } else {
-        notify('success', '分层滚动记忆已启动，将在每轮回复完成后记录剧情胶囊。');
+        notify('success', `分层滚动记忆已启动。最近 ${settings.keepMessages} 楼保留完整正文，更早的完整对话轮会生成胶囊。`);
     }
 }
 
@@ -1607,6 +1612,7 @@ function layeredTaskBlocked(ctx) {
 }
 
 function layeredNeedsInitialSummary(ctx, state, settings) {
+    if (state.layeredAutoReady) return false;
     const recentStart = Math.max(0, getMessages(ctx).length - Math.max(1, settings.keepMessages));
     return Boolean(nextRoundRange(getMessages(ctx), state, recentStart));
 }
@@ -1711,7 +1717,8 @@ async function buildNextRoundCapsule(ctx) {
     const settings = getSettings(ctx);
     const state = getChatState(ctx);
     if (!settings.layeredAutoEnabled || settings.memoryMode !== 'layered' || layeredTaskBlocked(ctx) || layeredNeedsInitialSummary(ctx, state, settings)) return null;
-    const range = nextRoundRange(getMessages(ctx), state);
+    const recentStart = Math.max(0, getMessages(ctx).length - Math.max(1, settings.keepMessages));
+    const range = nextRoundRange(getMessages(ctx), state, recentStart);
     if (!range) return null;
     try {
         return await generateRoundCapsuleForRange(ctx, range);
@@ -1784,6 +1791,10 @@ async function runHistoricalBackfill({ resume = false, restart = false } = {}) {
         runtime.lastError = '';
         runtime.lastSuccess = '近期保留范围之前没有尚未记录的完整对话轮';
         runtime.lastResultScope = 'layered';
+        const readyState = getChatState(ctx);
+        readyState.layeredAutoReady = true;
+        setChatState(readyState, ctx);
+        await saveChat(ctx);
         refreshUi();
         notify('info', runtime.lastSuccess);
         return null;
@@ -1836,6 +1847,8 @@ async function runHistoricalBackfill({ resume = false, restart = false } = {}) {
                 Math.max(0, Number(currentTask.nextStart) || 0),
             );
             if (!range) {
+                state.layeredAutoReady = true;
+                setChatState(state, ctx);
                 await saveBackfillTask(ctx, {
                     status: 'completed',
                     completedRounds: Math.max(currentTask.completedRounds || 0, currentTask.totalRounds || 0),
@@ -1930,6 +1943,11 @@ async function processLayeredMemory() {
     if (!settings.workshopEnabled || !settings.layeredAutoEnabled || runtime.layeredPausedByError || settings.memoryMode !== 'layered' || layeredTaskBlocked(ctx)) return;
     const state = getChatState(ctx);
     if (layeredNeedsInitialSummary(ctx, state, settings)) return;
+    if (!state.layeredAutoReady) {
+        state.layeredAutoReady = true;
+        setChatState(state, ctx);
+        await saveChat(ctx);
+    }
     const capsule = await buildNextRoundCapsule(ctx);
     if (capsule) {
         scheduleLayeredMemory(500);
@@ -3705,7 +3723,7 @@ function refreshUi() {
             else if (backfill && (backfill.status === 'paused' || (backfill.status === 'running' && !runtime.backfillBusy))) layeredStatus.textContent = `历史补建已暂停 · 已完成 ${backfill.completedRounds}/${backfill.totalRounds} 轮`;
             else if (layeredNeedsInitialSummary(ctx, chatState, settings)) layeredStatus.textContent = '检测到未记录的旧对话，请先点击“补建历史胶囊”';
             else if (settings.layeredAutoEnabled && runtime.lastSuccess && runtime.lastResultScope === 'layered') layeredStatus.textContent = `${runtime.lastSuccess}；自动记录仍在运行`;
-            else if (settings.layeredAutoEnabled) layeredStatus.textContent = '自动记录运行中，将在每轮回复完成后生成一个剧情胶囊';
+            else if (settings.layeredAutoEnabled) layeredStatus.textContent = `自动记录运行中，最近 ${settings.keepMessages} 楼保留完整正文，较早的完整对话轮会生成胶囊`;
             else if (runtime.lastSuccess && runtime.lastResultScope === 'layered') layeredStatus.textContent = runtime.lastSuccess;
             else if (chatState.roundCapsules.length || chatState.memoryArchives.length) layeredStatus.textContent = '自动记录已停止，现有胶囊和归档仍会继续注入';
             else layeredStatus.textContent = '分层滚动记忆尚未启动';
@@ -4394,7 +4412,7 @@ function createUi() {
                     <div class="gds-home-intro"><h3>选择要使用的功能</h3></div>
                     <div class="gds-home-grid">
                         <button class="gds-home-card" data-gds-tab="memory-full"><strong>完整剧情梳理</strong><span>一次梳理全部旧正文，生成经过润色的长期前情</span></button>
-                        <button class="gds-home-card" data-gds-tab="memory-layered"><strong>分层滚动记忆</strong><span>每轮生成剧情胶囊，达到阈值后自动归档整理</span></button>
+                        <button class="gds-home-card" data-gds-tab="memory-layered"><strong>分层滚动记忆</strong><span>保留近期完整正文，较早对话逐轮生成胶囊并自动归档</span></button>
                         <button class="gds-home-card" data-gds-tab="director"><strong>情节导演</strong><span>长线规划、分支、伏笔与故事日历</span></button>
                         <button class="gds-home-card" data-gds-tab="reply"><strong>代写回复</strong><span>生成多个用户回复候选并放入编辑栏</span></button>
                         <button class="gds-home-card" data-gds-tab="connections"><strong>模型连接</strong><span>分别配置三个功能使用的酒馆连接或独立 API</span></button>
@@ -4421,7 +4439,7 @@ function createUi() {
                         <label class="gds-toggle-row"><input type="checkbox" data-gds-hide><span>总结成功后自动隐藏旧正文</span></label>
                         <label class="gds-toggle-row"><input type="checkbox" data-gds-collapse><span>在界面折叠已隐藏范围</span></label>
                         <label class="gds-toggle-row"><input type="checkbox" data-gds-stream><span>流式生成与实时显示</span></label>
-                        <label>完整保留近期消息 <input type="number" min="1" step="1" data-gds-keep></label>
+                        <label>完整保留近期楼层 <input type="number" min="1" step="1" data-gds-keep></label>
                     </div>
                     <p class="gds-help">点击一次即可处理近期消息以前的全部旧正文。近期消息只按楼层完整保留，不受 Token 限制。</p>
                 </details>
@@ -4466,13 +4484,13 @@ function createUi() {
                         <label class="gds-toggle-row"><input type="checkbox" data-gds-hide><span>保存成功后自动隐藏旧正文</span></label>
                         <label class="gds-toggle-row"><input type="checkbox" data-gds-collapse><span>在界面折叠已隐藏范围</span></label>
                         <label class="gds-toggle-row"><input type="checkbox" data-gds-stream><span>流式生成与实时显示</span></label>
-                        <label>完整保留近期消息 <input type="number" min="1" step="1" data-gds-keep></label>
+                        <label>完整保留近期楼层 <input type="number" min="1" step="1" data-gds-keep></label>
                         <label>胶囊整理阈值 Token <input type="number" min="2000" step="1000" data-gds-capsule-threshold></label>
                         <label>整理时保留最近胶囊 <input type="number" min="0" step="1" data-gds-capsule-keep></label>
                         <label><span class="gds-injection-copy">记忆注入预算 Token（0＝自动）<small data-gds-injection-budget></small></span><input type="number" min="0" step="100" data-gds-injection></label>
                         <label>前情目标字数 <input type="number" min="80" step="20" data-gds-words></label>
                     </div>
-                    <p class="gds-help">刚开始使用时，可先补建近期保留范围之前的历史胶囊。补建会逐轮连续完成并保存断点。自动记录出错后会立即暂停，不会自行反复重试；历史补建同样会停在失败轮次。自动记录只负责补建完成后的新对话。</p>
+                    <p class="gds-help">最近设置数量的楼层始终保留完整正文，不生成胶囊；只有移出这一保留范围且已形成完整对话轮的正文才会生成胶囊。刚开始使用时，可先补建更早的历史胶囊。补建会逐轮连续完成并保存断点。自动记录出错后会立即暂停，不会自行反复重试；历史补建出错后同样会停在失败轮次。</p>
                 </details>
                 <details class="gds-details" open><summary>逐轮胶囊与归档记录</summary><div data-gds-capsules></div></details>
             </section>

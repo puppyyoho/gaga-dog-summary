@@ -282,7 +282,9 @@ test('uses independent full-summary and layered-memory workflows without the old
     assert.match(js, /FALLBACK_BATCH_TOKENS/);
     assert.doesNotMatch(js, /自动总结触发约 Token/);
     assert.match(js, /memoryMode:\s*'manual'/);
-    assert.match(js, /keepMessages:\s*5/);
+    assert.match(js, /keepMessages:\s*3/);
+    assert.match(js, /const range = nextRoundRange\(getMessages\(ctx\), state, recentStart\)/);
+    assert.match(js, /最近 \$\{settings\.keepMessages\} 楼保留完整正文/);
     assert.match(js, /capsuleConsolidationTokens:\s*20000/);
     assert.match(js, /layeredAutoEnabled:\s*false/);
     assert.match(js, /data-gds-layered-start/);
